@@ -621,6 +621,26 @@ class SaklasSession:
         self._update_local_pack_files(local_folder)
         return canonical, profile
 
+    def clone_from_corpus(
+        self,
+        path,
+        name: str,
+        *,
+        n_pairs: int = _N_PAIRS,
+        seed: int | None = None,
+        force: bool = False,
+    ) -> tuple[str, dict[int, torch.Tensor]]:
+        """Extract a persona-cloning steering vector from a corpus file.
+
+        Thin wrapper around saklas.cloning.clone_from_corpus; see that
+        module for the full pipeline. Returns `(canonical_name, profile)`
+        matching extract()'s return shape.
+        """
+        from saklas.cloning import clone_from_corpus as _clone
+        return _clone(
+            self, path, name, n_pairs=n_pairs, seed=seed, force=force,
+        )
+
     def load_profile(self, path: str) -> dict[int, torch.Tensor]:
         profile, _meta = _load_profile(path)
         return self._promote_profile(profile)
