@@ -10,6 +10,8 @@
 
 You also get a *trait monitor*: 21 pre-built probes that quietly score every response on affect, epistemic stance, register, alignment, and social/cultural dimensions, drawing live sparklines as the model talks.
 
+And — new in 1.4 — you can **clone a persona from a text sample**. Point `saklas clone` at a file of utterances (one per line) and it extracts a steering vector for that voice, no contrastive pair authoring required. `saklas clone transcripts.txt -N hunter` and `/steer hunter 0.5` is the whole workflow.
+
 Three ways to use it:
 
 - **`saklas <model>`** — a terminal UI with live alpha knobs, probe readings, and A/B comparison
@@ -175,6 +177,7 @@ Temperature, top-p, max tokens, and the system prompt are set interactively — 
 | `/steer "concept" - "baseline" [alpha]` | Explicit bipolar (custom poles) |
 | `/probe "concept"` | Add a monitoring probe |
 | `/probe "concept" - "baseline"` | Contrastive probe |
+| `/extract "concept"` | Extract to disk without wiring as steer or probe |
 | `/clear` | Clear conversation history |
 | `/rewind` | Undo last exchange |
 | `/sys <prompt>` | Set system prompt |
@@ -239,6 +242,14 @@ name, profile = session.extract([("pos", "neg"), ...])      # raw pairs
 name, profile = session.extract(DataSource.csv("pairs.csv"))
 session.save_profile(profile, "out.safetensors")
 profile = session.load_profile("out.safetensors")
+
+# Persona cloning — monopolar vector from a corpus of one voice.
+# Reads "transcripts.txt" (one utterance per line), samples n_pairs lines,
+# asks the model to neutralize each (batched), feeds persona↔neutral pairs
+# into the same contrastive-PCA pipeline. Caches under local/<name>/.
+name, profile = session.clone_from_corpus(
+    "transcripts.txt", "hunter", n_pairs=45, seed=None
+)
 
 # Registry
 session.steer("name", profile)
@@ -413,6 +424,8 @@ saklas list [selector] [-i] [-j] [-v]             # includes HF hub by default
 saklas merge <name> <components> [-m] [-f] [-s]   # saklas merge bard default/angry.calm:0.3,user/arch:0.4
 saklas push <selector> [-a OWNER/NAME] [-pm MODEL] [-snt] [-d] [-f]
 saklas export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
+saklas clone <corpus-file> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
+saklas extract <concept> | <pos> <neg> [-m MODEL] [-f]
 ```
 
 **Selectors** (shared grammar): `<name>`, `<ns>/<name>`, `tag:<tag>`, `namespace:<ns>`, `default`, `all`. Bare names resolve cross-namespace and error on ambiguity.
@@ -422,6 +435,10 @@ saklas export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
 **`push`** publishes a concept folder as a HuggingFace model repo. Default coord is `<whoami>/<pack_name>`; `--as` overrides. YAML frontmatter auto-fills `library_name: saklas`, the merged tag set, a `base_model:` list derived from sidecar filenames, and `base_model_relation: adapter`. `.gitattributes` pins `*.safetensors` to LFS. `--tag-version` creates a `v<pack.version>` tag so downstream installs can pin reproducibly.
 
 **`export gguf`** writes the pack's baked tensors to llama.cpp's control-vector GGUF format (`pip install saklas[gguf]`). Because saklas bakes per-layer shares into the tensor magnitudes, a uniform `--control-vector-scaled` scalar on the llama.cpp side reproduces saklas's layer weighting with no per-layer metadata — repeng-compatible as well. Bundled concepts refuse in-place export (their folder gets restored on `refresh`) — use `-o` to write outside the pack.
+
+**`clone`** extracts a steering vector from a text corpus of a single voice — one utterance per line, no contrastive pair authoring needed. The loaded model rewrites sampled lines in a neutral voice (batched 5 at a time), pairs each persona line with its neutralized twin, and feeds the result to the standard contrastive-PCA pipeline. Output is a monopolar vector saved under `local/<name>/`, cached on `sha256(corpus) + n_pairs + batch_size + seed`. Short corpora (below ~10 usable lines after a length filter) are rejected rather than extracted badly. The source corpus is *not* copied into the pack; only the model-generated pairs and the resulting tensor, so `saklas push` of a cloned pack publishes derived artifacts, never the original text.
+
+**`extract`** is the CLI verb for the extraction path that was previously only reachable through `/steer`, `/probe`, or YAML-config auto-install. `saklas extract angry.sad` (or `saklas extract angry sad`) runs the standard pipeline for a named concept and saves the tensor to disk. On cache hit it says so and exits; `-f` re-extracts.
 
 All of the above is also available programmatically via `saklas.cache_ops`.
 
