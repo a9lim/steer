@@ -180,8 +180,20 @@ def test_parse_numbered_out_of_order():
     assert _parse_numbered("2. foo\n1. bar", 2) is None
 
 
-def test_parse_numbered_empty_rewrite():
-    assert _parse_numbered("1. foo\n2.   \n3. baz", 3) is None
+def test_parse_numbered_preserves_empty_rewrite():
+    # Empty rewrites are preserved here — pair-assembly drops them
+    # individually so the rest of the batch still contributes.
+    out = _parse_numbered("1. foo\n2.   \n3. baz", 3)
+    assert out == ["foo", "", "baz"]
+
+
+@pytest.mark.skip(
+    reason="Pair-assembly-level filter requires a full session mock "
+    "(tokenizer + model + steering manager) that's impractical on "
+    "CPU; covered by GPU-gated end-to-end test in test_session.py."
+)
+def test_clone_drops_empty_rewrite_pair_at_assembly():
+    pass
 
 
 def test_parse_numbered_accepts_paren():

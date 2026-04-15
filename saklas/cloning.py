@@ -12,7 +12,6 @@ extraction path is covered by a GPU-gated end-to-end test.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import pathlib
@@ -22,7 +21,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from saklas.generation import build_chat_input
+from saklas.generation import (
+    GenerationConfig,
+    GenerationState,
+    build_chat_input,
+    generate_steered,
+)
 from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata, hash_file
 from saklas.paths import concept_dir, safe_model_id
 from saklas.vectors import extract_contrastive, load_profile as _load_profile, save_profile as _save_profile
@@ -37,7 +41,7 @@ _MIN_WORDS = 6
 _MIN_CORPUS_LINES = 10
 _TOKENS_PER_REWRITE = 50
 
-_NUMBERED_RE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
+_NUMBERED_RE = re.compile(r"^\s*(\d+)[.)]\s*(.*?)\s*$")
 
 
 class CorpusTooShortError(ValueError):
@@ -114,10 +118,12 @@ def _parse_numbered(raw: str, expected: int) -> list[str] | None:
     """Parse a numbered-list response. Returns None on any format failure.
 
     Tolerates leading preamble and trailing notes. Requires exactly
-    `expected` numbered lines, numbered 1..expected in strict order,
-    each with a non-empty rewrite.
+    `expected` numbered lines, numbered 1..expected in strict order.
+    Empty rewrites are tolerated here and preserved in the returned
+    list — the pair-assembly loop drops empty/whitespace-only rewrites
+    individually so the rest of the batch still contributes.
     """
-    rewrites: list[str] = []
+    rewrites: list[tuple[int, str]] = []
     for line in raw.splitlines():
         m = _NUMBERED_RE.match(line)
         if not m:
@@ -127,10 +133,8 @@ def _parse_numbered(raw: str, expected: int) -> list[str] | None:
         rewrites.append((idx, text))
     if len(rewrites) != expected:
         return None
-    for pos, (idx, text) in enumerate(rewrites, start=1):
+    for pos, (idx, _text) in enumerate(rewrites, start=1):
         if idx != pos:
-            return None
-        if not text:
             return None
     return [text for _, text in rewrites]
 
@@ -156,20 +160,18 @@ def _fit_check(
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def _hash_file_bytes(path: pathlib.Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _neutralize_batch(
     session: "SaklasSession",
     batch: list[str],
     seed: int | None,
 ) -> list[str] | None:
-    """Run the neutralize prompt through the raw HF model, parse result."""
+    """Run the neutralize prompt through `generate_steered`, parse result.
+
+    Called after `SteeringManager.clear_all()`, so there are no active
+    steering hooks — `generate_steered` behaves identically to a plain
+    forward generate, while matching the spec's reuse of the canonical
+    sampler path.
+    """
     prompt = _build_neutralize_prompt(batch)
     system_msg = (
         "You rewrite text in plain neutral prose. You follow format "
@@ -183,22 +185,18 @@ def _neutralize_batch(
         session._tokenizer, messages, system_prompt=None,
     ).to(session._device)
 
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    pad_id = session._tokenizer.pad_token_id or session._tokenizer.eos_token_id
     max_new = len(batch) * _TOKENS_PER_REWRITE + 32
-    with torch.inference_mode():
-        out = session._model.generate(
-            input_ids,
-            max_new_tokens=max_new,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
-            pad_token_id=pad_id,
-        )
-    new_ids = out[0][input_ids.shape[-1]:]
-    text = session._tokenizer.decode(new_ids, skip_special_tokens=True)
+    cfg = GenerationConfig(
+        max_new_tokens=max_new,
+        temperature=0.7,
+        top_p=0.9,
+    )
+    state = GenerationState()
+    generated_ids = generate_steered(
+        session._model, session._tokenizer, input_ids,
+        cfg, state, thinking=False, seed=seed,
+    )
+    text = session._tokenizer.decode(generated_ids, skip_special_tokens=True)
     return _parse_numbered(text, len(batch))
 
 
@@ -248,7 +246,7 @@ def clone_from_corpus(
             files={},
         ).write(folder)
 
-    corpus_sha = _hash_file_bytes(path)
+    corpus_sha = hash_file(path)
     cache_path = folder / f"{safe_model_id(session.model_id)}.safetensors"
 
     # Cache hit check.
@@ -326,6 +324,11 @@ def clone_from_corpus(
                 _log.warning("clone: batch %d dropped after retry", i)
                 continue
             for persona_line, rewrite in zip(batch, rewrites):
+                # Drop degenerate (empty / whitespace-only) rewrites at
+                # the pair-assembly level — the rest of the batch still
+                # contributes.
+                if not persona_line.strip() or not rewrite.strip():
+                    continue
                 pairs.append((persona_line, rewrite))
     finally:
         # Restore prior vector registrations.
@@ -355,21 +358,19 @@ def clone_from_corpus(
         "method": "contrastive_pca_cloned",
         "statements_sha256": hash_file(stmts_path),
     })
+    profile = session._promote_profile(profile)
 
-    # Update pack.json: refresh file hashes, then stamp clone metadata.
+    # Stamp clone-specific descriptive metadata, then let the shared
+    # session helper refresh `pack.json.files` with fresh hashes.
     try:
         meta = PackMetadata.load(folder)
-        new_files: dict[str, str] = {}
-        for entry in sorted(folder.iterdir()):
-            if entry.is_file() and entry.name != "pack.json":
-                new_files[entry.name] = hash_file(entry)
-        meta.files = new_files
         meta.tags = sorted(set((meta.tags or []) + ["cloned"]))
         meta.description = f"Cloned from {path.name}"
         meta.source = "local"
         meta.write(folder)
     except PackFormatError:
         pass
+    session._update_local_pack_files(folder)
 
     # Stamp cloning-specific metadata directly (PackMetadata may not
     # carry arbitrary fields on write).
