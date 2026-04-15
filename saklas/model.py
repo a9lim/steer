@@ -104,6 +104,14 @@ _LAYER_ACCESSORS = {
 
 _SUPPORTED_TYPES = sorted(_LAYER_ACCESSORS)
 
+# Architectures with end-to-end testing (smoke + session). Everything else in
+# _LAYER_ACCESSORS is wired up optimistically — it may work, but has not been
+# exercised. See CLAUDE.md "Architecture" section.
+_TESTED_ARCHS: frozenset[str] = frozenset({
+    "qwen2", "qwen3", "gemma2", "gemma3", "mistral3", "gpt_oss", "llama", "glm",
+})
+_warned: set[str] = set()
+
 
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2,
                torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
@@ -363,6 +371,14 @@ def get_layers(model) -> nn.ModuleList:
         raise ValueError(
             f"Unsupported model_type {model_type!r}. "
             f"Supported architectures: {', '.join(_SUPPORTED_TYPES)}"
+        )
+    if model_type not in _TESTED_ARCHS and model_type not in _warned:
+        _warned.add(model_type)
+        warnings.warn(
+            f"architecture {model_type!r} is wired up but untested — "
+            "report issues at https://github.com/a9lim/saklas",
+            UserWarning,
+            stacklevel=2,
         )
     return accessor(model)
 

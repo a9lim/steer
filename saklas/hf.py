@@ -12,7 +12,14 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata, Sidecar, hash_file, verify_integrity
+from saklas.packs import (
+    NAME_REGEX,
+    PackFormatError,
+    PackMetadata,
+    Sidecar,
+    synthesize_pack_metadata,
+    verify_integrity,
+)
 
 
 class HFError(RuntimeError):
@@ -66,7 +73,39 @@ def _download(
         return _hf_snapshot_download(**kwargs)
     except Exception as e:
         label = f"{coord}@{revision}" if revision else coord
+        # If the repo exists as a dataset (or any non-model) repo, the model-hub
+        # download will fail with a generic RepositoryNotFoundError. Probe for
+        # that mistake and return a targeted message; otherwise fall through.
+        try:
+            from huggingface_hub.utils import RepositoryNotFoundError
+        except Exception:
+            RepositoryNotFoundError = tuple()  # type: ignore[assignment]
+        if isinstance(e, RepositoryNotFoundError):
+            if _repo_exists_as_dataset(coord, revision):
+                raise HFError(
+                    f"{label}: HF repo is not a model repo. saklas packs must be "
+                    f"published as model repos (see `saklas push`). If you uploaded "
+                    f"to a dataset repo, recreate it with repo_type='model'."
+                ) from e
         raise HFError(f"{label}: not found ({e})") from e
+
+
+def _repo_exists_as_dataset(coord: str, revision: Optional[str]) -> bool:
+    """Return True iff ``coord`` exists on HF as a dataset repo.
+
+    Used only to upgrade the error message when a model-repo download fails,
+    so a best-effort no — if the probe itself fails, the caller just uses the
+    generic "not found" message.
+    """
+    try:
+        api = _hf_api()
+        kwargs: dict = {"repo_id": coord, "repo_type": "dataset"}
+        if revision is not None:
+            kwargs["revision"] = revision
+        api.repo_info(**kwargs)
+        return True
+    except Exception:
+        return False
 
 
 def pull_pack(
@@ -229,21 +268,14 @@ def _install_synthesized_pack(
                 "saklas_version": _saklas_version,
             }, indent=2))
 
-    files_map: dict[str, str] = {}
-    for entry in sorted(target_folder.iterdir()):
-        if entry.is_file() and entry.name != "pack.json":
-            files_map[entry.name] = hash_file(entry)
-
     name = _synthesize_pack_name(coord)
-    meta = PackMetadata(
+    meta = synthesize_pack_metadata(
         name=name,
+        source=source,
+        pack_dir=target_folder,
         description=f"Imported from {coord} (no saklas manifest)",
         version="0.0.0",
         license="unknown",
-        tags=[],
-        recommended_alpha=0.5,
-        source=source,
-        files=files_map,
     )
     meta.write(target_folder)
 

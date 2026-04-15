@@ -504,17 +504,18 @@ def _warmup_session(session) -> None:
     before uvicorn starts accepting traffic.
     """
     import time as _time
+    from dataclasses import replace as _replace
     print("Warming up generation kernels...", flush=True)
-    orig_max = session.config.max_new_tokens
+    orig = session.config
     try:
-        session.config.max_new_tokens = 1
+        session.config = _replace(orig, max_new_tokens=1)
         start = _time.monotonic()
         session.generate("Hi", stateless=True)
         print(f"  warmed in {_time.monotonic() - start:.1f}s")
     except Exception as e:
         print(f"  warm-up skipped: {e}")
     finally:
-        session.config.max_new_tokens = orig_max
+        session.config = orig
 
 
 def _run_install(args: argparse.Namespace) -> None:

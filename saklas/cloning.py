@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from saklas.datasource import DataSource
 from saklas.generation import (
     GenerationConfig,
     GenerationState,
@@ -29,7 +30,7 @@ from saklas.generation import (
 )
 from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata, hash_file
 from saklas.paths import concept_dir, safe_model_id
-from saklas.vectors import extract_contrastive, load_profile as _load_profile, save_profile as _save_profile
+from saklas.vectors import load_profile as _load_profile
 
 if TYPE_CHECKING:
     from saklas.session import SaklasSession
@@ -204,6 +205,7 @@ def clone_from_corpus(
     *,
     n_pairs: int = 90,
     seed: int | None = None,
+    batch_size: int = _BATCH_SIZE,
     force: bool = False,
 ) -> tuple[str, dict[int, torch.Tensor]]:
     """Extract a monopolar steering vector from a persona corpus file.
@@ -249,8 +251,8 @@ def clone_from_corpus(
             seed_ok = True if seed is None else cached_seed == seed
             if (
                 cached_sha == corpus_sha
-                and cached_n is not None
-                and cached_bs == _BATCH_SIZE
+                and cached_n == n_pairs
+                and cached_bs == batch_size
                 and seed_ok
             ):
                 profile, _m = _load_profile(str(cache_path))
@@ -294,7 +296,7 @@ def clone_from_corpus(
     rng = random.Random(effective_seed)
 
     sample = _sample_lines(lines, n_pairs, rng)
-    batches = _chunk(sample, _BATCH_SIZE)
+    batches = _chunk(sample, batch_size)
 
     # Fit check: every batch, not just the one with the most lines — a
     # short batch of long lines can still overflow. Context length via
@@ -360,30 +362,26 @@ def clone_from_corpus(
     stmt_objs = [{"positive": p, "negative": n} for p, n in pairs]
     stmts_path.write_text(json.dumps(stmt_objs, indent=2))
 
-    # Run the same contrastive PCA path as session.extract().
-    profile = extract_contrastive(
-        session._model, session._tokenizer, stmt_objs, layers=session._layers,
-    )
-    _save_profile(profile, str(cache_path), {
-        "method": "contrastive_pca_cloned",
-        "statements_sha256": hash_file(stmts_path),
-    })
-    profile = session._promote_profile(profile)
-
-    # Let the shared session helper refresh `pack.json.files` with
-    # fresh hashes of everything now on disk (tensor + sidecar +
-    # statements.json). This writes pack.json once.
-    session._update_local_pack_files(folder)
+    # Delegate the contrastive PCA + save + local pack refresh to the
+    # shared session.extract() path via a DataSource. Clear any stale
+    # safetensors first so extract() doesn't short-circuit on a cache
+    # miss we already decided to bypass.
+    if cache_path.exists():
+        cache_path.unlink()
+    ds = DataSource(pairs=pairs, name=canonical)
+    _canonical, profile = session.extract(ds)
 
     # Single final pack.json overwrite: merge descriptive + clone
-    # metadata on top of whatever _update_local_pack_files produced.
+    # metadata on top of whatever session.extract() / _update_local_pack_files
+    # produced, then refresh the files hash map one more time so the
+    # manifest covers the statements.json we just wrote.
     raw_pack = json.loads((folder / "pack.json").read_text())
     raw_pack["description"] = f"Cloned from {path.name}"
     raw_pack["source"] = "local"
     raw_pack["tags"] = sorted(set((raw_pack.get("tags") or []) + ["cloned"]))
     raw_pack["corpus_sha256"] = corpus_sha
     raw_pack["n_pairs"] = n_pairs
-    raw_pack["batch_size"] = _BATCH_SIZE
+    raw_pack["batch_size"] = batch_size
     raw_pack["seed"] = effective_seed
     (folder / "pack.json").write_text(json.dumps(raw_pack, indent=2))
 

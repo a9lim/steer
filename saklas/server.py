@@ -17,6 +17,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
+from saklas._server_runner import (
+    acquire_lock_with_timeout,
+    run_blocking_generate,
+)
 from saklas.probes_bootstrap import load_defaults
 from saklas.session import ConcurrentGenerationError, SaklasSession
 
@@ -277,24 +281,43 @@ def _render_logprobs_completions(result, session: SaklasSession) -> dict | None:
 
 @contextmanager
 def _gen_config_override(session: SaklasSession, temperature, top_p, max_tokens, top_k=None):
-    """Temporarily override generation config."""
-    orig = (
-        session.config.temperature, session.config.top_p,
-        session.config.max_new_tokens, session.config.top_k,
-    )
+    """Temporarily rebind session.config to a replaced copy.
+
+    ``GenerationConfig`` is frozen so we can't mutate fields in place —
+    instead we rebind the attribute and restore the original object on
+    exit.  An in-flight generation holding a local reference to the old
+    frozen config is immune to the rebind.
+    """
+    from dataclasses import is_dataclass, replace as _replace
+    orig = session.config
+    overrides: dict = {}
+    if temperature is not None:
+        overrides["temperature"] = temperature
+    if top_p is not None:
+        overrides["top_p"] = top_p
+    if max_tokens is not None:
+        overrides["max_new_tokens"] = max_tokens
+    if top_k is not None:
+        overrides["top_k"] = top_k
+    # Snapshot original per-field values for non-dataclass stand-ins
+    # (MagicMock in tests) so we can roll back mutations.
+    orig_fields: dict | None = None
+    if overrides and not is_dataclass(orig):
+        orig_fields = {k: getattr(orig, k, None) for k in overrides}
     try:
-        if temperature is not None:
-            session.config.temperature = temperature
-        if top_p is not None:
-            session.config.top_p = top_p
-        if max_tokens is not None:
-            session.config.max_new_tokens = max_tokens
-        if top_k is not None:
-            session.config.top_k = top_k
+        if overrides:
+            if is_dataclass(orig):
+                session.config = _replace(orig, **overrides)
+            else:
+                for k, v in overrides.items():
+                    setattr(session.config, k, v)
         yield
     finally:
-        (session.config.temperature, session.config.top_p,
-         session.config.max_new_tokens, session.config.top_k) = orig
+        if is_dataclass(orig):
+            session.config = orig
+        elif orig_fields is not None:
+            for k, v in orig_fields.items():
+                setattr(session.config, k, v)
 
 
 def _resolve_alphas(
@@ -320,15 +343,12 @@ async def _stream_generation(
     stream lifetime (streams inherit queue semantics rather than 409).
     """
     created_ts = int(time.time())
-    try:
-        async with asyncio.timeout(300):
-            await app.state.gen_lock.acquire()
-    except (TimeoutError, asyncio.TimeoutError):
-        err = {"error": {"message": "Server busy", "type": "server_error", "code": 503}}
-        yield f"data: {json.dumps(err)}\n\n"
-        return
+    async with acquire_lock_with_timeout(app) as acquired:
+        if not acquired:
+            err = {"error": {"message": "Server busy", "type": "server_error", "code": 503}}
+            yield f"data: {json.dumps(err)}\n\n"
+            return
 
-    try:
         with _gen_config_override(session, temperature, top_p, max_tokens):
             if role_delta:
                 chunk = {
@@ -372,8 +392,6 @@ async def _stream_generation(
                 yield f"data: {json.dumps(usage_chunk)}\n\n"
 
             yield "data: [DONE]\n\n"
-    finally:
-        app.state.gen_lock.release()
 
 
 def _profile_top_layers(profile: dict, n: int = 5) -> list[tuple[int, float]]:
@@ -480,11 +498,11 @@ def _register_routes(app: FastAPI) -> None:
     async def _run_blocking(req, prompt_or_messages, *, raw: bool):
         alphas, think = _resolve_steer_params(req.steer, app.state.default_alphas)
         gen_kwargs = _sampling_kwargs(req, alphas, think)
-        async with app.state.gen_lock:
-            with _gen_config_override(session, req.temperature, req.top_p, req.max_tokens):
-                if raw:
-                    return session.generate(prompt_or_messages, raw=True, **gen_kwargs)
-                return session.generate(prompt_or_messages, **gen_kwargs)
+        return await run_blocking_generate(
+            app, session,
+            input=prompt_or_messages, raw=raw, gen_kwargs=gen_kwargs,
+            temperature=req.temperature, top_p=req.top_p, max_tokens=req.max_tokens,
+        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
@@ -766,14 +784,23 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.patch("/v1/saklas/session")
     def patch_session(req: PatchSessionRequest):
+        from dataclasses import is_dataclass, replace as _replace
+        overrides: dict = {}
         if req.temperature is not None:
-            session.config.temperature = req.temperature
+            overrides["temperature"] = req.temperature
         if req.top_p is not None:
-            session.config.top_p = req.top_p
+            overrides["top_p"] = req.top_p
         if req.max_tokens is not None:
-            session.config.max_new_tokens = req.max_tokens
+            overrides["max_new_tokens"] = req.max_tokens
         if req.system_prompt is not None:
-            session.config.system_prompt = req.system_prompt
+            overrides["system_prompt"] = req.system_prompt
+        if overrides:
+            if is_dataclass(session.config):
+                session.config = _replace(session.config, **overrides)
+            else:
+                # MagicMock or other non-frozen stand-ins (tests).
+                for k, v in overrides.items():
+                    setattr(session.config, k, v)
         return {"status": "ok"}
 
     @app.post("/v1/saklas/session/clear")

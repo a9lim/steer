@@ -1,5 +1,6 @@
 """Token-by-token generation loop with KV cache, steering hooks, and monitor integration."""
 
+import enum
 import queue
 import logging
 import threading
@@ -14,6 +15,24 @@ class _ThinkState(IntEnum):
     PREAMBLE = 1
     THINKING = 2
     RESPONSE_PREAMBLE = 3
+
+
+class ThinkingState(enum.Enum):
+    """Explicit lifecycle signal for the thinking state machine.
+
+    Parallel to the internal ``_ThinkState`` IntEnum — this one is the
+    public, stable signal exposed on ``GenerationState.thinking_state``
+    so consumers (session, TUI, tests) can ask "are we currently
+    generating thinking content?" without inferring it from
+    ``thinking_end_idx``.
+    """
+
+    IDLE = "idle"
+    PREAMBLE = "preamble"
+    THINKING = "thinking"
+    RESPONSE_PREAMBLE = "response_preamble"
+    RESPONSE = "response"
+    DONE = "done"
 
 log = logging.getLogger(__name__)
 
@@ -69,23 +88,27 @@ def _get_token_table(tokenizer, vocab_size: int) -> list[str | None]:
         return cached
     # batch_decode is orders of magnitude faster than per-id decode()
     # for large vocabs (150k+ tokens in modern models) — Rust-side loop
-    # instead of a Python round-trip per entry.
-    try:
-        decoded = tokenizer.batch_decode([[i] for i in range(vocab_size)])
-    except Exception:
-        decoded = None
-    if decoded is not None and len(decoded) == vocab_size:
-        table: list[str | None] = [
-            s if '\ufffd' not in s else None for s in decoded
-        ]
-    else:
-        table = [''] * vocab_size
-        for i in range(vocab_size):
-            try:
-                s = tokenizer.decode([i])
-                table[i] = s if '\ufffd' not in s else None
-            except Exception:
-                table[i] = ''
+    # instead of a Python round-trip per entry.  Chunked so that a single
+    # pathological token doesn't force the entire vocab onto the slow path.
+    _CHUNK = 8192
+    table: list[str | None] = [''] * vocab_size
+    for start in range(0, vocab_size, _CHUNK):
+        end = min(start + _CHUNK, vocab_size)
+        ids = [[i] for i in range(start, end)]
+        try:
+            decoded = tokenizer.batch_decode(ids)
+        except Exception:
+            decoded = None
+        if decoded is not None and len(decoded) == (end - start):
+            for i, s in enumerate(decoded):
+                table[start + i] = s if '\ufffd' not in s else None
+        else:
+            for i in range(start, end):
+                try:
+                    s = tokenizer.decode([i])
+                    table[i] = s if '\ufffd' not in s else None
+                except Exception:
+                    table[i] = ''
     _token_table_cache[tok_key] = table
     return table
 
@@ -267,24 +290,25 @@ def supports_thinking(tokenizer) -> bool:
     return _detect_think_delimiters(tokenizer) != _none_result
 
 
-class GenerationConfig:
-    __slots__ = (
-        "max_new_tokens", "temperature", "top_p", "top_k", "system_prompt",
-    )
+from dataclasses import dataclass, field, replace as _dc_replace  # noqa: E402
 
-    def __init__(
-        self,
-        max_new_tokens: int = 1024,
-        temperature: float = 1.0,
-        top_p: float = 0.9,
-        top_k: int | None = None,
-        system_prompt: str | None = None,
-    ):
-        self.max_new_tokens = max_new_tokens
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.system_prompt = system_prompt
+
+@dataclass(frozen=True)
+class GenerationConfig:
+    """Immutable sampling + system-prompt configuration.
+
+    Frozen so an in-flight generation holding a local reference is
+    immune to subsequent rebinds.  Callers that need to change a field
+    rebind the attribute via ``dataclasses.replace``:
+
+        session.config = replace(session.config, temperature=0.8)
+    """
+
+    max_new_tokens: int = 1024
+    temperature: float = 1.0
+    top_p: float = 0.9
+    top_k: int | None = None
+    system_prompt: str | None = None
 
 
 class GenerationState:
@@ -295,6 +319,7 @@ class GenerationState:
         self.token_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.thinking_end_idx: int = 0
         self.finish_reason: str = "stop"
+        self.thinking_state: ThinkingState = ThinkingState.IDLE
 
     def request_stop(self):
         self.stop_requested.set()
@@ -304,6 +329,7 @@ class GenerationState:
         self.token_queue = queue.SimpleQueue()
         self.thinking_end_idx = 0
         self.finish_reason = "stop"
+        self.thinking_state = ThinkingState.IDLE
 
 
 def build_chat_input(
@@ -415,6 +441,17 @@ def generate_steered(
         if (starts_in_thinking and think_end_id is not None)
         else _ThinkState.IDLE
     )
+    # Mirror the internal tstate onto the public ThinkingState enum.
+    # Outside the thinking machine (no thinking requested, or no delimiters
+    # detected) we go straight to RESPONSE.
+    if thinking and think_end_id is not None:
+        state.thinking_state = (
+            ThinkingState.THINKING
+            if starts_in_thinking
+            else ThinkingState.IDLE
+        )
+    else:
+        state.thinking_state = ThinkingState.RESPONSE
 
     # Buffer for multi-token characters (emoji, rare Unicode).
     # Tokens whose table entry is None represent partial UTF-8 byte sequences;
@@ -515,6 +552,7 @@ def generate_steered(
                                      pending_thinking, -1, None, None)
                             pending_ids.clear()
                         tstate = _ThinkState.RESPONSE_PREAMBLE
+                        state.thinking_state = ThinkingState.RESPONSE_PREAMBLE
                     elif tstate == _ThinkState.PREAMBLE:
                         if on_token and pending_ids:
                             on_token(tokenizer.decode(pending_ids),
@@ -522,6 +560,7 @@ def generate_steered(
                             pending_ids.clear()
                         tstate = _ThinkState.IDLE
                         state.thinking_end_idx = len(generated_ids)
+                        state.thinking_state = ThinkingState.RESPONSE
                     continue
 
                 # Advance KV cache state (common to all non-EOS paths)
@@ -534,19 +573,23 @@ def generate_steered(
                         and token_id == think_start_id
                         and tstate == _ThinkState.IDLE):
                     tstate = _ThinkState.PREAMBLE
+                    state.thinking_state = ThinkingState.PREAMBLE
                     continue  # suppress start delimiter
 
                 if tstate == _ThinkState.PREAMBLE:
                     if token_id == think_end_id:
                         tstate = _ThinkState.IDLE
                         state.thinking_end_idx = len(generated_ids)
+                        state.thinking_state = ThinkingState.RESPONSE
                     elif (response_start_id is not None
                           and token_id == response_start_id):
                         tstate = _ThinkState.THINKING
+                        state.thinking_state = ThinkingState.THINKING
                     else:
                         tok_text = tokenizer.decode([token_id])
                         if '\n' in tok_text:
                             tstate = _ThinkState.THINKING
+                            state.thinking_state = ThinkingState.THINKING
                     continue  # suppress preamble
 
                 # Handle end-of-thinking delimiter
@@ -556,15 +599,18 @@ def generate_steered(
                         pending_ids.clear()
                     if response_start_id is not None:
                         tstate = _ThinkState.RESPONSE_PREAMBLE
+                        state.thinking_state = ThinkingState.RESPONSE_PREAMBLE
                     else:
                         tstate = _ThinkState.IDLE
                         state.thinking_end_idx = len(generated_ids)
+                        state.thinking_state = ThinkingState.RESPONSE
                     continue
 
                 if tstate == _ThinkState.RESPONSE_PREAMBLE:
                     if token_id == response_start_id:
                         tstate = _ThinkState.IDLE
                         state.thinking_end_idx = len(generated_ids)
+                        state.thinking_state = ThinkingState.RESPONSE
                     continue
 
                 # Penalty bookkeeping: count all emitted completion tokens
@@ -619,6 +665,7 @@ def generate_steered(
             on_token(tokenizer.decode(pending_ids), pending_thinking, -1, None, None)
 
     finally:
+        state.thinking_state = ThinkingState.DONE
         # Flush MPS command buffers before signalling completion — without
         # this, a rapid regenerate can submit new work while Metal is still
         # processing the previous generation's command buffers, triggering

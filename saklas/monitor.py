@@ -33,11 +33,19 @@ class TraitMonitor:
         self._raw_profiles: dict[str, dict[int, torch.Tensor]] = dict(probe_profiles)
         self._layer_means: dict[int, torch.Tensor] = dict(layer_means) if layer_means else {}
 
-        # Cache of probe vectors pre-normalized to unit float32 on a specific device,
-        # paired with the baked magnitude used as the per-layer weight.
-        # Structure: {probe_name: {layer_idx: (v_unit, weight)}}.
-        self._v_unit_cache: dict[str, dict[int, tuple[torch.Tensor, float]]] = {}
+        # Per-layer stacked cache, inverted from the previous {probe: {layer: ...}}
+        # form so one matmul scores every probe against a hidden state in a single
+        # kernel launch. For each layer that any probe covers:
+        #   V[P, D]  : unit-normed probe directions (zeros for probes missing L)
+        #   W[P]     : per-probe weight at layer L (= ||baked_L||, 0 if missing)
+        # The denominator per probe is built on-device as sum of W across layers
+        # where hidden is also present; no .item() on the hot path.
+        # Structure: {layer_idx: (V_stacked, W_stacked)}.
+        self._layer_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        # Probe -> index into the P axis (stable, insertion order).
+        self._probe_index: dict[str, int] = {}
         self._cache_device: torch.device | None = None
+        self._cache_probe_keys: tuple[str, ...] = ()
         # Cache of layer_means cast to float32 on cache_device.
         self._mean_cache: dict[int, torch.Tensor] = {}
 
@@ -73,28 +81,49 @@ class TraitMonitor:
         self._mean_cache = {}
 
     def _ensure_cache(self, device: torch.device) -> None:
-        """Build/refresh the per-device float32 cache of unit probe vectors + means."""
-        if self._cache_device == device and self._v_unit_cache.keys() == self._raw_profiles.keys():
-            # Also verify inner layer sets match (probe replaced via add_probe invalidates).
-            ok = True
-            for name, prof in self._raw_profiles.items():
-                cached = self._v_unit_cache.get(name)
-                if cached is None or cached.keys() != prof.keys():
-                    ok = False
-                    break
-            if ok and self._mean_cache.keys() == self._layer_means.keys():
-                return
+        """Build/refresh the per-device float32 cache of stacked probe matrices + means.
+
+        Builds one ``(V[P,D], W[P])`` pair per layer that any probe covers. ``V`` holds
+        unit-normed directions (rows for probes missing that layer are zero, which
+        produces zero similarity — correct because ``W`` at that slot is also zero and
+        the denominator mask is shared). ``W[p] = ||baked_p_L||`` for probes that own
+        the layer, else 0. No ``.item()`` calls — norms stay on-device.
+        """
+        probe_keys = tuple(self._raw_profiles.keys())
+        if (
+            self._cache_device == device
+            and self._cache_probe_keys == probe_keys
+            and self._mean_cache.keys() == self._layer_means.keys()
+            and self._layer_cache
+        ):
+            return
 
         self._cache_device = device
-        new_cache: dict[str, dict[int, tuple[torch.Tensor, float]]] = {}
-        for name, prof in self._raw_profiles.items():
-            per_layer: dict[int, tuple[torch.Tensor, float]] = {}
-            for layer_idx, vec in prof.items():
+        self._probe_index = {name: i for i, name in enumerate(probe_keys)}
+        self._cache_probe_keys = probe_keys
+        n_probes = len(probe_keys)
+
+        # Union of layers across all probes, plus a per-layer probe membership map.
+        layer_members: dict[int, list[tuple[int, torch.Tensor]]] = {}
+        dim_for_layer: dict[int, int] = {}
+        for pi, name in enumerate(probe_keys):
+            for layer_idx, vec in self._raw_profiles[name].items():
                 v = vec.to(device=device, dtype=torch.float32)
+                layer_members.setdefault(layer_idx, []).append((pi, v))
+                dim_for_layer[layer_idx] = v.shape[-1]
+
+        new_layer_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        for layer_idx, members in layer_members.items():
+            dim = dim_for_layer[layer_idx]
+            V = torch.zeros((n_probes, dim), device=device, dtype=torch.float32)
+            W = torch.zeros((n_probes,), device=device, dtype=torch.float32)
+            for pi, v in members:
                 vn = v.norm().clamp(min=1e-8)
-                per_layer[layer_idx] = (v / vn, float(vn.item()))
-            new_cache[name] = per_layer
-        self._v_unit_cache = new_cache
+                V[pi] = v / vn
+                # Keep weight on-device; sync cost deferred to the final result.
+                W[pi] = vn
+            new_layer_cache[layer_idx] = (V, W)
+        self._layer_cache = new_layer_cache
 
         self._mean_cache = {
             idx: m.to(device=device, dtype=torch.float32)
@@ -113,13 +142,6 @@ class TraitMonitor:
         hn = h.norm(dim=-1, keepdim=True).clamp(min=1e-8)
         return h / hn
 
-    def _normalize_hidden_dict(self, hidden_per_layer: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
-        """Apply ``_normalize_hidden`` across a per-layer dict (1D vectors)."""
-        return {
-            layer_idx: self._normalize_hidden(layer_idx, h.float())
-            for layer_idx, h in hidden_per_layer.items()
-        }
-
     def _score_probes(self, hidden_per_layer: dict[int, torch.Tensor], accumulate: bool = True) -> dict[str, float]:
         """Score all probes against hidden states.
 
@@ -127,49 +149,55 @@ class TraitMonitor:
         When False, the call is read-only — useful for stateless API requests
         that must not mutate session-level probe accumulators.
         """
-        device = None
-        for h in hidden_per_layer.values():
-            device = h.device
-            break
-        if device is not None:
-            self._ensure_cache(device)
+        probe_keys = self._cache_probe_keys if self._cache_device is not None else tuple(self._raw_profiles.keys())
+        if not hidden_per_layer:
+            vals = {name: 0.0 for name in self._raw_profiles}
+            if accumulate:
+                self._apply_accumulate(vals)
+            return vals
 
-        h_unit_per_layer = self._normalize_hidden_dict(hidden_per_layer)
+        device = next(iter(hidden_per_layer.values())).device
+        self._ensure_cache(device)
+        probe_keys = self._cache_probe_keys
+        n_probes = len(probe_keys)
 
-        # Tensor-accumulate per probe; single .item() per probe at the end
-        # (was N_layers syncs per probe = ~672 syncs for a 21-probe pack).
-        vals: dict[str, float] = {}
+        num = torch.zeros((n_probes,), device=device, dtype=torch.float32)
+        den = torch.zeros((n_probes,), device=device, dtype=torch.float32)
+        for layer_idx, h in hidden_per_layer.items():
+            entry = self._layer_cache.get(layer_idx)
+            if entry is None:
+                continue
+            V, W = entry  # V: (P, D), W: (P,)
+            h_unit = self._normalize_hidden(layer_idx, h.float())  # (D,)
+            sims = V @ h_unit  # (P,)
+            num.add_(W * sims)
+            den.add_(W)
+        den.clamp_(min=1e-8)
+        result = (num / den).cpu().tolist()  # single sync
+        vals = {name: result[i] for i, name in enumerate(probe_keys)}
+        # Probes that exist but weren't in the cache (shouldn't happen post-ensure)
+        # still need a zero default to keep the output key set stable.
         for name in self._raw_profiles:
-            total_w = 0.0
-            weighted: torch.Tensor | None = None
-            v_unit_layers = self._v_unit_cache.get(name, {})
-            for layer_idx in self._raw_profiles[name]:
-                h_unit = h_unit_per_layer.get(layer_idx)
-                if h_unit is None:
-                    continue
-                v_unit, w = v_unit_layers[layer_idx]
-                total_w += w
-                term = (h_unit @ v_unit) * w
-                weighted = term if weighted is None else weighted + term
-            total_w = max(total_w, 1e-8)
-            if weighted is None:
-                vals[name] = 0.0
-            else:
-                vals[name] = (weighted / total_w).item()
+            vals.setdefault(name, 0.0)
 
         if accumulate:
-            for name, val in vals.items():
-                self.history[name].append(val)
-                s = self._stats[name]
-                s["count"] += 1
-                s["sum"] += val
-                s["sum_sq"] += val * val
-                if val < s["min"]:
-                    s["min"] = val
-                if val > s["max"]:
-                    s["max"] = val
-            self._pending_aggregate = True
+            self._apply_accumulate(vals)
         return vals
+
+    def _apply_accumulate(self, vals: dict[str, float]) -> None:
+        for name, val in vals.items():
+            if name not in self.history:
+                continue
+            self.history[name].append(val)
+            s = self._stats[name]
+            s["count"] += 1
+            s["sum"] += val
+            s["sum_sq"] += val * val
+            if val < s["min"]:
+                s["min"] = val
+            if val > s["max"]:
+                s["max"] = val
+        self._pending_aggregate = True
 
     def measure(self, model, tokenizer, layers, text: str, device=None, accumulate: bool = True) -> dict[str, float]:
         """Run one forward pass over *text* and compute probe similarities.
@@ -235,32 +263,30 @@ class TraitMonitor:
         }
         agg_vals = self._score_probes(agg_hidden, accumulate=accumulate)
 
-        h_unit_cache: dict[int, torch.Tensor] = {}
-        per_token: dict[str, list[float]] = {}
+        probe_keys = self._cache_probe_keys
+        n_probes = len(probe_keys)
+        device = any_h.device
+        num = torch.zeros((n, n_probes), device=device, dtype=torch.float32)
+        den = torch.zeros((n_probes,), device=device, dtype=torch.float32)
+        for layer_idx, h in captured.items():
+            if h.shape[0] != n:
+                continue
+            entry = self._layer_cache.get(layer_idx)
+            if entry is None:
+                continue
+            V, W = entry  # V: (P, D), W: (P,)
+            h_unit = self._normalize_hidden(layer_idx, h.float())  # (n, D)
+            sims = h_unit @ V.t()  # (n, P)
+            num.add_(sims * W)  # broadcast over n
+            den.add_(W)
+        den.clamp_(min=1e-8)
+        result = (num / den).cpu().tolist()  # single sync: list[n] of list[P]
+        per_token: dict[str, list[float]] = {name: [] for name in self._raw_profiles}
+        for i, name in enumerate(probe_keys):
+            per_token[name] = [row[i] for row in result]
         for name in self._raw_profiles:
-            total_w = 0.0
-            weighted: torch.Tensor | None = None
-            v_unit_layers = self._v_unit_cache.get(name, {})
-            for layer_idx in self._raw_profiles[name]:
-                h = captured.get(layer_idx)
-                if h is None or h.shape[0] != n:
-                    continue
-                entry = v_unit_layers.get(layer_idx)
-                if entry is None:
-                    continue
-                v_unit, w = entry
-                h_unit = h_unit_cache.get(layer_idx)
-                if h_unit is None:
-                    h_unit = self._normalize_hidden(layer_idx, h.float())
-                    h_unit_cache[layer_idx] = h_unit
-                total_w += w
-                term = w * (h_unit @ v_unit)
-                weighted = term if weighted is None else weighted + term
-            total_w = max(total_w, 1e-8)
-            if weighted is None:
+            if not per_token[name]:
                 per_token[name] = [0.0] * n
-            else:
-                per_token[name] = (weighted / total_w).cpu().tolist()
 
         self._pending_per_token = True
         return agg_vals, per_token
@@ -313,8 +339,10 @@ class TraitMonitor:
         if is_new:
             self.history[name] = deque(maxlen=_MAX_HISTORY)
             self._stats[name] = self._empty_stats()
-        # Drop any stale cached unit vectors for this probe; rebuilt lazily.
-        self._v_unit_cache.pop(name, None)
+        # Invalidate stacked cache; rebuilt on next scoring call.
+        self._layer_cache = {}
+        self._cache_device = None
+        self._cache_probe_keys = ()
 
     def remove_probe(self, name: str):
         if name in self._raw_profiles:
@@ -323,7 +351,9 @@ class TraitMonitor:
             del self.history[name]
         if name in self._stats:
             del self._stats[name]
-        self._v_unit_cache.pop(name, None)
+        self._layer_cache = {}
+        self._cache_device = None
+        self._cache_probe_keys = ()
 
     def reset_history(self):
         for name in self._raw_profiles:

@@ -17,7 +17,7 @@ from saklas.generation import GenerationConfig, GenerationState, build_chat_inpu
 from saklas.hooks import HiddenCapture, SteeringManager
 from saklas.model import load_model, get_layers, get_model_info
 from saklas.monitor import TraitMonitor
-from saklas.packs import PackFormatError, PackMetadata, hash_file
+from saklas.packs import PackFormatError, PackMetadata, hash_file, hash_folder_files
 from saklas.paths import concept_dir, safe_model_id
 from saklas.probes_bootstrap import bootstrap_probes, bootstrap_layer_means
 from saklas.results import GenerationResult, TokenEvent, ProbeReadings
@@ -203,6 +203,10 @@ class SaklasSession:
 
         self._gen_lock = threading.Lock()
         self._gen_state = GenerationState()
+        # Re-entry guard: True between preamble and finalize of any
+        # generation path.  Prevents a pending-action dispatch from
+        # double-attaching capture/steering hooks and leaking them.
+        self._gen_active: bool = False
 
         self._history: list[dict[str, str]] = []
         self._last_result: GenerationResult | None = None
@@ -297,11 +301,7 @@ class SaklasSession:
             meta = PackMetadata.load(folder)
         except PackFormatError:
             return
-        new_files: dict[str, str] = {}
-        for entry in sorted(folder.iterdir()):
-            if entry.is_file() and entry.name != "pack.json":
-                new_files[entry.name] = hash_file(entry)
-        meta.files = new_files
+        meta.files = hash_folder_files(folder)
         meta.write(folder)
 
     def generate_pairs(
@@ -628,6 +628,7 @@ class SaklasSession:
         *,
         n_pairs: int = 90,
         seed: int | None = None,
+        batch_size: int = 5,
         force: bool = False,
     ) -> tuple[str, dict[int, torch.Tensor]]:
         """Extract a persona-cloning steering vector from a corpus file.
@@ -638,7 +639,8 @@ class SaklasSession:
         """
         from saklas.cloning import clone_from_corpus as _clone
         return _clone(
-            self, path, name, n_pairs=n_pairs, seed=seed, force=force,
+            self, path, name,
+            n_pairs=n_pairs, seed=seed, batch_size=batch_size, force=force,
         )
 
     def load_profile(self, path: str) -> dict[int, torch.Tensor]:
@@ -659,7 +661,12 @@ class SaklasSession:
         self._profiles.pop(name, None)
 
     def _apply_steering(self, alphas: dict[str, float]) -> None:
-        """Compose and attach steering hooks for a generation call."""
+        """Compose and attach steering hooks for a generation call.
+
+        Must be called inside a ``_gen_active`` span (entry points set
+        ``_gen_active=True`` before invoking this).  The check is defense
+        in depth against a rogue caller re-entering outside a gen span.
+        """
         self._steering.clear_all()
         for name, alpha in alphas.items():
             if name not in self._profiles:
@@ -875,12 +882,17 @@ class SaklasSession:
         """
         if not self._gen_lock.acquire(blocking=False):
             raise ConcurrentGenerationError("Generation already in progress")
+        if self._gen_active:
+            self._gen_lock.release()
+            raise RuntimeError("session generation already in flight")
+        self._gen_active = True
         try:
             return self._generate_blocking(
                 input, alphas, raw, thinking, stateless,
                 seed, stop, logit_bias, presence_penalty, frequency_penalty, logprobs,
             )
         finally:
+            self._gen_active = False
             self._gen_lock.release()
 
     def _generate_blocking(
@@ -940,12 +952,17 @@ class SaklasSession:
         """Streaming generation. Yields TokenEvent per token. See generate()."""
         if not self._gen_lock.acquire(blocking=False):
             raise ConcurrentGenerationError("Generation already in progress")
+        if self._gen_active:
+            self._gen_lock.release()
+            raise RuntimeError("session generation already in flight")
+        self._gen_active = True
         try:
             yield from self._generate_streaming(
                 input, alphas, raw, thinking, stateless,
                 seed, stop, logit_bias, presence_penalty, frequency_penalty, logprobs,
             )
         finally:
+            self._gen_active = False
             self._gen_lock.release()
 
     def _generate_streaming(

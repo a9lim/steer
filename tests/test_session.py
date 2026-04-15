@@ -219,7 +219,7 @@ class TestCloning:
                 )
                 readings = result.readings or {}
                 if "pirate_test" in readings:
-                    val = readings["pirate_test"]
+                    val = readings["pirate_test"].mean
                     assert val == val  # finite, not NaN
                     assert -1.5 <= val <= 1.5
             finally:
@@ -240,7 +240,7 @@ class TestCloning:
                 s_read = steered.readings or {}
                 shared = set(u_read) & set(s_read)
                 if shared:
-                    diffs = [abs(u_read[k] - s_read[k]) for k in shared]
+                    diffs = [abs(u_read[k].mean - s_read[k].mean) for k in shared]
                     assert max(diffs) > 1e-6, (
                         "α=1 steering produced identical probe readings "
                         f"to unsteered on {sorted(shared)}"

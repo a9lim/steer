@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from importlib import resources as _resources
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 NAME_REGEX = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -132,6 +132,52 @@ class Sidecar:
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
             f.write("\n")
+
+
+def hash_folder_files(folder: Path) -> dict[str, str]:
+    """Return ``{filename: sha256}`` for every file in ``folder`` except ``pack.json``.
+
+    Shared by any code path that needs to (re)populate ``PackMetadata.files``
+    after writing new files on disk. Non-recursive — concept folders are flat.
+    """
+    out: dict[str, str] = {}
+    for entry in sorted(folder.iterdir()):
+        if entry.is_file() and entry.name != "pack.json":
+            out[entry.name] = hash_file(entry)
+    return out
+
+
+def synthesize_pack_metadata(
+    *,
+    name: str,
+    source: str,
+    pack_dir: Path,
+    description: str = "",
+    tags: Sequence[str] = (),
+    version: str = "1.0.0",
+    license: str = "unknown",
+    recommended_alpha: float = 0.5,
+    long_description: str = "",
+) -> "PackMetadata":
+    """Build a :class:`PackMetadata` with ``files`` hashed from on-disk contents.
+
+    Both pack-less HF install synthesis and user-concept extraction converge
+    on the same operation: once all real files live under ``pack_dir``, build
+    a manifest from them. Callers still own any format-specific file
+    fabrication (e.g. hf.py's ``method="imported"`` sidecar stubs) — this
+    helper only does the hashing + construction.
+    """
+    return PackMetadata(
+        name=name,
+        description=description,
+        long_description=long_description,
+        version=version,
+        license=license,
+        tags=list(tags),
+        recommended_alpha=recommended_alpha,
+        source=source,
+        files=hash_folder_files(pack_dir),
+    )
 
 
 def hash_file(path: Path) -> str:

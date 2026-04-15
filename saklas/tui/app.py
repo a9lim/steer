@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import shlex
 import time
+from dataclasses import replace
 
 import torch
 from textual.app import App, ComposeResult
@@ -289,7 +290,7 @@ class SaklasApp(App):
             if len(parts) < 2:
                 chat.add_system_message(f"System prompt: {self._session.config.system_prompt or '(none)'}")
             else:
-                self._session.config.system_prompt = parts[1]
+                self._session.config = replace(self._session.config, system_prompt=parts[1])
                 chat.add_system_message("System prompt set.")
                 self._refresh_gen_config()
         elif cmd == "/temp":
@@ -297,8 +298,9 @@ class SaklasApp(App):
                 chat.add_system_message(f"Temperature: {self._session.config.temperature}")
             else:
                 try:
-                    self._session.config.temperature = max(0.0, float(parts[1]))
-                    chat.add_system_message(f"Temperature set to {self._session.config.temperature}")
+                    val = max(0.0, float(parts[1]))
+                    self._session.config = replace(self._session.config, temperature=val)
+                    chat.add_system_message(f"Temperature set to {val}")
                     self._refresh_gen_config()
                 except ValueError:
                     chat.add_system_message("Invalid temperature value")
@@ -307,8 +309,9 @@ class SaklasApp(App):
                 chat.add_system_message(f"Top-p: {self._session.config.top_p}")
             else:
                 try:
-                    self._session.config.top_p = max(0.0, min(1.0, float(parts[1])))
-                    chat.add_system_message(f"Top-p set to {self._session.config.top_p}")
+                    val = max(0.0, min(1.0, float(parts[1])))
+                    self._session.config = replace(self._session.config, top_p=val)
+                    chat.add_system_message(f"Top-p set to {val}")
                     self._refresh_gen_config()
                 except ValueError:
                     chat.add_system_message("Invalid top-p value")
@@ -317,8 +320,9 @@ class SaklasApp(App):
                 chat.add_system_message(f"Max tokens: {self._session.config.max_new_tokens}")
             else:
                 try:
-                    self._session.config.max_new_tokens = max(1, int(parts[1]))
-                    chat.add_system_message(f"Max tokens set to {self._session.config.max_new_tokens}")
+                    val = max(1, int(parts[1]))
+                    self._session.config = replace(self._session.config, max_new_tokens=val)
+                    chat.add_system_message(f"Max tokens set to {val}")
                     self._refresh_gen_config()
                 except ValueError:
                     chat.add_system_message("Invalid max tokens value")
@@ -551,6 +555,9 @@ class SaklasApp(App):
         use_thinking = self._thinking
 
         def _generate():
+            # Mark session generation active so _begin_capture / _apply_steering
+            # guards reject a re-entry from a pending-action dispatch.
+            self._session._gen_active = True
             # Apply steering hooks for this generation
             if alphas:
                 self._session._apply_steering(alphas)
@@ -611,6 +618,7 @@ class SaklasApp(App):
                 self._session._end_capture()
                 if alphas:
                     self._session._clear_steering()
+                self._session._gen_active = False
                 # Flush MPS command buffers *after* all GPU work so a
                 # pending regenerate dispatched by _poll_generation doesn't
                 # submit new Metal commands while previous buffers are
@@ -840,7 +848,8 @@ class SaklasApp(App):
         if self._focused_panel_idx != _LEFT:
             return
         val = getattr(self._session.config, attr)
-        setattr(self._session.config, attr, round(max(lo, min(hi, val + delta)), 2))
+        new_val = round(max(lo, min(hi, val + delta)), 2)
+        self._session.config = replace(self._session.config, **{attr: new_val})
         self._refresh_gen_config()
 
     def action_temp_down(self) -> None:

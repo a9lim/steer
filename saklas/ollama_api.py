@@ -20,7 +20,6 @@ Key differences from real Ollama:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -33,6 +32,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from saklas._server_runner import acquire_lock_with_timeout, run_blocking_generate
 from saklas.session import ConcurrentGenerationError, SaklasSession
 
 log = logging.getLogger(__name__)
@@ -600,14 +600,16 @@ def register_ollama_routes(app: FastAPI) -> None:
                 input_payload = prompt
                 raw = bool(body.get("raw", False))
 
-        async with app.state.gen_lock:
-            with _gen_config_override(session, temperature, top_p, max_tokens, top_k=top_k):
-                start_ns = time.monotonic_ns()
-                try:
-                    result = session.generate(input_payload, raw=raw, **gen_kwargs)
-                except ConcurrentGenerationError:
-                    raise HTTPException(status_code=409, detail="Generation already in progress")
-                elapsed_ns = time.monotonic_ns() - start_ns
+        start_ns = time.monotonic_ns()
+        try:
+            result = await run_blocking_generate(
+                app, session,
+                input=input_payload, raw=raw, gen_kwargs=gen_kwargs,
+                temperature=temperature, top_p=top_p, max_tokens=max_tokens, top_k=top_k,
+            )
+        except ConcurrentGenerationError:
+            raise HTTPException(status_code=409, detail="Generation already in progress")
+        elapsed_ns = time.monotonic_ns() - start_ns
 
         model_name = str(body.get("model") or session.model_id)
         created_at = _now_iso()
@@ -660,17 +662,14 @@ def register_ollama_routes(app: FastAPI) -> None:
 
         model_name = str(body.get("model") or session.model_id)
 
-        try:
-            async with asyncio.timeout(300):
-                await app.state.gen_lock.acquire()
-        except (TimeoutError, asyncio.TimeoutError):
-            yield json.dumps({
-                "model": model_name, "created_at": _now_iso(),
-                "error": "server busy",
-            }) + "\n"
-            return
+        async with acquire_lock_with_timeout(app) as acquired:
+            if not acquired:
+                yield json.dumps({
+                    "model": model_name, "created_at": _now_iso(),
+                    "error": "server busy",
+                }) + "\n"
+                return
 
-        try:
             with _gen_config_override(session, temperature, top_p, max_tokens, top_k=top_k):
                 start_ns = time.monotonic_ns()
                 try:
@@ -748,8 +747,6 @@ def register_ollama_routes(app: FastAPI) -> None:
                         **stats,
                     }
                 yield json.dumps(final) + "\n"
-        finally:
-            app.state.gen_lock.release()
 
     @app.post("/api/chat")
     async def api_chat(request: Request):
