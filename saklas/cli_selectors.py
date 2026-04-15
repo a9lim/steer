@@ -15,11 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from saklas.errors import SaklasError
 from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata
 from saklas.paths import vectors_dir
 
 
-class SelectorError(ValueError):
+class SelectorError(ValueError, SaklasError):
     """Raised when a selector string cannot be parsed."""
 
 

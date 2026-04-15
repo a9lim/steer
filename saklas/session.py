@@ -13,6 +13,7 @@ from typing import Callable, Iterator
 import torch
 
 from saklas.datasource import DataSource
+from saklas.errors import SaklasError
 from saklas.generation import GenerationConfig, GenerationState, build_chat_input, generate_steered, supports_thinking
 from saklas.hooks import HiddenCapture, SteeringManager
 from saklas.model import load_model, get_layers, get_model_info
@@ -148,8 +149,13 @@ _SCENARIO_BANK = [
 
 
 
-class ConcurrentGenerationError(RuntimeError):
+class ConcurrentGenerationError(RuntimeError, SaklasError):
     """Raised when a generation call is made while another is in progress."""
+    pass
+
+
+class VectorNotRegisteredError(KeyError, SaklasError):
+    """Raised when a steering call references a vector not in the registry."""
     pass
 
 
@@ -161,17 +167,45 @@ class SaklasSession:
     live on the model between generations.
     """
 
-    def __init__(
-        self,
+    @classmethod
+    def from_pretrained(
+        cls,
         model_id: str,
+        *,
         device: str = "auto",
         quantize: str | None = None,
         probes: list[str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int = 1024,
         cache_dir: str | None = None,
+    ) -> "SaklasSession":
+        """Load a HF model + tokenizer and return a fully initialized session.
+
+        This is the primary entry point for library users; it owns all the
+        HF-loading heavy lifting. To wrap an already-loaded model use the
+        plain ``__init__(model, tokenizer, ...)`` form.
+        """
+        model, tokenizer = load_model(model_id, quantize=quantize, device=device)
+        return cls(
+            model, tokenizer,
+            probes=probes,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            cache_dir=cache_dir,
+        )
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        *,
+        probes: list[str] | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int = 1024,
+        cache_dir: str | None = None,
     ):
-        self._model, self._tokenizer = load_model(model_id, quantize=quantize, device=device)
+        self._model = model
+        self._tokenizer = tokenizer
         self._layers = get_layers(self._model)
         self._model_info = get_model_info(self._model, self._tokenizer)
 
@@ -670,7 +704,7 @@ class SaklasSession:
         self._steering.clear_all()
         for name, alpha in alphas.items():
             if name not in self._profiles:
-                raise KeyError(f"No vector registered for '{name}'")
+                raise VectorNotRegisteredError(f"No vector registered for '{name}'")
             self._steering.add_vector(name, self._profiles[name], alpha)
         self._steering.apply_to_model(self._layers, self._device, self._dtype)
 
@@ -884,7 +918,7 @@ class SaklasSession:
             raise ConcurrentGenerationError("Generation already in progress")
         if self._gen_active:
             self._gen_lock.release()
-            raise RuntimeError("session generation already in flight")
+            raise ConcurrentGenerationError("session generation already in flight")
         self._gen_active = True
         try:
             return self._generate_blocking(
@@ -954,7 +988,7 @@ class SaklasSession:
             raise ConcurrentGenerationError("Generation already in progress")
         if self._gen_active:
             self._gen_lock.release()
-            raise RuntimeError("session generation already in flight")
+            raise ConcurrentGenerationError("session generation already in flight")
         self._gen_active = True
         try:
             yield from self._generate_streaming(

@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
+from saklas.errors import SaklasError
+
 log = logging.getLogger(__name__)
 
 _KNOWN_KEYS = {
@@ -17,7 +19,7 @@ _KNOWN_KEYS = {
 }
 
 
-class ConfigFileError(ValueError):
+class ConfigFileError(ValueError, SaklasError):
     pass
 
 

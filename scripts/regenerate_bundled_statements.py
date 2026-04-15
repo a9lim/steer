@@ -290,7 +290,7 @@ def main() -> int:
         return 2
 
     print(f"Loading {MODEL_ID}...", flush=True)
-    session = SaklasSession(MODEL_ID, device="auto", probes=[])
+    session = SaklasSession.from_pretrained(MODEL_ID, device="auto", probes=[])
     print(f"Loaded on {session._device} ({session._dtype})", flush=True)
 
     print(f"\nRegenerating {len(names)} concepts...")

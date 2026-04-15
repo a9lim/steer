@@ -29,6 +29,8 @@ from pathlib import Path
 
 import torch
 
+from saklas.errors import SaklasError
+
 log = logging.getLogger(__name__)
 
 _ARCH = "controlvector"
@@ -37,7 +39,7 @@ _LAYER_COUNT_KEY = f"{_ARCH}.layer_count"
 _TENSOR_PREFIX = "direction."
 
 
-class GGUFNotInstalled(ImportError):
+class GGUFNotInstalled(ImportError, SaklasError):
     """Raised when the optional ``gguf`` package is not available."""
 
 

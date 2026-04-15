@@ -50,8 +50,8 @@ def _resolve_probes(raw: list[str] | None) -> list[str]:
 def _make_session(args: argparse.Namespace):
     from saklas.session import SaklasSession
     probe_categories = _resolve_probes(args.probes)
-    return SaklasSession(
-        model_id=args.model, device=args.device, quantize=args.quantize,
+    return SaklasSession.from_pretrained(
+        args.model, device=args.device, quantize=args.quantize,
         probes=probe_categories,
         system_prompt=getattr(args, "system_prompt", None),
         max_tokens=getattr(args, "max_tokens", 1024),

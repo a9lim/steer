@@ -9,15 +9,16 @@ from typing import Optional
 from saklas.cli_selectors import (
     ResolvedConcept, Selector, invalidate as _invalidate_selector_cache, resolve,
 )
+from saklas.errors import SaklasError
 from saklas.packs import PackMetadata, hash_file, verify_integrity
 from saklas.paths import concept_dir, neutral_statements_path, safe_model_id, vectors_dir
 
 
-class InstallConflict(RuntimeError):
+class InstallConflict(RuntimeError, SaklasError):
     pass
 
 
-class RefreshError(RuntimeError):
+class RefreshError(RuntimeError, SaklasError):
     pass
 
 

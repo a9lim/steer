@@ -142,7 +142,7 @@ def _known_model_names(session: SaklasSession) -> set[str]:
 
 
 def _strict_mode() -> bool:
-    return os.environ.get("SAKLAS_OLLAMA_STRICT", "").lower() in ("1", "true", "yes", "on")
+    return os.environ.get("SAKLAS_STRICT_MODEL", "").lower() in ("1", "true", "yes", "on")
 
 
 def _digest_of(name: str) -> str:
@@ -570,7 +570,7 @@ def register_ollama_routes(app: FastAPI) -> None:
                 status_code=404,
                 detail=(
                     f"model '{name}' not available. saklas hosts: {hosted}. "
-                    f"Unset SAKLAS_OLLAMA_STRICT to accept any model name."
+                    f"Unset SAKLAS_STRICT_MODEL to accept any model name."
                 ),
             )
 

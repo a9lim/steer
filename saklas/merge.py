@@ -12,6 +12,7 @@ from typing import Optional
 
 import torch
 
+from saklas.errors import SaklasError
 from saklas.packs import (
     ConceptFolder, PackMetadata, hash_file,
 )
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 Profile = dict[int, torch.Tensor]
 
 
-class MergeError(ValueError):
+class MergeError(ValueError, SaklasError):
     pass
 
 

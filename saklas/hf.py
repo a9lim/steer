@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from saklas.errors import SaklasError
 from saklas.packs import (
     NAME_REGEX,
     PackFormatError,
@@ -22,7 +23,7 @@ from saklas.packs import (
 )
 
 
-class HFError(RuntimeError):
+class HFError(RuntimeError, SaklasError):
     pass
 
 

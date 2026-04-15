@@ -28,7 +28,7 @@ def main() -> int:
     ds = DataSource(name="angry.calm", pairs=pairs)
 
     print(f"Loading {MODEL_ID}...", flush=True)
-    session = SaklasSession(MODEL_ID, device="auto", max_tokens=MAX_TOKENS, probes=[])
+    session = SaklasSession.from_pretrained(MODEL_ID, device="auto", max_tokens=MAX_TOKENS, probes=[])
     print(f"Loaded on {session._device}", flush=True)
 
     print(f"Extracting angry.calm profile from {len(pairs)} pairs...", flush=True)

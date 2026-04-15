@@ -51,7 +51,7 @@ Or from Python:
 ```python
 from saklas import SaklasSession
 
-with SaklasSession("google/gemma-3-4b-it") as s:
+with SaklasSession.from_pretrained("google/gemma-3-4b-it") as s:
     name, profile = s.extract("angry.calm")          # bundled bipolar pack
     s.steer(name, profile)                           # register (no alpha yet)
     print(s.generate("What makes a good day?", alphas={name: 0.3}).text)
@@ -192,7 +192,7 @@ Commands that touch the model or modify history interrupt any in-progress genera
 ```python
 from saklas import SaklasSession, DataSource, ResultCollector
 
-with SaklasSession("google/gemma-3-4b-it", device="auto") as session:
+with SaklasSession.from_pretrained("google/gemma-3-4b-it", device="auto") as session:
     name, profile = session.extract("angry.calm")   # bundled bipolar pack
     session.steer(name, profile)                    # register (no alpha yet)
 
@@ -224,7 +224,7 @@ Runnable examples in [`examples/`](examples/): [`sweep_alpha.py`](examples/sweep
 ### SaklasSession reference
 
 ```python
-session = SaklasSession(
+session = SaklasSession.from_pretrained(
     model_id,             # HuggingFace ID or local path
     device="auto",        # "auto", "cuda", "mps", "cpu"
     quantize=None,        # "4bit", "8bit", or None
@@ -365,7 +365,7 @@ curl -N http://localhost:8000/api/chat -d '{
 
 **Option translation.** `temperature`, `top_p`, `top_k`, `seed`, `num_predict`, `stop`, `presence_penalty`, `frequency_penalty`, `repeat_penalty`, and `think` all pipe through. `repeat_penalty` maps to saklas's `presence_penalty` via `ln(repeat_penalty)` — exact for positive logits, matching Ollama's "divide by penalty" semantics. Unrecognized options (`min_p`, `mirostat*`, `num_ctx`, `typical_p`, …) are logged at debug and silently dropped. Thinking streams as `message.thinking` on `/api/chat` and top-level `thinking` on `/api/generate` — Open WebUI renders it as a collapsible reasoning panel.
 
-**Advertised endpoints**: `/api/version`, `/api/tags`, `/api/ps`, `/api/show`, `/api/chat`, `/api/generate`, `/api/pull` (no-op success for the loaded model / 404 otherwise). By default the `model` field on incoming requests is accepted regardless of match; `SAKLAS_OLLAMA_STRICT=1` makes mismatches 404 instead.
+**Advertised endpoints**: `/api/version`, `/api/tags`, `/api/ps`, `/api/show`, `/api/chat`, `/api/generate`, `/api/pull` (no-op success for the loaded model / 404 otherwise). By default the `model` field on incoming requests is accepted regardless of match; `SAKLAS_STRICT_MODEL=1` makes mismatches 404 instead.
 
 ### Flags
 

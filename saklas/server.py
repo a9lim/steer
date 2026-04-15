@@ -21,8 +21,18 @@ from saklas._server_runner import (
     acquire_lock_with_timeout,
     run_blocking_generate,
 )
+from saklas.cache_ops import InstallConflict, RefreshError
+from saklas.cli_selectors import AmbiguousSelectorError
+from saklas.config_file import ConfigFileError
+from saklas.errors import SaklasError
+from saklas.hf import HFError
+from saklas.packs import PackFormatError
 from saklas.probes_bootstrap import load_defaults
 from saklas.session import ConcurrentGenerationError, SaklasSession
+
+
+class UnsupportedContentError(ValueError, SaklasError):
+    """Non-text content parts submitted to a text-only endpoint."""
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +61,7 @@ class ChatMessage(BaseModel):
                 elif isinstance(part, str):
                     pieces.append(part)
                 else:
-                    raise ValueError(
+                    raise UnsupportedContentError(
                         "non-text content parts are not supported by this model"
                     )
             self.content = "".join(pieces)
@@ -439,6 +449,34 @@ def create_app(session: SaklasSession, default_alphas: dict[str, float] | None =
             allow_headers=["*"],
         )
 
+    _SAKLAS_ERROR_STATUS: list[tuple[type, int]] = [
+        (ConcurrentGenerationError, 409),
+        (AmbiguousSelectorError, 400),
+        (UnsupportedContentError, 400),
+        (PackFormatError, 400),
+        (ConfigFileError, 400),
+        (HFError, 502),
+        (InstallConflict, 409),
+        (RefreshError, 500),
+    ]
+
+    def _saklas_error_status(exc: SaklasError) -> int:
+        for cls, status in _SAKLAS_ERROR_STATUS:
+            if isinstance(exc, cls):
+                return status
+        return 500
+
+    @app.exception_handler(SaklasError)
+    async def _on_saklas_error(request: Request, exc: SaklasError):
+        status = _saklas_error_status(exc)
+        msg = str(exc) or exc.__class__.__name__
+        path = request.url.path
+        if path.startswith("/api/"):
+            # Ollama error shape: {"error": "<msg>"}
+            return JSONResponse(status_code=status, content={"error": msg})
+        err_type = "conflict" if status == 409 else "invalid_request_error" if status == 400 else "server_error"
+        return _error(status, msg, err_type)
+
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(_request: Request, exc: RequestValidationError):
         errs = exc.errors()
@@ -457,6 +495,38 @@ def create_app(session: SaklasSession, default_alphas: dict[str, float] | None =
     register_ollama_routes(app)
 
     return app
+
+
+def _strict_model_enabled() -> bool:
+    return os.environ.get("SAKLAS_STRICT_MODEL", "").lower() in ("1", "true", "yes", "on")
+
+
+def _openai_known_model_names(session: SaklasSession) -> set[str]:
+    """Names accepted for OpenAI routes in strict mode.
+
+    Includes the HF id plus any Ollama-style aliases (`<family>:<size>`)
+    — the OpenAI catalogue is a superset so clients hitting either
+    protocol with the same name keep working.
+    """
+    from saklas.ollama_api import _aliases_for
+    return {n.lower() for n in {session.model_id, *_aliases_for(session)}}
+
+
+def _check_openai_model_strict(session: SaklasSession, name: str | None) -> None:
+    if not _strict_model_enabled():
+        return
+    if not name:
+        return
+    if name.lower() not in _openai_known_model_names(session):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Model '{name}' not found",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": 404,
+            },
+        )
 
 
 def _register_routes(app: FastAPI) -> None:
@@ -506,6 +576,7 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
+        _check_openai_model_strict(session, req.model)
         alphas, think = _resolve_steer_params(req.steer, app.state.default_alphas)
         messages = [{"role": m.role, "content": m.content} for m in req.messages]
         rid = _make_id()
@@ -559,6 +630,7 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/completions")
     async def completions(req: CompletionRequest):
+        _check_openai_model_strict(session, req.model)
         alphas, think = _resolve_steer_params(req.steer, app.state.default_alphas)
         rid = _make_id()
         model_id = session.model_id

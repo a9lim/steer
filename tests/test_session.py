@@ -19,7 +19,7 @@ MODEL_ID = "google/gemma-3-4b-it"
 def session():
     from saklas.session import SaklasSession
     # device="auto" picks cuda > mps > cpu; skipif above guarantees a GPU.
-    s = SaklasSession(MODEL_ID, device="auto", probes=["affect"])
+    s = SaklasSession.from_pretrained(MODEL_ID, device="auto", probes=["affect"])
     yield s
     s.close()
 
@@ -86,7 +86,7 @@ class TestMonitoring:
 class TestLifecycle:
     def test_context_manager(self):
         from saklas.session import SaklasSession
-        with SaklasSession(MODEL_ID, device="auto", probes=[]) as s:
+        with SaklasSession.from_pretrained(MODEL_ID, device="auto", probes=[]) as s:
             assert s.model_info["model_type"].startswith("gemma3")
 
 class TestGeneration:

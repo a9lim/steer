@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from saklas.datasource import DataSource
+from saklas.errors import SaklasError
 from saklas.generation import (
     GenerationConfig,
     GenerationState,
@@ -45,15 +46,15 @@ _TOKENS_PER_REWRITE = 80  # ~flat budget per rewrite line; 50 truncated long inp
 _NUMBERED_RE = re.compile(r"^\s*(\d+)[.)]\s*(.*?)\s*$")
 
 
-class CorpusTooShortError(ValueError):
+class CorpusTooShortError(ValueError, SaklasError):
     """Corpus has fewer than the minimum number of usable lines."""
 
 
-class CorpusTooLongError(ValueError):
+class CorpusTooLongError(ValueError, SaklasError):
     """A batch prompt plus its generation budget does not fit in context."""
 
 
-class InsufficientPairsError(RuntimeError):
+class InsufficientPairsError(RuntimeError, SaklasError):
     """Too few pairs survived generation/parsing to extract a stable vector."""
 
 
