@@ -1,8 +1,6 @@
 """Tests for the native /saklas/v1/* API (no GPU)."""
 
 import asyncio
-import json
-import threading
 import time
 from unittest.mock import MagicMock, patch
 

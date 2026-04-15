@@ -479,7 +479,7 @@ def search_remote_packs(query: str, *, json_output: bool = False, verbose: bool 
     from saklas.cli.selectors import Selector as _Sel
     sel = _Sel(kind="name", value=query, namespace=None) if query else None
     try:
-        from saklas.io.hf import search_packs, HFError
+        from saklas.io.hf import search_packs
     except ImportError as e:
         print(f"saklas pack search unavailable: {e}")
         return

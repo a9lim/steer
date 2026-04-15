@@ -290,7 +290,7 @@ def supports_thinking(tokenizer) -> bool:
     return _detect_think_delimiters(tokenizer) != _none_result
 
 
-from dataclasses import dataclass, field, replace as _dc_replace  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 
 
 @dataclass(frozen=True)

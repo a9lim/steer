@@ -845,11 +845,6 @@ class SaklasApp(App):
         if last is None or not last.tokens:
             return
         generated = list(last.tokens)
-        thinking_end_idx = max(
-            0, len(generated) - len(next(iter(per_token.values())))
-        ) if per_token else 0
-        # Thinking end is actually stored in gen state at finalize time,
-        # but the split is len(generated) - len(response). Rebuild from ids.
         tok = self._session._tokenizer
         all_strs = tok.batch_decode(
             [[int(tid)] for tid in generated],
@@ -1181,9 +1176,10 @@ class SaklasApp(App):
                 )
                 self.call_from_thread(self._show_ab_result, result.text)
             except Exception as e:
+                err = str(e)
                 self.call_from_thread(
                     lambda: (setattr(self, '_ab_in_progress', False),
-                             self._chat_panel.add_system_message(f"A/B error: {e}"))
+                             self._chat_panel.add_system_message(f"A/B error: {err}"))
                 )
 
         self.run_worker(_ab_generate, thread=True)

@@ -413,7 +413,11 @@ def register_saklas_routes(app: FastAPI) -> None:
                             progress_msgs.append,
                         )
                     except SaklasError as e:
-                        err = {"message": str(e), "code": type(e).__name__}
+                        import logging
+                        logging.getLogger("saklas.api").exception(
+                            "extract failed for session=%s", session_id,
+                        )
+                        err = {"message": "extract failed", "code": type(e).__name__}
                         yield f"event: error\ndata: {json.dumps(err)}\n\n"
                         return
                     if req.auto_register:

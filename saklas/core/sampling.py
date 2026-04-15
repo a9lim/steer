@@ -13,8 +13,8 @@ Pre-restructure this lives at the top level; cluster 8 will move it under
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
-from typing import Any, Iterable
+from dataclasses import dataclass, fields, replace
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)

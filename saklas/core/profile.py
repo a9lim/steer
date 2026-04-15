@@ -51,7 +51,6 @@ class Profile:
             raise ProfileError("Profile must contain at least one layer")
         out: dict[int, torch.Tensor] = {}
         ref_dtype: torch.dtype | None = None
-        ref_device: torch.device | None = None
         for layer, t in tensors.items():
             if not isinstance(layer, int):
                 raise ProfileError(
@@ -64,7 +63,6 @@ class Profile:
                 )
             if ref_dtype is None:
                 ref_dtype = t.dtype
-                ref_device = t.device
             out[layer] = t
         self._tensors: dict[int, torch.Tensor] = out
         self._metadata: dict = dict(metadata or {})

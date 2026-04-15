@@ -525,7 +525,7 @@ def _run_config_show(args: argparse.Namespace) -> None:
 
 
 def _run_config_validate(args: argparse.Namespace) -> None:
-    from saklas.cli.config_file import ConfigFile, ConfigFileError, ensure_vectors_installed
+    from saklas.cli.config_file import ConfigFile, ConfigFileError
     p = Path(args.file)
     if not p.exists():
         print(f"config validate: {p}: file not found", file=sys.stderr)

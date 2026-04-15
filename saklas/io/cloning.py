@@ -19,7 +19,6 @@ import random
 import re
 from typing import TYPE_CHECKING
 
-import torch
 
 from saklas.io.datasource import DataSource
 from saklas.core.errors import SaklasError
@@ -34,6 +33,7 @@ from saklas.io.paths import concept_dir, safe_model_id
 from saklas.core.vectors import load_profile as _load_profile
 
 if TYPE_CHECKING:
+    from saklas.core.profile import Profile
     from saklas.core.session import SaklasSession
 
 _log = logging.getLogger(__name__)

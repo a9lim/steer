@@ -254,7 +254,8 @@ class TestCloning:
                 shutil.rmtree(folder, ignore_errors=True)
 
     def test_extract_cli_roundtrip(self, tmp_path):
-        import subprocess, sys
+        import subprocess
+        import sys
         from saklas.io.paths import concept_dir, safe_model_id
 
         folder = concept_dir("default", "happy.sad")
