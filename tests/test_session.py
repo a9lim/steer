@@ -150,6 +150,137 @@ class TestGeneration:
         with pytest.raises(KeyError, match="nonexistent"):
             session.generate("Hello.", alphas={"nonexistent": 0.1})
 
+class TestCloning:
+    def test_clone_from_corpus_end_to_end(self, session, tmp_path):
+        from saklas.paths import concept_dir, safe_model_id
+
+        pirate_lines = [
+            "Arr matey, the briny deep be calling me name once more tonight",
+            "Yo ho ho, we be sailing for doubloons afore the sun comes up",
+            "Shiver me timbers, that cursed kraken nearly swallowed the whole crew",
+            "Avast ye scurvy dogs, bring that grog barrel over to the quarterdeck",
+            "Blimey, the cap'n be fouler than rotten fish on a humid afternoon",
+            "Hoist the colors high lads, we be running from no king's navy",
+            "The black spot upon me palm means me days be numbered now",
+            "Batten down the hatches boys, a squall be rolling in from starboard",
+            "Dead men tell no tales, or so the old pirate proverb claims",
+            "Splice the mainbrace tonight mates, we've earned a proper ration of rum",
+            "Me parrot squawks louder than the bosun on a windy morning watch",
+            "That treasure map be worth more than any galleon full of silver",
+            "Heave ho ye landlubbers, put yer backs into haulin' that anchor chain",
+            "The Jolly Roger flutters proud above our weathered mast this fine dawn",
+            "Keelhaul the traitor at first light, let the barnacles teach him manners",
+            "Arr, this grog tastes like bilge water but a pirate drinks regardless",
+            "The spyglass shows merchant sails on the horizon, ripe for the takin'",
+            "Load the cannons double-shot, we be givin' them no quarter today",
+            "A pirate's life be hard but the rum and plunder make it worthwhile",
+            "Walk the plank ye mutinous cur, the sharks be hungry this morning",
+            "The compass points nowhere useful when the devil's fog rolls thick",
+            "Pieces of eight clatter sweet as music on the captain's oaken table",
+            "Me peg leg aches afore every storm like a cursed weather vane",
+            "The sea be a cruel mistress, takin' good men and givin' naught back",
+            "Hoist the black flag and prepare to board her starboard side smartly",
+            "That Spanish galleon rides low, heavy laden with colonial gold no doubt",
+            "A pirate without a ship be naught but a drunkard on the shore",
+            "Bury the chest deep beneath the third palm tree on Skull Isle",
+            "The crow's nest spotted a frigate bearin' down on us from windward",
+            "Sing a shanty loud enough to drown the groanin' of the old hull",
+        ]
+        corpus = tmp_path / "pirate_corpus.txt"
+        corpus.write_text("\n".join(pirate_lines), encoding="utf-8")
+        assert len(set(pirate_lines)) == len(pirate_lines)
+
+        folder = concept_dir("local", "pirate_test")
+        try:
+            canonical, profile = session.clone_from_corpus(
+                str(corpus), name="pirate_test", n_pairs=10, seed=42, force=True,
+            )
+            assert canonical == "pirate_test"
+            assert isinstance(profile, dict) and len(profile) > 0
+            assert all(isinstance(k, int) for k in profile)
+            for layer_idx, tensor in profile.items():
+                assert tensor.numel() > 0
+                assert torch.linalg.vector_norm(tensor.float()).item() > 0, (
+                    f"layer {layer_idx} baked tensor is all zeros"
+                )
+
+            sid = safe_model_id(session.model_id)
+            assert folder.exists()
+            assert (folder / "pack.json").exists()
+            assert (folder / "statements.json").exists()
+            assert (folder / f"{sid}.safetensors").exists()
+
+            # Probe path: add as probe, generate, score. Asserts scoring runs clean.
+            session.probe("pirate_test", profile)
+            try:
+                session.clear_history()
+                result = session.generate(
+                    "Describe your morning.", alphas=None,
+                )
+                readings = result.readings or {}
+                if "pirate_test" in readings:
+                    val = readings["pirate_test"]
+                    assert val == val  # finite, not NaN
+                    assert -1.5 <= val <= 1.5
+            finally:
+                session.unprobe("pirate_test")
+
+            # Steering path: register and generate with α=1, compare a bundled
+            # probe reading against the unsteered baseline on the same prompt.
+            session.steer("pirate_test", profile)
+            try:
+                prompt = "Tell me about your day."
+                session.clear_history()
+                unsteered = session.generate(prompt)
+                session.clear_history()
+                steered = session.generate(prompt, alphas={"pirate_test": 1.0})
+                assert len(steered.text) > 0
+                # Baseline shift assertion — loose. Only run if we share a probe.
+                u_read = unsteered.readings or {}
+                s_read = steered.readings or {}
+                shared = set(u_read) & set(s_read)
+                if shared:
+                    diffs = [abs(u_read[k] - s_read[k]) for k in shared]
+                    assert max(diffs) > 1e-6, (
+                        "α=1 steering produced identical probe readings "
+                        f"to unsteered on {sorted(shared)}"
+                    )
+            finally:
+                session.unsteer("pirate_test")
+        finally:
+            if folder.exists():
+                import shutil
+                shutil.rmtree(folder, ignore_errors=True)
+
+    def test_extract_cli_roundtrip(self, tmp_path):
+        import subprocess, sys
+        from saklas.paths import concept_dir, safe_model_id
+
+        folder = concept_dir("default", "happy.sad")
+        sid = safe_model_id(MODEL_ID)
+        tensor_path = folder / f"{sid}.safetensors"
+        created_here = not tensor_path.exists()
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "saklas", "extract",
+                 "happy.sad", "-m", MODEL_ID],
+                capture_output=True, text=True, timeout=600,
+            )
+            assert proc.returncode == 0, (
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+            )
+            assert tensor_path.exists(), f"expected {tensor_path} to exist"
+        finally:
+            # Only unlink the per-model tensor if this test created it;
+            # leave the bundled statements.json and any pre-existing tensor alone.
+            if created_here and tensor_path.exists():
+                tensor_path.unlink()
+                sidecar = folder / f"{sid}.json"
+                if sidecar.exists():
+                    sidecar.unlink()
+
+
 class TestStreamingGeneration:
     def test_generate_stream(self, session):
         session.clear_history()
