@@ -10,7 +10,7 @@
 
 You also get a *trait monitor*: 21 pre-built probes that quietly score every response on affect, epistemic stance, register, alignment, and social/cultural dimensions, drawing live sparklines as the model talks.
 
-And — new in 1.4 — you can **clone a persona from a text sample**. Point `saklas clone` at a file of utterances (one per line) and it extracts a steering vector for that voice, no contrastive pair authoring required. `saklas clone transcripts.txt -N hunter` and `/steer hunter 0.5` is the whole workflow.
+And — new in 1.4 — you can **clone a persona from a text sample**. Point `saklas pack clone` at a file of utterances (one per line) and it extracts a steering vector for that voice, no contrastive pair authoring required. `saklas pack clone transcripts.txt -N hunter` and `/steer hunter 0.5` is the whole workflow.
 
 Three ways to use it:
 
@@ -34,7 +34,7 @@ It also owes a large debt to [**repeng**](https://github.com/vgel/repeng) by The
 
 ```bash
 pip install saklas
-saklas google/gemma-3-4b-it
+saklas tui google/gemma-3-4b-it
 ```
 
 That's the whole thing. The first run downloads the model, extracts the 21 bundled probes against it (a one-time cost, cached to disk), and drops you into the TUI. Try `/steer angry 0.3` — saklas resolves that to the bundled `angry.calm` axis with α = +0.3 and the model leans angry. Type `/steer calm 0.3` and you get the same vector at α = −0.3. `[` and `]` nudge temperature; `Ctrl+A` does A/B compare against the unsteered baseline; `Ctrl+Y` paints each token by how strongly any probe lit up on it.
@@ -130,9 +130,9 @@ Probes extract on first run against a new model and cache to `~/.saklas/vectors/
 ## Terminal UI
 
 ```bash
-saklas google/gemma-2-9b-it
-saklas mistralai/Mistral-7B-Instruct-v0.3 -q 4bit
-saklas meta-llama/Llama-3.1-8B-Instruct -p affect register
+saklas tui google/gemma-2-9b-it
+saklas tui mistralai/Mistral-7B-Instruct-v0.3 -q 4bit
+saklas tui meta-llama/Llama-3.1-8B-Instruct -p affect register
 ```
 
 Three panels: the **vector registry** on the left (with live alpha knobs and config), the **chat** in the center, the **trait monitor** on the right (sparklines per probe, sorted by current magnitude or delta). `Tab` cycles focus; arrow keys navigate and adjust.
@@ -411,35 +411,40 @@ Each concept is a folder with `pack.json` (metadata + file hashes), `statements.
 
 Packs are distributed as **HuggingFace model repos** (not datasets — safetensors is model-hub-native, and `base_model` frontmatter gives you reverse-link discoverability from the base model's hub page). Pin any install to a git tag, branch, or SHA with `@revision`; pinned installs stay pinned on refresh.
 
-**Pack-less install.** `saklas install` also handles HF repos that have no `pack.json` at root: it scans for `*.safetensors`/`*.gguf`, fabricates minimal metadata, and synthesizes a `pack.json` in place. **Repeng-style GGUF-only control-vector repos install with zero preparation** — try `saklas install jukofyork/creative-writing-control-vectors-v3.0`.
+**Pack-less install.** `saklas pack install` also handles HF repos that have no `pack.json` at root: it scans for `*.safetensors`/`*.gguf`, fabricates minimal metadata, and synthesizes a `pack.json` in place. **Repeng-style GGUF-only control-vector repos install with zero preparation** — try `saklas pack install jukofyork/creative-writing-control-vectors-v3.0`.
 
 ### Commands
 
 ```bash
-saklas install <target> [-s] [-a NS/NAME] [-f]    # from HF coord or folder
-saklas refresh <selector> [-m MODEL]              # re-pull from source
-saklas refresh neutrals                           # reserved: rewrite neutral_statements.json
-saklas clear <selector> [-m MODEL] [-y]           # delete per-model tensors
-saklas uninstall <selector> [-y]                  # remove folder (bundled respawns)
-saklas list [selector] [-i] [-j] [-v]             # includes HF hub by default
-saklas merge <name> <components> [-m] [-f] [-s]   # saklas merge bard default/angry.calm:0.3,user/arch:0.4
-saklas push <selector> [-a OWNER/NAME] [-pm MODEL] [-snt] [-d] [-f]
-saklas export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
-saklas clone <corpus-file> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
-saklas extract <concept> | <pos> <neg> [-m MODEL] [-f]
+saklas pack install <target> [-s] [-a NS/NAME] [-f]    # from HF coord or folder
+saklas pack refresh <selector> [-m MODEL]              # re-pull from source
+saklas pack refresh neutrals                           # reserved: rewrite neutral_statements.json
+saklas pack clear <selector> [-m MODEL] [-y]           # delete per-model tensors
+saklas pack rm <selector> [-y]                         # remove folder (bundled respawns)
+saklas pack ls [selector] [-j] [-v]                    # LOCAL installed packs only
+saklas pack search <query> [-j] [-v]                   # search HF hub for saklas-pack repos
+saklas pack merge <name> <components> [-m] [-f] [-s]   # saklas pack merge bard default/angry.calm:0.3,user/arch:0.4
+saklas pack push <selector> [-a OWNER/NAME] [-pm MODEL] [-snt] [-d] [-f]
+saklas pack export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
+saklas pack clone <corpus-file> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
+saklas pack extract <concept> | <pos> <neg> [-m MODEL] [-f]
+saklas config show [-c PATH] [--no-default]            # print effective merged config
+saklas config validate <file>                          # exit 0 valid / 2 invalid (CI hook)
 ```
 
 **Selectors** (shared grammar): `<name>`, `<ns>/<name>`, `tag:<tag>`, `namespace:<ns>`, `default`, `all`. Bare names resolve cross-namespace and error on ambiguity.
 
-**`clear` vs `uninstall`**: `clear` deletes tensors but keeps `statements.json` and `pack.json` (the concept stays selectable and will re-extract on demand). `uninstall` removes the whole folder; bundled concepts respawn on next session init. Broad selectors (`all`, `namespace:`) require `-y` on both.
+**`ls` vs `search`**: `pack ls` lists only locally installed packs under `~/.saklas/vectors/`. To discover packs on the HuggingFace hub, use `pack search <query>` — it queries for model repos tagged `saklas-pack`.
+
+**`clear` vs `rm`**: `pack clear` deletes tensors but keeps `statements.json` and `pack.json` (the concept stays selectable and will re-extract on demand). `pack rm` removes the whole folder; bundled concepts respawn on next session init. Broad selectors (`all`, `namespace:`) require `-y` on both.
 
 **`push`** publishes a concept folder as a HuggingFace model repo. Default coord is `<whoami>/<pack_name>`; `--as` overrides. YAML frontmatter auto-fills `library_name: saklas`, the merged tag set, a `base_model:` list derived from sidecar filenames, and `base_model_relation: adapter`. `.gitattributes` pins `*.safetensors` to LFS. `--tag-version` creates a `v<pack.version>` tag so downstream installs can pin reproducibly.
 
 **`export gguf`** writes the pack's baked tensors to llama.cpp's control-vector GGUF format (`pip install saklas[gguf]`). Because saklas bakes per-layer shares into the tensor magnitudes, a uniform `--control-vector-scaled` scalar on the llama.cpp side reproduces saklas's layer weighting with no per-layer metadata — repeng-compatible as well. Bundled concepts refuse in-place export (their folder gets restored on `refresh`) — use `-o` to write outside the pack.
 
-**`clone`** extracts a steering vector from a text corpus of a single voice — one utterance per line, no contrastive pair authoring needed. The loaded model rewrites sampled lines in a neutral voice (batched 5 at a time), pairs each persona line with its neutralized twin, and feeds the result to the standard contrastive-PCA pipeline. Output is a monopolar vector saved under `local/<name>/`, cached on `sha256(corpus) + n_pairs + batch_size + seed`. Short corpora (below ~10 usable lines after a length filter) are rejected rather than extracted badly. The source corpus is *not* copied into the pack; only the model-generated pairs and the resulting tensor, so `saklas push` of a cloned pack publishes derived artifacts, never the original text.
+**`clone`** extracts a steering vector from a text corpus of a single voice — one utterance per line, no contrastive pair authoring needed. The loaded model rewrites sampled lines in a neutral voice (batched 5 at a time), pairs each persona line with its neutralized twin, and feeds the result to the standard contrastive-PCA pipeline. Output is a monopolar vector saved under `local/<name>/`, cached on `sha256(corpus) + n_pairs + batch_size + seed`. Short corpora (below ~10 usable lines after a length filter) are rejected rather than extracted badly. The source corpus is *not* copied into the pack; only the model-generated pairs and the resulting tensor, so `saklas pack push` of a cloned pack publishes derived artifacts, never the original text.
 
-**`extract`** is the CLI verb for the extraction path that was previously only reachable through `/steer`, `/probe`, or YAML-config auto-install. `saklas extract angry.sad` (or `saklas extract angry sad`) runs the standard pipeline for a named concept and saves the tensor to disk. On cache hit it says so and exits; `-f` re-extracts.
+**`extract`** is the CLI verb for the extraction path that was previously only reachable through `/steer`, `/probe`, or YAML-config auto-install. `saklas pack extract angry.sad` (or `saklas pack extract angry sad`) runs the standard pipeline for a named concept and saves the tensor to disk. On cache hit it says so and exits; `-f` re-extracts.
 
 All of the above is also available programmatically via `saklas.cache_ops`.
 

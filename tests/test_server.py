@@ -322,7 +322,7 @@ class TestSession:
 class TestCLIParsing:
     def test_tui_default(self):
         from saklas.cli import parse_args
-        args = parse_args(["google/gemma-2-2b-it"])
+        args = parse_args(["tui", "google/gemma-2-2b-it"])
         assert args.command == "tui"
         assert args.model == "google/gemma-2-2b-it"
 

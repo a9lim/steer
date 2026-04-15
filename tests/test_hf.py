@@ -330,7 +330,7 @@ def test_push_pack_dry_run_writes_card_and_gitattributes(tmp_path, monkeypatch):
     assert "library_name: saklas" in card
     assert "google/gemma-2-2b-it" in card  # base_model listed
     assert "base_model_relation: adapter" in card
-    assert "saklas install alice/happy" in card
+    assert "saklas pack install alice/happy" in card
 
 
 def test_push_pack_filters_statements_only(tmp_path, monkeypatch):

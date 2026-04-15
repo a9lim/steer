@@ -455,6 +455,49 @@ def _all_local() -> list[ResolvedConcept]:
     return resolve(Selector(kind="all", value=None))
 
 
+def list_local_packs(
+    selector: Optional[Selector],
+    *,
+    json_output: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Print installed packs only (no HF query). Backs `saklas pack ls`."""
+    list_concepts(
+        selector,
+        hf=False,
+        installed_only=True,
+        json_output=json_output,
+        verbose=verbose,
+    )
+
+
+def search_remote_packs(query: str, *, json_output: bool = False, verbose: bool = False) -> None:
+    """Search HF hub for saklas-pack model repos matching ``query``.
+
+    Backs `saklas pack search <query>`.
+    """
+    from saklas.cli_selectors import Selector as _Sel
+    sel = _Sel(kind="name", value=query, namespace=None) if query else None
+    try:
+        from saklas.hf import search_packs, HFError
+    except ImportError as e:
+        print(f"saklas pack search unavailable: {e}")
+        return
+    try:
+        rows = search_packs(sel)
+    except Exception as e:
+        print(f"hf search failed: {type(e).__name__}: {e}")
+        return
+    if json_output:
+        import json as _json
+        print(_json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("(no matches)")
+        return
+    _print_hf_rows(rows, verbose=verbose)
+
+
 def list_concepts(
     selector: Optional[Selector],
     *,

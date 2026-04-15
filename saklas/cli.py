@@ -1,10 +1,21 @@
-"""CLI entry point for saklas."""
+"""CLI entry point for saklas.
+
+Top-level shape (v2 hard break):
+
+    saklas tui <model> [...]
+    saklas serve <model> [...]
+    saklas pack {install,refresh,clear,rm,ls,search,merge,push,export,clone,extract} ...
+    saklas config {show,validate} ...
+
+There is no bare-TUI mode. ``saklas`` with no arguments prints help.
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.resource_tracker")
 
@@ -14,7 +25,7 @@ os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.res
 # ---------------------------------------------------------------------------
 
 def _add_common_args(p: argparse.ArgumentParser) -> None:
-    """Model-loading args shared between the bare TUI and `serve`."""
+    """Model-loading args shared between `tui` and `serve`."""
     p.add_argument(
         "model",
         help="HuggingFace model ID or local path (e.g. google/gemma-2-9b-it)",
@@ -36,6 +47,13 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="Probe categories: all, none, affect, epistemic, alignment, register, social_stance, cultural (default: all)",
     )
+
+
+def _add_config_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("-c", "--config", action="append", default=None, metavar="PATH",
+                   help="Load setup YAML (repeatable; later overrides earlier)")
+    p.add_argument("-s", "--strict", action="store_true",
+                   help="With -c: fail hard on missing vectors")
 
 
 def _resolve_probes(raw: list[str] | None) -> list[str]:
@@ -66,82 +84,90 @@ def _print_model_info(session) -> None:
     print(f"Loaded {len(session.probes)} probes")
 
 
+def _load_effective_config(args: argparse.Namespace):
+    """Compose ~/.saklas/config.yaml + any -c files and stamp args in place.
+
+    Returns the composed ConfigFile (poles pre-resolved). Sets:
+      args.config_vectors, args.temperature, args.top_p, args.thinking,
+      args.system_prompt, args.max_tokens, and args.model (if YAML supplied it).
+    """
+    from saklas.config_file import (
+        ConfigFile, apply_flag_overrides, ensure_vectors_installed,
+    )
+    extras = [Path(p) for p in (getattr(args, "config", None) or [])]
+    composed = ConfigFile.effective(extras, include_default=True)
+    composed = apply_flag_overrides(
+        composed,
+        model=getattr(args, "model", None),
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        system_prompt=None,
+    )
+    composed = composed.resolve_poles()
+    if getattr(args, "model", None) is None:
+        args.model = composed.model
+    args.temperature = composed.temperature
+    args.top_p = composed.top_p
+    args.thinking = composed.thinking
+    args.system_prompt = composed.system_prompt
+    args.max_tokens = composed.max_tokens if composed.max_tokens is not None else 1024
+    args.config_vectors = composed.vectors
+    ensure_vectors_installed(composed, strict=getattr(args, "strict", False))
+    return composed
+
+
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
 
-_SUBCOMMAND_DESCRIPTIONS: list[tuple[str, str]] = [
-    ("serve",     "Start the OpenAI/Ollama-compatible API server"),
+_PACK_VERBS: list[tuple[str, str]] = [
     ("install",   "Install a concept pack from HF or a local folder"),
     ("refresh",   "Re-pull concept(s) from their source"),
     ("clear",     "Delete per-model tensors for matched concepts"),
-    ("uninstall", "Fully remove a concept folder"),
-    ("list",      "List installed concepts (and HF concepts by default)"),
+    ("rm",        "Fully remove a concept folder"),
+    ("ls",        "List locally installed concept packs"),
+    ("search",    "Search the HuggingFace hub for concept packs"),
     ("merge",     "Merge existing vectors into a new pack"),
     ("push",      "Push a concept pack to HF as a model repo"),
+    ("export",    "Export a pack to an interchange format (gguf)"),
     ("clone",     "Clone a persona from a text corpus"),
     ("extract",   "Extract a steering vector for a concept"),
 ]
 
 
-def _tui_epilog() -> str:
-    width = max(len(name) for name, _ in _SUBCOMMAND_DESCRIPTIONS)
-    lines = ["subcommands:"]
-    for name, desc in _SUBCOMMAND_DESCRIPTIONS:
-        lines.append(f"  {name:<{width}}  {desc}")
-    lines.append("")
-    lines.append("Run `saklas <subcommand> -h` for subcommand options.")
-    lines.append("With no subcommand, launches the TUI for the given model.")
-    return "\n".join(lines)
+def _build_tui_parser(parser: argparse.ArgumentParser) -> None:
+    # When a model supplies -c/--config pointing at a YAML with model: set,
+    # the positional can be omitted. Handled in _run_tui via composed config.
+    parser.add_argument("model", nargs="?", default=None,
+                        help="HuggingFace model ID or local path")
+    parser.add_argument("-q", "--quantize", choices=["4bit", "8bit"], default=None,
+                        help="Quantization mode (default: bf16/fp16)")
+    parser.add_argument("-d", "--device", default="auto",
+                        help="Device: auto (detect), cuda, mps, or cpu")
+    parser.add_argument("-p", "--probes", nargs="*", default=None,
+                        help="Probe categories (default: all)")
+    parser.add_argument("--max-tokens", type=int, default=1024,
+                        help="Default max generation tokens")
+    _add_config_args(parser)
 
 
-def _build_tui_parser(model_optional: bool = False) -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="saklas",
-        description="Activation steering + trait monitoring for local HuggingFace models",
-        epilog=_tui_epilog(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _add_common_args(p)
-    if model_optional:
-        # Allow `saklas -c foo.yaml` to supply the model via YAML instead of
-        # a positional argument. Usage will show `[model]` in this case, but
-        # the normal help (the one users actually see) keeps it unbracketed.
-        for action in p._actions:
-            if action.dest == "model":
-                action.nargs = "?"
-                action.default = None
-                break
-
-    p.add_argument("-c", "--config", action="append", default=None, metavar="PATH",
-                   help="Load setup YAML (repeatable; later overrides earlier)")
-    p.add_argument("-s", "--strict", action="store_true",
-                   help="With -c: fail hard on missing vectors")
-    return p
+def _build_serve_parser(parser: argparse.ArgumentParser) -> None:
+    _add_common_args(parser)
+    parser.add_argument("-H", "--host", default="0.0.0.0", help="Bind address")
+    parser.add_argument("-P", "--port", type=int, default=8000, help="Bind port")
+    parser.add_argument("-S", "--steer", action="append", default=[], metavar="NAME[:ALPHA]",
+                        help="Pre-load a steering vector (repeatable)")
+    parser.add_argument("-C", "--cors", action="append", default=[], metavar="ORIGIN",
+                        help="CORS allowed origin (repeatable)")
+    parser.add_argument("-k", "--api-key", default=None, metavar="KEY",
+                        help="Require Bearer token auth; falls back to $SAKLAS_API_KEY")
+    _add_config_args(parser)
 
 
-def _build_serve_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas serve", description="Start OpenAI-compatible API server")
-    _add_common_args(p)
-    p.add_argument("-H", "--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    p.add_argument("-P", "--port", type=int, default=8000, help="Bind port (default: 8000)")
-    p.add_argument(
-        "-S", "--steer", action="append", default=[], metavar="NAME[:ALPHA]",
-        help="Pre-load a steering vector (repeatable). e.g. --steer cheerful:0.2",
-    )
-    p.add_argument(
-        "-C", "--cors", action="append", default=[], metavar="ORIGIN",
-        help="CORS allowed origin (repeatable). Omit for no CORS.",
-    )
-    p.add_argument(
-        "-k", "--api-key", default=None, metavar="KEY",
-        help="Require Bearer token auth. Falls back to $SAKLAS_API_KEY. Unset = no auth.",
-    )
-    return p
+# --- pack subtree --------------------------------------------------------
 
-
-def _build_install_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas install", description="Install a concept pack from HF or a local folder")
+def _build_pack_install(p: argparse.ArgumentParser) -> None:
     p.add_argument("target", help="<ns>/<concept>[@revision] or path to a concept folder")
     p.add_argument("-s", "--statements-only", action="store_true",
                    help="Keep statements.json only; drop any bundled tensors")
@@ -149,222 +175,179 @@ def _build_install_parser() -> argparse.ArgumentParser:
                    help="Relocate the installed pack under a different namespace/name")
     p.add_argument("-f", "--force", action="store_true",
                    help="Overwrite an existing installation")
-    return p
 
 
-def _build_refresh_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas refresh",
-                                description="Re-pull concept(s) from their source (or `neutrals` to refresh neutral_statements.json)")
-    p.add_argument("selector", help="Selector (name, tag:x, namespace:x, default, all) or the literal 'neutrals'")
+def _build_pack_refresh(p: argparse.ArgumentParser) -> None:
+    p.add_argument("selector", help="Selector or the literal 'neutrals'")
     p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="Scope the refresh to one model's tensors (delete its safetensors + sidecar)")
-    return p
+                   help="Scope to one model's tensors")
 
 
-def _build_clear_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas clear",
-                                description="Delete per-model tensors for matched concepts (keeps statements.json)")
+def _build_pack_clear(p: argparse.ArgumentParser) -> None:
     p.add_argument("selector", help="Selector (name, tag:x, namespace:x, default, all)")
     p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
                    help="Scope to one model's tensors only (default: all models)")
     p.add_argument("-y", "--yes", action="store_true",
                    help="Skip confirmation prompt on broad selectors")
-    return p
 
 
-def _build_uninstall_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas uninstall",
-                                description="Fully remove a concept folder (tensors + statements + pack.json)")
+def _build_pack_rm(p: argparse.ArgumentParser) -> None:
     p.add_argument("selector", help="Selector (name, tag:x, namespace:x, default, all)")
     p.add_argument("-y", "--yes", action="store_true",
                    help="Required for broad selectors (all, namespace:)")
-    return p
 
 
-def _build_list_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas list",
-                                description="List installed concepts (and HF concepts by default)")
+def _build_pack_ls(p: argparse.ArgumentParser) -> None:
     p.add_argument("selector", nargs="?", default=None,
                    help="Optional selector (name, tag:x, namespace:x, default, all)")
-    p.add_argument("-i", "--installed", action="store_true",
-                   help="Show only locally installed concepts (skip HF query)")
     p.add_argument("-j", "--json", dest="json_output", action="store_true",
                    help="Emit machine-readable JSON instead of a table")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Include descriptions in the table output")
-    return p
 
 
-def _build_push_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas push",
-                                description="Push a concept pack to Hugging Face as a model repo")
+def _build_pack_search(p: argparse.ArgumentParser) -> None:
+    p.add_argument("query", nargs="?", default="",
+                   help="Search text (matched against HF model ids)")
+    p.add_argument("-j", "--json", dest="json_output", action="store_true",
+                   help="Emit machine-readable JSON instead of a table")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Include descriptions in the table output")
+
+
+def _build_pack_push(p: argparse.ArgumentParser) -> None:
     p.add_argument("selector", help="Single concept selector (name or ns/name)")
-    p.add_argument("-a", "--as", dest="as_target", default=None, metavar="OWNER/NAME",
-                   help="Target HF coord (default: <whoami>/<pack_name>)")
-    p.add_argument("-p", "--private", action="store_true",
-                   help="Create the repo as private")
-    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="Only push tensors for this base model")
-    p.add_argument("-s", "--statements-only", action="store_true",
-                   help="Push statements.json only; skip all tensors")
-    p.add_argument("-n", "--no-statements", action="store_true",
-                   help="Skip statements.json; push tensors only")
-    p.add_argument("-t", "--tag-version", action="store_true",
-                   help="Create git tag v<pack.version> on the commit")
-    p.add_argument("-d", "--dry-run", action="store_true",
-                   help="Stage the upload but don't contact HF")
-    p.add_argument("-f", "--force", action="store_true",
-                   help="Allow republishing a pack whose source is bundled/hf://")
-    return p
+    p.add_argument("-a", "--as", dest="as_target", default=None, metavar="OWNER/NAME")
+    p.add_argument("-p", "--private", action="store_true")
+    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
+    p.add_argument("-s", "--statements-only", action="store_true")
+    p.add_argument("-n", "--no-statements", action="store_true")
+    p.add_argument("-t", "--tag-version", action="store_true")
+    p.add_argument("-d", "--dry-run", action="store_true")
+    p.add_argument("-f", "--force", action="store_true")
 
 
-def _build_export_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas export",
-                                description="Export a concept pack to an interchange format")
+def _build_pack_export(p: argparse.ArgumentParser) -> None:
     sub = p.add_subparsers(dest="format", required=True)
     g = sub.add_parser("gguf", help="Export baked tensors to llama.cpp GGUF")
     g.add_argument("selector", help="Single concept selector (name or ns/name)")
-    g.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="Base model to export (default: all models in the pack)")
-    g.add_argument("-o", "--output", default=None, metavar="PATH",
-                   help="Output file (single-model) or directory (multi-model). "
-                        "Default: write alongside the safetensors tensor in the pack folder.")
-    g.add_argument("--model-hint", default=None, metavar="HINT",
-                   help="Override the controlvector.model_hint field (default: "
-                        "derived from the safe_model_id in the tensor filename)")
-    return p
+    g.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
+    g.add_argument("-o", "--output", default=None, metavar="PATH")
+    g.add_argument("--model-hint", default=None, metavar="HINT")
 
 
-def _build_clone_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="saklas clone",
-        description="Clone a persona from a text corpus (one utterance per line)",
-    )
+def _build_pack_clone(p: argparse.ArgumentParser) -> None:
     p.add_argument("corpus_path", help="Path to a UTF-8 text file, one utterance per line")
-    p.add_argument("-N", "--name", required=True,
-                   help="Persona identifier (stored under local/<name>)")
-    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="HuggingFace model ID or local path to run extraction on")
-    p.add_argument("-n", "--n-pairs", dest="n_pairs", type=int, default=90,
-                   help="Number of contrastive pairs to build (default: 90)")
-    p.add_argument("--seed", type=int, default=None,
-                   help="Random seed for corpus sampling")
-    p.add_argument("-f", "--force", action="store_true",
-                   help="Overwrite an existing cloned vector")
+    p.add_argument("-N", "--name", required=True, help="Persona identifier (stored under local/<name>)")
+    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
+    p.add_argument("-n", "--n-pairs", dest="n_pairs", type=int, default=90)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("-f", "--force", action="store_true")
     p.set_defaults(quantize=None, device="auto", probes=None)
-    return p
 
 
-def _build_extract_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="saklas extract",
-        description="Extract a steering vector for a concept (bipolar or monopolar)",
-    )
+def _build_pack_extract(p: argparse.ArgumentParser) -> None:
     p.add_argument("concept", nargs="+",
-                   help="Either one concept (e.g. 'happy.sad' or 'agentic') "
-                        "or two poles (e.g. 'happy' 'sad')")
-    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="HuggingFace model ID or local path to run extraction on")
-    p.add_argument("-f", "--force", action="store_true",
-                   help="Re-extract even if a cached tensor exists")
+                   help="Either one concept (e.g. 'happy.sad') or two poles (e.g. 'happy' 'sad')")
+    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
+    p.add_argument("-f", "--force", action="store_true")
     p.set_defaults(quantize=None, device="auto", probes=None)
-    return p
 
 
-def _build_merge_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="saklas merge",
-                                description="Merge existing vectors into a new pack")
+def _build_pack_merge(p: argparse.ArgumentParser) -> None:
     p.add_argument("name", help="New pack name (written under local/)")
     p.add_argument("components", help="Comma-separated components: ns/a:0.3,ns/b:0.4")
-    p.add_argument("-f", "--force", action="store_true",
-                   help="Overwrite an existing merged pack")
-    p.add_argument("-s", "--strict", action="store_true",
-                   help="Fail if any component is missing")
-    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID",
-                   help="Restrict the merge to tensors for one model")
-    return p
+    p.add_argument("-f", "--force", action="store_true")
+    p.add_argument("-s", "--strict", action="store_true")
+    p.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
+
+
+_PACK_BUILDERS = {
+    "install": _build_pack_install,
+    "refresh": _build_pack_refresh,
+    "clear":   _build_pack_clear,
+    "rm":      _build_pack_rm,
+    "ls":      _build_pack_ls,
+    "search":  _build_pack_search,
+    "merge":   _build_pack_merge,
+    "push":    _build_pack_push,
+    "export":  _build_pack_export,
+    "clone":   _build_pack_clone,
+    "extract": _build_pack_extract,
+}
+
+
+def _build_pack_parser(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="pack_cmd", required=False, metavar="VERB")
+    for verb, desc in _PACK_VERBS:
+        child = sub.add_parser(verb, help=desc, description=desc)
+        _PACK_BUILDERS[verb](child)
+
+
+# --- config subtree ------------------------------------------------------
+
+def _build_config_parser(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="config_cmd", required=False, metavar="VERB")
+
+    show = sub.add_parser("show", help="Print the effective merged config")
+    show.add_argument("-c", "--config", action="append", default=None, metavar="PATH",
+                      help="Extra YAML files to compose on top of ~/.saklas/config.yaml")
+    show.add_argument("-m", "--model", default=None,
+                      help="Override model field in output")
+    show.add_argument("--no-default", action="store_true",
+                      help="Skip loading ~/.saklas/config.yaml")
+
+    validate = sub.add_parser("validate", help="Validate a config file (CI hook)")
+    validate.add_argument("file", help="Path to YAML config file")
 
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def _argv_has_config(argv: list[str]) -> bool:
-    for a in argv:
-        if a in ("-c", "--config") or a.startswith("--config="):
-            return True
-    return False
+def _build_root_parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(
+        prog="saklas",
+        description="Activation steering + trait monitoring for local HuggingFace models",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "top-level verbs:\n"
+            "  tui      Launch the interactive TUI (requires <model>)\n"
+            "  serve    Start the OpenAI + Ollama compatible API server\n"
+            "  pack     Manage concept packs (install/ls/search/extract/...)\n"
+            "  config   Inspect and validate saklas config files\n"
+            "\n"
+            "Run `saklas <verb> -h` for verb-specific options."
+        ),
+    )
+    sub = root.add_subparsers(dest="command", required=False, metavar="VERB")
+
+    tui = sub.add_parser("tui", help="Launch the interactive TUI", description="Launch the interactive TUI")
+    _build_tui_parser(tui)
+
+    serve = sub.add_parser("serve", help="Start the API server", description="Start the API server")
+    _build_serve_parser(serve)
+
+    pack = sub.add_parser("pack", help="Manage concept packs", description="Manage concept packs")
+    _build_pack_parser(pack)
+
+    cfg = sub.add_parser("config", help="Inspect/validate config", description="Inspect/validate config")
+    _build_config_parser(cfg)
+
+    return root
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if argv is None:
         argv = sys.argv[1:]
-
-    # Zero-arg: print friendly hint and exit cleanly.
+    parser = _build_root_parser()
+    # Zero-arg: print help+hint and exit 0 (not argparse's exit 2).
     if not argv:
-        _print_no_model_hint()
+        parser.print_help()
+        print()
+        print("try 'saklas tui <model_id>' or 'saklas --help'")
         sys.exit(0)
-
-    if argv and argv[0] in _SUBCOMMAND_TABLE:
-        cmd = argv[0]
-        args = _SUBCOMMAND_TABLE[cmd][0]().parse_args(argv[1:])
-        args.command = cmd
-        return args
-
-    # Bare form: TUI. Allow missing model only when -c/--config is given,
-    # so the normal `saklas -h` usage line shows `model` unbracketed.
-    model_optional = _argv_has_config(argv)
-    args = _build_tui_parser(model_optional=model_optional).parse_args(argv)
-    args.command = "tui"
-
-    if args.config:
-        from pathlib import Path as _P
-        from saklas.config_file import (
-            ConfigFile, compose, apply_flag_overrides, ensure_vectors_installed,
-        )
-        loaded = [ConfigFile.load(_P(p)) for p in args.config]
-        composed = compose(loaded)
-        composed = apply_flag_overrides(
-            composed,
-            model=args.model,
-            temperature=None,
-            top_p=None,
-            max_tokens=None,
-            system_prompt=None,
-        )
-        args.model = composed.model or args.model
-        args.temperature = composed.temperature
-        args.top_p = composed.top_p
-        args.thinking = composed.thinking
-        args.system_prompt = composed.system_prompt
-        args.max_tokens = composed.max_tokens if composed.max_tokens is not None else 1024
-        args.config_vectors = composed.vectors
-        ensure_vectors_installed(composed, strict=args.strict)
-    else:
-        args.config_vectors = {}
-        args.temperature = None
-        args.top_p = None
-        args.thinking = None
-
-    if args.model is None:
-        # Reached only via `saklas -c foo.yaml` whose YAML doesn't set a model.
-        _print_no_model_hint()
-        sys.exit(0)
-    return args
-
-
-def _print_no_model_hint() -> None:
-    msg = (
-        "saklas needs a model to run.\n"
-        "\n"
-        "Pass a HuggingFace repo id or local path, e.g.\n"
-        "  saklas Qwen/Qwen3.5-2B\n"
-        "  saklas google/gemma-4-E2B-it\n"
-        "\n"
-        "Browse more models at https://huggingface.co/models?pipeline_tag=text-generation\n"
-        "Run `saklas --help` for all options, or `saklas list` to see installed concept packs."
-    )
-    print(msg)
+    return parser.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -385,12 +368,8 @@ def _setup_steering_vectors(
 ) -> dict[str, float]:
     """Resolve pole aliases, extract profiles, register with session.
 
-    vector_specs is either a dict[coord, alpha] (config/TUI form, possibly
-    namespaced as `ns/name`) or an iterable of `(raw, alpha)` tuples
-    (serve `--steer` form, bare names only).
-
-    Returns a dict[registry_key, effective_alpha] — the caller uses it as
-    the default_alphas map for the server, or discards it for the TUI.
+    vector_specs is either a dict[coord, alpha] or an iterable of
+    ``(raw, alpha)`` tuples. Returns ``dict[registry_key, effective_alpha]``.
     """
     from saklas.cli_selectors import resolve_pole, AmbiguousSelectorError
 
@@ -441,8 +420,17 @@ def _setup_steering_vectors(
 
 
 def _run_tui(args: argparse.Namespace) -> None:
-    _print_startup(args)
+    _load_effective_config(args)
+    if not args.model:
+        print(
+            "saklas tui: model required. Pass a HuggingFace repo id (e.g.\n"
+            "  saklas tui google/gemma-2-2b-it\n"
+            "or supply it via -c setup.yaml with a `model:` field.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
+    _print_startup(args)
     session = _make_session(args)
     _print_model_info(session)
 
@@ -454,7 +442,6 @@ def _run_tui(args: argparse.Namespace) -> None:
 
 
 def _parse_steer_flag(raw: str) -> tuple[str, float]:
-    """Parse 'name:alpha' or 'name' into (name, alpha)."""
     if ":" in raw:
         name, alpha_s = raw.rsplit(":", 1)
         return name, float(alpha_s)
@@ -473,11 +460,16 @@ def _run_serve(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    _print_startup(args)
+    _load_effective_config(args)
 
+    _print_startup(args)
     session = _make_session(args)
     _print_model_info(session)
 
+    # Config-file vectors first, then explicit --steer flags on top.
+    config_specs = getattr(args, "config_vectors", {}) or {}
+    if config_specs:
+        _setup_steering_vectors(session, config_specs, verbose=True)
     steer_specs = [_parse_steer_flag(spec) for spec in args.steer]
     default_alphas = _setup_steering_vectors(session, steer_specs, verbose=True)
 
@@ -498,12 +490,7 @@ def _run_serve(args: argparse.Namespace) -> None:
 
 
 def _warmup_session(session) -> None:
-    """Run a tiny stateless generation so the first real request is fast.
-
-    Warms up lazy kernel compilation, KV cache allocation, and any JIT paths
-    before uvicorn starts accepting traffic.  Uses a per-call SamplingConfig
-    override so session.config is never mutated.
-    """
+    """Run a tiny stateless generation so the first real request is fast."""
     import time as _time
     from saklas.sampling import SamplingConfig
     print("Warming up generation kernels...", flush=True)
@@ -517,6 +504,23 @@ def _warmup_session(session) -> None:
         print(f"  warmed in {_time.monotonic() - start:.1f}s")
     except Exception as e:
         print(f"  warm-up skipped: {e}")
+
+
+# --- pack runners --------------------------------------------------------
+
+def _run_pack(args: argparse.Namespace) -> None:
+    pack_cmd = getattr(args, "pack_cmd", None)
+    if pack_cmd is None:
+        print("usage: saklas pack <verb> [...]")
+        print()
+        width = max(len(v) for v, _ in _PACK_VERBS)
+        for v, desc in _PACK_VERBS:
+            print(f"  {v:<{width}}  {desc}")
+        print()
+        print("Run `saklas pack <verb> -h` for verb-specific options.")
+        sys.exit(0)
+    runner = _PACK_RUNNERS[pack_cmd]
+    runner(args)
 
 
 def _run_install(args: argparse.Namespace) -> None:
@@ -562,7 +566,7 @@ def _run_clear(args: argparse.Namespace) -> None:
     print(f"Deleted {n} files")
 
 
-def _run_uninstall(args: argparse.Namespace) -> None:
+def _run_rm(args: argparse.Namespace) -> None:
     from saklas import cache_ops
     from saklas.cli_selectors import parse as sel_parse
 
@@ -575,15 +579,22 @@ def _run_uninstall(args: argparse.Namespace) -> None:
     print(f"Uninstalled {n} concept(s)")
 
 
-def _run_list(args: argparse.Namespace) -> None:
+def _run_ls(args: argparse.Namespace) -> None:
     from saklas import cache_ops
     from saklas.cli_selectors import parse as sel_parse
 
     selector = sel_parse(args.selector) if args.selector else None
-    cache_ops.list_concepts(
+    cache_ops.list_local_packs(
         selector,
-        hf=not args.installed,
-        installed_only=args.installed,
+        json_output=args.json_output,
+        verbose=args.verbose,
+    )
+
+
+def _run_search(args: argparse.Namespace) -> None:
+    from saklas import cache_ops
+    cache_ops.search_remote_packs(
+        args.query,
         json_output=args.json_output,
         verbose=args.verbose,
     )
@@ -647,7 +658,7 @@ def _run_push(args: argparse.Namespace) -> None:
 
 def _require_model(args: argparse.Namespace) -> None:
     if not args.model:
-        print(f"{args.command}: -m/--model is required", file=sys.stderr)
+        print(f"{args.pack_cmd}: -m/--model is required", file=sys.stderr)
         sys.exit(2)
 
 
@@ -658,8 +669,6 @@ def _run_clone(args: argparse.Namespace) -> None:
     )
     from saklas.cli_selectors import _all_concepts
 
-    # Collision warning: if the requested name matches an existing concept
-    # in some other namespace, tell the user how to disambiguate.
     for c in _all_concepts():
         if c.name == args.name and c.namespace != "local":
             print(
@@ -689,7 +698,7 @@ def _run_clone(args: argparse.Namespace) -> None:
 
 def _run_extract(args: argparse.Namespace) -> None:
     _require_model(args)
-    from saklas.session import BIPOLAR_SEP, canonical_concept_name
+    from saklas.session import canonical_concept_name
 
     if len(args.concept) == 1:
         raw = args.concept[0]
@@ -727,7 +736,6 @@ def _run_extract(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     if args.force:
-        # Best-effort cache-skip: remove cached tensors so extract() regenerates.
         for p in candidate_paths:
             if p.exists():
                 p.unlink()
@@ -743,31 +751,114 @@ def _run_extract(args: argparse.Namespace) -> None:
 
     final_path = next((p for p in candidate_paths if p.exists()), None)
     if final_path is None:
-        # Fall back to the local folder path that session.extract would use.
         final_path = (
             pathlib.Path(session._local_concept_folder(canonical)) / f"{sid}.safetensors"
         )
     print(f"extracted {canonical} -> {final_path}")
 
 
-_SUBCOMMAND_TABLE = {
-    "serve":     (_build_serve_parser,     _run_serve),
-    "install":   (_build_install_parser,   _run_install),
-    "refresh":   (_build_refresh_parser,   _run_refresh),
-    "clear":     (_build_clear_parser,     _run_clear),
-    "uninstall": (_build_uninstall_parser, _run_uninstall),
-    "list":      (_build_list_parser,      _run_list),
-    "merge":     (_build_merge_parser,     _run_merge),
-    "push":      (_build_push_parser,      _run_push),
-    "export":    (_build_export_parser,    _run_export),
-    "clone":     (_build_clone_parser,     _run_clone),
-    "extract":   (_build_extract_parser,   _run_extract),
+_PACK_RUNNERS = {
+    "install": _run_install,
+    "refresh": _run_refresh,
+    "clear":   _run_clear,
+    "rm":      _run_rm,
+    "ls":      _run_ls,
+    "search":  _run_search,
+    "merge":   _run_merge,
+    "push":    _run_push,
+    "export":  _run_export,
+    "clone":   _run_clone,
+    "extract": _run_extract,
+}
+
+
+# --- config runners ------------------------------------------------------
+
+def _run_config(args: argparse.Namespace) -> None:
+    cmd = getattr(args, "config_cmd", None)
+    if cmd == "show":
+        _run_config_show(args)
+    elif cmd == "validate":
+        _run_config_validate(args)
+    else:
+        print("usage: saklas config {show,validate}")
+        print()
+        print("  show      Print the effective merged config")
+        print("  validate  Validate a config file (exit 0 valid, 2 invalid)")
+        sys.exit(0)
+
+
+def _run_config_show(args: argparse.Namespace) -> None:
+    from saklas import __version__
+    from saklas.config_file import ConfigFile, apply_flag_overrides
+    extras = [Path(p) for p in (args.config or [])]
+    composed = ConfigFile.effective(extras, include_default=not args.no_default)
+    if args.model is not None:
+        composed = apply_flag_overrides(composed, model=args.model)
+    composed = composed.resolve_poles()
+    header = f"# effective merged config for saklas {__version__}"
+    sys.stdout.write(composed.to_yaml(header=header))
+
+
+def _run_config_validate(args: argparse.Namespace) -> None:
+    from saklas.config_file import ConfigFile, ConfigFileError, ensure_vectors_installed
+    p = Path(args.file)
+    if not p.exists():
+        print(f"config validate: {p}: file not found", file=sys.stderr)
+        sys.exit(2)
+    try:
+        cfg = ConfigFile.load(p)
+        cfg = cfg.resolve_poles()
+        # Dry-run: don't install, just check resolvability.
+        from saklas.cli_selectors import _all_concepts
+        installed = {(c.namespace, c.name) for c in _all_concepts()}
+        installed_names = {c.name for c in _all_concepts()}
+        missing: list[str] = []
+        for coord in cfg.vectors:
+            if "/" in coord:
+                ns, name = coord.split("/", 1)
+                if ns == "default" or (ns, name) in installed:
+                    continue
+                if ns == "local":
+                    missing.append(coord)
+                    continue
+                # HF namespace — we assume install would succeed; don't probe.
+                continue
+            else:
+                if coord in installed_names:
+                    continue
+                missing.append(coord)
+        if missing:
+            raise ConfigFileError(
+                f"unresolvable vectors (not installed and no namespace to install from): {missing}"
+            )
+    except ConfigFileError as e:
+        print(f"config validate: {p}: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        print(f"config validate: {p}: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(f"{p}: ok")
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+_COMMAND_RUNNERS = {
+    "tui":    _run_tui,
+    "serve":  _run_serve,
+    "pack":   _run_pack,
+    "config": _run_config,
 }
 
 
 def main(argv: list[str] | None = None):
     args = parse_args(argv)
-    if args.command == "tui":
-        _run_tui(args)
-    else:
-        _SUBCOMMAND_TABLE[args.command][1](args)
+    cmd = getattr(args, "command", None)
+    if cmd is None:
+        # argparse with required=False returns None when no verb given but
+        # argv was non-empty (shouldn't happen — parse_args catches []).
+        _build_root_parser().print_help()
+        sys.exit(0)
+    _COMMAND_RUNNERS[cmd](args)

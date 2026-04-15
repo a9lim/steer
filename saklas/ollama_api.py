@@ -516,7 +516,7 @@ def register_ollama_routes(app: FastAPI) -> None:
     @app.post("/api/push")
     async def api_push():
         return JSONResponse(status_code=501, content={
-            "error": "saklas does not implement /api/push. Use `saklas push` for concept packs.",
+            "error": "saklas does not implement /api/push. Use `saklas pack push` for concept packs.",
         })
 
     @app.post("/api/create")

@@ -34,6 +34,75 @@ class ConfigFile:
     system_prompt: Optional[str] = None
 
     @classmethod
+    def load_default(cls) -> Optional["ConfigFile"]:
+        """Load ``~/.saklas/config.yaml`` if it exists, else return ``None``."""
+        from saklas.paths import saklas_home
+        p = saklas_home() / "config.yaml"
+        if not p.exists():
+            return None
+        return cls.load(p)
+
+    @classmethod
+    def effective(
+        cls,
+        extra_paths: list[Path] | None = None,
+        *,
+        include_default: bool = True,
+    ) -> "ConfigFile":
+        """Compose the default config + extras into a single ConfigFile.
+
+        Order: ``~/.saklas/config.yaml`` (if present) → extras (in order).
+        Later entries override earlier ones.
+        """
+        chain: list[ConfigFile] = []
+        if include_default:
+            default = cls.load_default()
+            if default is not None:
+                chain.append(default)
+        for p in extra_paths or []:
+            chain.append(cls.load(Path(p)))
+        return compose(chain) if chain else cls()
+
+    def to_dict(self) -> dict:
+        out: dict = {}
+        for f in ("model", "thinking", "temperature", "top_p", "max_tokens", "system_prompt"):
+            v = getattr(self, f)
+            if v is not None:
+                out[f] = v
+        if self.vectors:
+            out["vectors"] = dict(self.vectors)
+        return out
+
+    def to_yaml(self, *, header: Optional[str] = None) -> str:
+        import yaml
+        body = yaml.safe_dump(self.to_dict(), sort_keys=False, default_flow_style=False)
+        if header:
+            return f"{header}\n{body}"
+        return body
+
+    def resolve_poles(self) -> "ConfigFile":
+        """Return a copy with ``vectors`` keys run through ``resolve_pole``.
+
+        Bare poles like ``wolf`` resolve to ``deer.wolf`` with sign -1; the
+        alpha is negated accordingly. Namespaced keys stay in their namespace.
+        """
+        from saklas.cli_selectors import resolve_pole, AmbiguousSelectorError
+        out: dict[str, float] = {}
+        for coord, alpha in self.vectors.items():
+            if "/" in coord:
+                ns, name = coord.split("/", 1)
+            else:
+                ns, name = None, coord
+            try:
+                canonical, sign, _match = resolve_pole(name, namespace=ns)
+            except AmbiguousSelectorError:
+                out[coord] = alpha
+                continue
+            key = f"{ns}/{canonical}" if ns else canonical
+            out[key] = alpha * sign
+        return replace(self, vectors=out)
+
+    @classmethod
     def load(cls, path: Path) -> "ConfigFile":
         import yaml
         try:
@@ -103,7 +172,13 @@ def ensure_vectors_installed(config: ConfigFile, *, strict: bool) -> list[str]:
     missing: list[str] = []
     for coord, _alpha in config.vectors.items():
         if "/" not in coord:
-            msg = f"vector {coord!r}: must be '<ns>/<name>'"
+            # Bare name: resolve across namespaces. If a match exists locally,
+            # treat as installed; otherwise require an explicit <ns>/<name>.
+            from saklas.cli_selectors import _all_concepts
+            matches = [c for c in _all_concepts() if c.name == coord]
+            if matches:
+                continue
+            msg = f"vector {coord!r}: must be '<ns>/<name>' (no installed match)"
             if strict:
                 raise ConfigFileError(msg)
             log.warning(msg)
