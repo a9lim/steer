@@ -265,6 +265,14 @@ class SaklasApp(App):
                 )
                 return
             self._handle_probe(parts[1])
+        elif cmd == "/extract":
+            if len(parts) < 2:
+                chat.add_system_message(
+                    'Usage: /extract "concept"\n'
+                    '       /extract "concept" - "baseline"'
+                )
+                return
+            self._handle_extract_only(parts[1])
         elif cmd == "/clear":
             if self._gen_active:
                 self._pending_action = ("clear",)
@@ -326,6 +334,8 @@ class SaklasApp(App):
                 '/steer "concept" - "baseline" [alpha],\n'
                 '/probe "concept", '
                 '/probe "concept" - "baseline",\n'
+                '/extract "concept", '
+                '/extract "concept" - "baseline",\n'
                 '/clear, /rewind, /sys [prompt], '
                 "/temp [val], /top-p [val], /max [n], /exit, /help\n"
                 "Keys: ⇥ focus · ←/→ alpha · ↑/↓ nav · ↩ toggle\n"
@@ -378,12 +388,14 @@ class SaklasApp(App):
             return concept, baseline, alpha
         return concept, baseline
 
-    def _handle_extract(self, text: str, include_alpha: bool, on_success) -> None:
+    def _handle_extract(self, text: str, include_alpha: bool, on_success,
+                        pending_type: str | None = None) -> None:
         chat = self._chat_panel
         if self._ab_in_progress:
             chat.add_system_message("Cannot modify vectors during A/B comparison.")
             return
-        pending_type = "steer" if include_alpha else "probe"
+        if pending_type is None:
+            pending_type = "steer" if include_alpha else "probe"
         if self._gen_active:
             self._pending_action = (pending_type, text)
             self._session._gen_state.request_stop()
@@ -451,6 +463,17 @@ class SaklasApp(App):
             self._session.probe(name, profile)
             self.call_from_thread(self._on_probe_added, name)
         self._handle_extract(text, include_alpha=False, on_success=_on_success)
+
+    def _handle_extract_only(self, text: str) -> None:
+        def _on_success(name, _profile, _alpha):
+            # Pure cache-warm: no steering, no probe, no panel state.
+            self.call_from_thread(
+                self._steer_status, f"extracted '{name}'"
+            )
+        self._handle_extract(
+            text, include_alpha=False, on_success=_on_success,
+            pending_type="extract",
+        )
 
     def _steer_status(self, msg: str) -> None:
         self._chat_panel.add_system_message(msg)
@@ -791,6 +814,8 @@ class SaklasApp(App):
                 self._handle_steer(pending[1])
             elif kind == "probe":
                 self._handle_probe(pending[1])
+            elif kind == "extract":
+                self._handle_extract_only(pending[1])
             elif kind == "quit":
                 self.exit()
         except KeyboardInterrupt:
