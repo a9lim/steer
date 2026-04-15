@@ -39,7 +39,7 @@ _log = logging.getLogger(__name__)
 _BATCH_SIZE = 5
 _MIN_WORDS = 6
 _MIN_CORPUS_LINES = 10
-_TOKENS_PER_REWRITE = 50
+_TOKENS_PER_REWRITE = 80  # ~flat budget per rewrite line; 50 truncated long inputs
 
 _NUMBERED_RE = re.compile(r"^\s*(\d+)[.)]\s*(.*?)\s*$")
 
@@ -147,10 +147,7 @@ def _fit_check(
 ) -> bool:
     """Rough upper-bound fit check for a single batch."""
     prompt = _build_neutralize_prompt(batch)
-    try:
-        ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    except Exception:
-        ids = tokenizer.encode(prompt, add_special_tokens=False)
+    ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     # Add slack for chat template wrapping.
     overhead = 64
     return (len(ids) + overhead + generation_budget) <= ctx_len
@@ -219,8 +216,8 @@ def clone_from_corpus(
     Cache: keyed on corpus sha256 + n_pairs + batch_size + seed +
     model. Pass `force=True` to bypass.
     """
-    # Local imports to avoid a circular import with saklas.session.
-    from saklas.session import canonical_concept_name, _N_PAIRS
+    # Local import to avoid a circular import with saklas.session.
+    from saklas.session import canonical_concept_name
 
     path = pathlib.Path(path)
     if not path.exists():
@@ -234,6 +231,37 @@ def clone_from_corpus(
 
     folder = concept_dir("local", canonical)
     folder.mkdir(parents=True, exist_ok=True)
+
+    corpus_sha = hash_file(path)
+    cache_path = folder / f"{safe_model_id(session.model_id)}.safetensors"
+
+    # Cache hit check.
+    #   seed is not None -> must match exactly.
+    #   seed is None     -> ignore seed, reuse any prior run with matching
+    #                       corpus/n_pairs/batch_size.
+    if not force and cache_path.exists() and (folder / "pack.json").exists():
+        try:
+            raw_pack = json.loads((folder / "pack.json").read_text())
+            cached_sha = raw_pack.get("corpus_sha256")
+            cached_n = raw_pack.get("n_pairs")
+            cached_bs = raw_pack.get("batch_size")
+            cached_seed = raw_pack.get("seed")
+            seed_ok = True if seed is None else cached_seed == seed
+            if (
+                cached_sha == corpus_sha
+                and cached_n is not None
+                and cached_bs == _BATCH_SIZE
+                and seed_ok
+            ):
+                profile, _m = _load_profile(str(cache_path))
+                profile = session._promote_profile(profile)
+                _log.info("cloned %s (cache hit) -> %s", canonical, folder)
+                return canonical, profile
+        except (PackFormatError, FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+            pass
+
+    # Placeholder pack.json so downstream helpers (_update_local_pack_files)
+    # have something to operate on. Overwritten in full at the end.
     if not (folder / "pack.json").exists():
         PackMetadata(
             name=canonical,
@@ -245,33 +273,6 @@ def clone_from_corpus(
             source="local",
             files={},
         ).write(folder)
-
-    corpus_sha = hash_file(path)
-    cache_path = folder / f"{safe_model_id(session.model_id)}.safetensors"
-
-    # Cache hit check.
-    if not force and cache_path.exists():
-        try:
-            meta = PackMetadata.load(folder)
-            extra = getattr(meta, "extra", None) or {}
-            # PackMetadata may not round-trip unknown fields; fall back to raw.
-            raw_pack = json.loads((folder / "pack.json").read_text())
-            cached_sha = raw_pack.get("corpus_sha256")
-            cached_n = raw_pack.get("n_pairs")
-            cached_bs = raw_pack.get("batch_size")
-            cached_seed = raw_pack.get("seed")
-            if (
-                cached_sha == corpus_sha
-                and cached_n is not None
-                and cached_bs == _BATCH_SIZE
-                and cached_seed == seed
-            ):
-                profile, _m = _load_profile(str(cache_path))
-                profile = session._promote_profile(profile)
-                print(f"cloned {canonical} (cache hit) -> {folder}")
-                return canonical, profile
-        except (PackFormatError, FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
-            pass
 
     lines = _filter_corpus(path)
     if len(lines) < _MIN_CORPUS_LINES:
@@ -295,20 +296,28 @@ def clone_from_corpus(
     sample = _sample_lines(lines, n_pairs, rng)
     batches = _chunk(sample, _BATCH_SIZE)
 
-    # Fit check (use worst-case = longest batch). Context length via model config.
-    ctx_len = getattr(session._model.config, "max_position_embeddings", None) or 4096
-    longest = max(batches, key=len)
-    budget = len(longest) * _TOKENS_PER_REWRITE + 32
-    if not _fit_check(session._tokenizer, longest, budget, ctx_len):
-        raise CorpusTooLongError(
-            f"batch prompt + generation budget exceeds context length "
-            f"({ctx_len}); try a smaller --n-pairs or shorter corpus lines"
+    # Fit check: every batch, not just the one with the most lines — a
+    # short batch of long lines can still overflow. Context length via
+    # model config with a loud fallback.
+    ctx_len = getattr(session._model.config, "max_position_embeddings", None)
+    if ctx_len is None:
+        logging.warning(
+            "model config missing max_position_embeddings; assuming 4096 context window"
         )
+        ctx_len = 4096
+    for b in batches:
+        budget = len(b) * _TOKENS_PER_REWRITE + 32
+        if not _fit_check(session._tokenizer, b, budget, ctx_len):
+            raise CorpusTooLongError(
+                f"batch prompt + generation budget exceeds context length "
+                f"({ctx_len}); try a smaller --n-pairs or shorter corpus lines"
+            )
 
     # Save and clear steering state — extracted pairs must not be
-    # contaminated by whatever's currently active.
+    # contaminated by whatever's currently active. Shallow dict() is
+    # safe: inner profile dicts are immutable references, we only
+    # clear the outer mapping via clear_all().
     saved_vectors = dict(session._steering.vectors)
-    had_hooks = bool(session._steering.hooks)
     session._steering.clear_all()
 
     pairs: list[tuple[str, str]] = []
@@ -334,15 +343,16 @@ def clone_from_corpus(
         # Restore prior vector registrations.
         for vname, vdata in saved_vectors.items():
             session._steering.add_vector(vname, vdata["profile"], vdata["alpha"])
-        if had_hooks:
+        if saved_vectors:
             session._steering.apply_to_model(
                 session._layers, session._device, session._dtype,
             )
 
-    if len(pairs) < _N_PAIRS // 2:
+    min_pairs = max(n_pairs // 2, 4)
+    if len(pairs) < min_pairs:
         raise InsufficientPairsError(
             f"only {len(pairs)} pairs survived generation; "
-            f"need at least {_N_PAIRS // 2}"
+            f"need at least {min_pairs}"
         )
 
     # Persist statements.json in the same shape as bundled packs.
@@ -360,30 +370,26 @@ def clone_from_corpus(
     })
     profile = session._promote_profile(profile)
 
-    # Stamp clone-specific descriptive metadata, then let the shared
-    # session helper refresh `pack.json.files` with fresh hashes.
-    try:
-        meta = PackMetadata.load(folder)
-        meta.tags = sorted(set((meta.tags or []) + ["cloned"]))
-        meta.description = f"Cloned from {path.name}"
-        meta.source = "local"
-        meta.write(folder)
-    except PackFormatError:
-        pass
+    # Let the shared session helper refresh `pack.json.files` with
+    # fresh hashes of everything now on disk (tensor + sidecar +
+    # statements.json). This writes pack.json once.
     session._update_local_pack_files(folder)
 
-    # Stamp cloning-specific metadata directly (PackMetadata may not
-    # carry arbitrary fields on write).
+    # Single final pack.json overwrite: merge descriptive + clone
+    # metadata on top of whatever _update_local_pack_files produced.
     raw_pack = json.loads((folder / "pack.json").read_text())
+    raw_pack["description"] = f"Cloned from {path.name}"
+    raw_pack["source"] = "local"
+    raw_pack["tags"] = sorted(set((raw_pack.get("tags") or []) + ["cloned"]))
     raw_pack["corpus_sha256"] = corpus_sha
     raw_pack["n_pairs"] = n_pairs
     raw_pack["batch_size"] = _BATCH_SIZE
-    raw_pack["seed"] = seed
+    raw_pack["seed"] = effective_seed
     (folder / "pack.json").write_text(json.dumps(raw_pack, indent=2))
 
-    print(
-        f"cloned {canonical} -> {folder}\n"
-        f"corpus not included in pack; statements.json contains "
-        f"model-generated pairs only"
+    _log.info(
+        "cloned %s -> %s (corpus not included in pack; statements.json contains "
+        "model-generated pairs only)",
+        canonical, folder,
     )
     return canonical, profile
