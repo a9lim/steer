@@ -301,7 +301,7 @@ def clone_from_corpus(
     # model config with a loud fallback.
     ctx_len = getattr(session._model.config, "max_position_embeddings", None)
     if ctx_len is None:
-        logging.warning(
+        _log.warning(
             "model config missing max_position_embeddings; assuming 4096 context window"
         )
         ctx_len = 4096
