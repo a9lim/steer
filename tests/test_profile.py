@@ -4,8 +4,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from saklas.errors import SaklasError
-from saklas.profile import Profile, ProfileError
+from saklas.core.errors import SaklasError
+from saklas.core.profile import Profile, ProfileError
 
 
 def _mk(layers=(0, 5, 10), dim=8, dtype=torch.float32):
@@ -92,7 +92,7 @@ def test_merged_intersection_semantics():
 def test_merged_strict_refuses_drop():
     a = Profile({0: torch.ones(4), 1: torch.ones(4)})
     b = Profile({1: torch.ones(4), 2: torch.ones(4)})
-    from saklas.merge import MergeError
+    from saklas.io.merge import MergeError
     with pytest.raises(MergeError):
         Profile.merged([(a, 1.0), (b, 1.0)], strict=True)
 

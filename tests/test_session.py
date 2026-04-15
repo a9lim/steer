@@ -5,7 +5,7 @@ google/gemma-3-4b-it (~8GB) on first run.
 from __future__ import annotations
 import pytest
 import torch
-from saklas.results import GenerationResult, TokenEvent
+from saklas.core.results import GenerationResult, TokenEvent
 
 _HAS_GPU = torch.cuda.is_available() or torch.backends.mps.is_available()
 pytestmark = pytest.mark.skipif(
@@ -17,7 +17,7 @@ MODEL_ID = "google/gemma-3-4b-it"
 
 @pytest.fixture(scope="module")
 def session():
-    from saklas.session import SaklasSession
+    from saklas.core.session import SaklasSession
     # device="auto" picks cuda > mps > cpu; skipif above guarantees a GPU.
     s = SaklasSession.from_pretrained(MODEL_ID, device="auto", probes=["affect"])
     yield s
@@ -70,7 +70,7 @@ class TestSteering:
         assert len(profile) > 0
 
     def test_extract_datasource(self, session):
-        from saklas.datasource import DataSource
+        from saklas.io.datasource import DataSource
         ds = DataSource(pairs=[("formal", "casual")])
         name, profile = session.extract(ds)
         assert isinstance(profile, dict)
@@ -85,7 +85,7 @@ class TestMonitoring:
 
 class TestLifecycle:
     def test_context_manager(self):
-        from saklas.session import SaklasSession
+        from saklas.core.session import SaklasSession
         with SaklasSession.from_pretrained(MODEL_ID, device="auto", probes=[]) as s:
             assert s.model_info["model_type"].startswith("gemma3")
 
@@ -152,7 +152,7 @@ class TestGeneration:
 
 class TestCloning:
     def test_clone_from_corpus_end_to_end(self, session, tmp_path):
-        from saklas.paths import concept_dir, safe_model_id
+        from saklas.io.paths import concept_dir, safe_model_id
 
         pirate_lines = [
             "Arr matey, the briny deep be calling me name once more tonight",
@@ -254,7 +254,7 @@ class TestCloning:
 
     def test_extract_cli_roundtrip(self, tmp_path):
         import subprocess, sys
-        from saklas.paths import concept_dir, safe_model_id
+        from saklas.io.paths import concept_dir, safe_model_id
 
         folder = concept_dir("default", "happy.sad")
         sid = safe_model_id(MODEL_ID)

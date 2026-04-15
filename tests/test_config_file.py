@@ -1,7 +1,7 @@
 
 import pytest
 
-from saklas import config_file as cfg
+from saklas.cli import config_file as cfg
 
 
 def test_parse_minimal(tmp_path):
@@ -40,7 +40,7 @@ def test_parse_unknown_keys_warn_but_accept(tmp_path, caplog):
     p = tmp_path / "setup.yaml"
     p.write_text("model: x\nsomething_new: 1\n")
     import logging
-    caplog.set_level(logging.WARNING, logger="saklas.config_file")
+    caplog.set_level(logging.WARNING, logger="saklas.cli.config_file")
     c = cfg.ConfigFile.load(p)
     assert c.model == "x"
     assert any("unknown" in r.message for r in caplog.records)
@@ -79,7 +79,7 @@ def test_apply_flag_overrides():
 
 def test_ensure_vectors_installed_all_present(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     d = tmp_path / "vectors" / "default" / "happy"
     d.mkdir(parents=True)
     (d / "statements.json").write_text("[]")
@@ -102,7 +102,7 @@ def test_ensure_vectors_installed_missing_hf(monkeypatch, tmp_path):
         installed["target"] = target
         return tmp_path / "vectors" / "user" / "happy"
 
-    monkeypatch.setattr("saklas.cache_ops.install", fake_install)
+    monkeypatch.setattr("saklas.io.cache_ops.install", fake_install)
     c = cfg.ConfigFile(vectors={"user/happy": 0.5})
     missing = cfg.ensure_vectors_installed(c, strict=False)
     assert installed["target"] == "user/happy"
@@ -157,7 +157,7 @@ def test_to_yaml_roundtrip(tmp_path):
 
 def test_resolve_poles_bare_name(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     d = tmp_path / "vectors" / "local" / "deer.wolf"
     d.mkdir(parents=True)
     (d / "statements.json").write_text("[]")
@@ -166,7 +166,7 @@ def test_resolve_poles_bare_name(monkeypatch, tmp_path):
         tags=[], recommended_alpha=0.5, source="local",
         files={"statements.json": packs.hash_file(d / "statements.json")},
     ).write(d)
-    from saklas.cli_selectors import invalidate
+    from saklas.cli.selectors import invalidate
     invalidate()
 
     c = cfg.ConfigFile(vectors={"wolf": 0.5})

@@ -21,6 +21,8 @@ introduced this file — no aliases.
 
 from __future__ import annotations
 
+from saklas.server.app import ws_auth_ok
+
 import asyncio
 import json
 import time
@@ -32,14 +34,14 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from saklas.errors import SaklasError
-from saklas.generation import supports_thinking
-from saklas.probes_bootstrap import load_defaults
-from saklas.profile import Profile
-from saklas.results import GenerationResult
-from saklas.sampling import SamplingConfig
-from saklas.session import SaklasSession
-from saklas.steering import Steering
+from saklas.core.errors import SaklasError
+from saklas.core.generation import supports_thinking
+from saklas.io.probes_bootstrap import load_defaults
+from saklas.core.profile import Profile
+from saklas.core.results import GenerationResult
+from saklas.core.sampling import SamplingConfig
+from saklas.core.session import SaklasSession
+from saklas.core.steering import Steering
 
 
 _SINGLE_SESSION_ID = "default"
@@ -256,7 +258,7 @@ def _result_to_json(result: GenerationResult | None) -> dict:
 
 
 def _per_token_probes(session: SaklasSession, n_tokens: int) -> list[dict]:
-    scores = getattr(session, "_last_per_token_scores", None)
+    scores = session.last_per_token_scores
     if not scores:
         return []
     out: list[dict] = []
@@ -489,8 +491,10 @@ def register_saklas_routes(app: FastAPI) -> None:
 
     @app.websocket("/saklas/v1/sessions/{session_id}/stream")
     async def session_stream(websocket: WebSocket, session_id: str):
-        # Lazy import avoids a top-level cycle with saklas.server.
-        from saklas.server import ws_auth_ok
+        # NOTE: only ``session_id == "default"`` is actually reachable
+        # here — HF model ids contain '/' and the FastAPI path parameter
+        # is not declared ``{session_id:path}``, so the model-id branch
+        # is an HTTP-route convenience only.  Kept as a no-op guard.
         if not ws_auth_ok(websocket):
             await websocket.close(code=1008, reason="unauthorized")
             return

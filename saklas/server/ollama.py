@@ -20,6 +20,8 @@ Key differences from real Ollama:
 
 from __future__ import annotations
 
+from saklas.server.app import acquire_session_lock
+
 import hashlib
 import json
 import logging
@@ -32,9 +34,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from saklas.sampling import SamplingConfig
-from saklas.session import ConcurrentGenerationError, SaklasSession
-from saklas.steering import Steering
+from saklas.core.sampling import SamplingConfig
+from saklas.core.session import ConcurrentGenerationError, SaklasSession
+from saklas.core.steering import Steering
 
 log = logging.getLogger(__name__)
 
@@ -656,7 +658,6 @@ def register_ollama_routes(app: FastAPI) -> None:
 
         model_name = str(body.get("model") or session.model_id)
 
-        from saklas.server import acquire_session_lock
         async with acquire_session_lock(session) as acquired:
             if not acquired:
                 yield json.dumps({

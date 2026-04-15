@@ -20,7 +20,7 @@ from typing import Iterable, Iterator, Mapping
 
 import torch
 
-from saklas.errors import SaklasError
+from saklas.core.errors import SaklasError
 
 
 class ProfileError(ValueError, SaklasError):
@@ -133,7 +133,7 @@ class Profile:
         refuse v1.x packs. Metadata passed here overrides / augments the
         profile's own ``self.metadata``.
         """
-        from saklas.vectors import save_profile as _save
+        from saklas.core.vectors import save_profile as _save
 
         merged: dict = dict(self._metadata)
         if metadata:
@@ -149,7 +149,7 @@ class Profile:
         migration script. GGUF files carry metadata in-header and are
         exempt from the format_version gate.
         """
-        from saklas.vectors import load_profile as _load
+        from saklas.core.vectors import load_profile as _load
 
         tensors, meta = _load(str(path))
         return cls(tensors, metadata=meta)
@@ -161,7 +161,7 @@ class Profile:
         uniform ``--control-vector-scaled`` scalar reproduces saklas's
         per-layer weighting without needing a per-layer metadata slot.
         """
-        from saklas.gguf_io import write_gguf_profile
+        from saklas.io.gguf_io import write_gguf_profile
 
         write_gguf_profile(self._tensors, path, model_hint=model_hint)
 
@@ -177,7 +177,7 @@ class Profile:
         Delegates to :func:`saklas.merge.linear_sum`. Layer set is the
         intersection of every component; ``strict=True`` raises on drop.
         """
-        from saklas.merge import linear_sum
+        from saklas.io.merge import linear_sum
 
         pairs = [(p.as_dict(), float(a)) for p, a in components]
         if len(pairs) < 2:

@@ -7,14 +7,14 @@ from pathlib import Path
 
 import torch
 
-from saklas.packs import (
+from saklas.io.packs import (
     ConceptFolder, PackFormatError, Sidecar,
     hash_file, materialize_bundled,
 )
-from saklas.paths import (
+from saklas.io.paths import (
     concept_dir, model_dir, neutral_statements_path, safe_model_id, vectors_dir,
 )
-from saklas.vectors import (
+from saklas.core.vectors import (
     compute_layer_means, extract_contrastive, load_contrastive_pairs,
     load_profile, save_profile,
 )

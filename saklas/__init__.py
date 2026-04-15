@@ -2,8 +2,8 @@
 
 __version__ = "1.4.0"
 
-from saklas.errors import SaklasError
-from saklas.events import (
+from saklas.core.errors import SaklasError
+from saklas.core.events import (
     EventBus,
     GenerationFinished,
     GenerationStarted,
@@ -12,12 +12,12 @@ from saklas.events import (
     SteeringCleared,
     VectorExtracted,
 )
-from saklas.profile import Profile, ProfileError
-from saklas.sampling import SamplingConfig
-from saklas.session import SaklasSession
-from saklas.steering import Steering
-from saklas.datasource import DataSource
-from saklas.results import GenerationResult, TokenEvent, ProbeReadings, ResultCollector
+from saklas.core.profile import Profile, ProfileError
+from saklas.core.sampling import SamplingConfig
+from saklas.core.session import SaklasSession
+from saklas.core.steering import Steering
+from saklas.io.datasource import DataSource
+from saklas.core.results import GenerationResult, TokenEvent, ProbeReadings, ResultCollector
 
 __all__ = [
     "SaklasSession",

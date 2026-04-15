@@ -207,7 +207,7 @@ class TraitMonitor:
         similarities against all probes. When ``accumulate`` is False,
         history and stats are left untouched.
         """
-        from saklas.vectors import _encode_and_capture_all
+        from saklas.core.vectors import _encode_and_capture_all
 
         if device is None:
             device = next(model.parameters()).device

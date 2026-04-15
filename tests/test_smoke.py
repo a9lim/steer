@@ -29,7 +29,7 @@ _EXTRACTION_BUDGET_S = 60.0 if _IS_MPS else 10.0
 
 @pytest.fixture(scope="module")
 def model_and_tokenizer():
-    from saklas.model import load_model
+    from saklas.core.model import load_model
     # device="auto" picks cuda > mps > cpu; the skipif above guarantees a GPU.
     model, tokenizer = load_model(MODEL_ID, quantize=None, device="auto")
     return model, tokenizer
@@ -37,7 +37,7 @@ def model_and_tokenizer():
 
 @pytest.fixture(scope="module")
 def layers(model_and_tokenizer):
-    from saklas.model import get_layers
+    from saklas.core.model import get_layers
     model, _ = model_and_tokenizer
     return get_layers(model)
 
@@ -49,13 +49,13 @@ def num_layers(layers):
 
 def _extract_profile(model, tokenizer, concept, layers):
     """Extract a profile for a single concept with one pair."""
-    from saklas.vectors import extract_contrastive
+    from saklas.core.vectors import extract_contrastive
     return extract_contrastive(model, tokenizer, [{"positive": concept, "negative": ""}], layers=layers)
 
 
 @pytest.fixture(scope="module")
 def layer_means(model_and_tokenizer, layers):
-    from saklas.vectors import compute_layer_means
+    from saklas.core.vectors import compute_layer_means
     model, tokenizer = model_and_tokenizer
     return compute_layer_means(model, tokenizer, layers)
 
@@ -92,8 +92,8 @@ class TestVectorExtraction:
 
 class TestSteering:
     def test_steered_output_differs(self, model_and_tokenizer, layers, happy_profile):
-        from saklas.hooks import SteeringManager
-        from saklas.generation import GenerationConfig, GenerationState, generate_steered
+        from saklas.core.hooks import SteeringManager
+        from saklas.core.generation import GenerationConfig, GenerationState, generate_steered
 
         model, tokenizer = model_and_tokenizer
         device = next(model.parameters()).device
@@ -124,8 +124,8 @@ class TestSteering:
         assert ids0 != ids1, "Steered output should differ from unsteered"
 
     def test_hook_cleanup(self, model_and_tokenizer, layers, happy_profile):
-        from saklas.hooks import SteeringManager
-        from saklas.generation import GenerationConfig, GenerationState, generate_steered
+        from saklas.core.hooks import SteeringManager
+        from saklas.core.generation import GenerationConfig, GenerationState, generate_steered
 
         model, tokenizer = model_and_tokenizer
         p = next(model.parameters())
@@ -159,7 +159,7 @@ class TestSteering:
 
 class TestSaveLoad:
     def test_roundtrip(self, happy_profile):
-        from saklas.vectors import save_profile, load_profile
+        from saklas.core.vectors import save_profile, load_profile
 
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "test_profile.safetensors")
@@ -177,9 +177,9 @@ class TestSaveLoad:
 
 class TestTraitMonitor:
     def test_monitor_records_history(self, model_and_tokenizer, layers, happy_profile, layer_means):
-        from saklas.hooks import SteeringManager
-        from saklas.monitor import TraitMonitor
-        from saklas.generation import GenerationConfig, GenerationState, generate_steered
+        from saklas.core.hooks import SteeringManager
+        from saklas.core.monitor import TraitMonitor
+        from saklas.core.generation import GenerationConfig, GenerationState, generate_steered
 
         model, tokenizer = model_and_tokenizer
         device = next(model.parameters()).device
@@ -231,8 +231,8 @@ class TestTraitMonitor:
 
     def test_throughput_regression(self, model_and_tokenizer, layers, happy_profile, layer_means):
         """Steered generation should be at least 85% of vanilla throughput."""
-        from saklas.hooks import SteeringManager
-        from saklas.generation import GenerationConfig, GenerationState, generate_steered
+        from saklas.core.hooks import SteeringManager
+        from saklas.core.generation import GenerationConfig, GenerationState, generate_steered
 
         model, tokenizer = model_and_tokenizer
         device = next(model.parameters()).device
@@ -278,7 +278,7 @@ class TestTraitMonitor:
 
 class TestExtractContrastive:
     def test_returns_valid_profile(self, model_and_tokenizer, layers, num_layers):
-        from saklas.vectors import extract_contrastive
+        from saklas.core.vectors import extract_contrastive
         model, tokenizer = model_and_tokenizer
         cfg = getattr(model.config, "text_config", None) or model.config
         hidden_dim = cfg.hidden_size
@@ -299,7 +299,7 @@ class TestExtractContrastive:
 
 class TestBuildChatInput:
     def test_chat_template_path(self, model_and_tokenizer):
-        from saklas.generation import build_chat_input
+        from saklas.core.generation import build_chat_input
         _, tokenizer = model_and_tokenizer
         messages = [{"role": "user", "content": "Hello"}]
         ids = build_chat_input(tokenizer, messages)
@@ -308,7 +308,7 @@ class TestBuildChatInput:
         assert ids.shape[1] > 0
 
     def test_with_system_prompt(self, model_and_tokenizer):
-        from saklas.generation import build_chat_input
+        from saklas.core.generation import build_chat_input
         _, tokenizer = model_and_tokenizer
         messages = [{"role": "user", "content": "Hello"}]
         ids_no_sys = build_chat_input(tokenizer, messages)
@@ -320,11 +320,11 @@ class TestBuildChatInput:
 class TestProbesBootstrap:
     def test_bootstrap_loads_from_cache(self, monkeypatch, model_and_tokenizer, layers, happy_profile):
         """Bootstrap should return cached profiles without re-extracting."""
-        from saklas.probes_bootstrap import bootstrap_probes
-        from saklas.vectors import save_profile
-        from saklas.paths import concept_dir, safe_model_id
-        from saklas.packs import materialize_bundled, PackMetadata, hash_file
-        from saklas.model import get_model_info
+        from saklas.io.probes_bootstrap import bootstrap_probes
+        from saklas.core.vectors import save_profile
+        from saklas.io.paths import concept_dir, safe_model_id
+        from saklas.io.packs import materialize_bundled, PackMetadata, hash_file
+        from saklas.core.model import get_model_info
         model, tokenizer = model_and_tokenizer
         model_info = get_model_info(model, tokenizer)
 

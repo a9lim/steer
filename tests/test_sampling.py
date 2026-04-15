@@ -2,7 +2,7 @@
 
 import pytest
 
-from saklas.sampling import SamplingConfig
+from saklas.core.sampling import SamplingConfig
 
 
 def test_defaults():

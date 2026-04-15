@@ -51,7 +51,7 @@ pandas = ["pandas>=3.0.2"]
 research = ["datasets>=2.0", "pandas>=3.0.2"]
 
 [project.scripts]
-saklas = "saklas.cli:main"
+saklas = "saklas.cli.main:main"
 
 [tool.ruff]
 line-length = 120

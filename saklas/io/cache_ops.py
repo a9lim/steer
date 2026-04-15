@@ -6,12 +6,12 @@ from importlib import resources as _resources
 from pathlib import Path
 from typing import Optional
 
-from saklas.cli_selectors import (
+from saklas.cli.selectors import (
     ResolvedConcept, Selector, invalidate as _invalidate_selector_cache, resolve,
 )
-from saklas.errors import SaklasError
-from saklas.packs import PackMetadata, hash_file, verify_integrity
-from saklas.paths import concept_dir, neutral_statements_path, safe_model_id, vectors_dir
+from saklas.core.errors import SaklasError
+from saklas.io.packs import PackMetadata, hash_file, verify_integrity
+from saklas.io.paths import concept_dir, neutral_statements_path, safe_model_id, vectors_dir
 
 
 class InstallConflict(RuntimeError, SaklasError):
@@ -153,7 +153,7 @@ def refresh(selector: Selector, *, model_scope: Optional[str] = None) -> int:
             count += 1
             continue
         if isinstance(src, str) and src.startswith("hf://"):
-            from saklas.hf import pull_pack, split_revision
+            from saklas.io.hf import pull_pack, split_revision
             coord, revision = split_revision(src[len("hf://"):])
             pull_pack(coord, target_folder=c.folder, force=True, revision=revision)
             count += 1
@@ -214,7 +214,7 @@ def install(
             _invalidate_selector_cache()
         return dst
 
-    from saklas.hf import pull_pack, split_revision
+    from saklas.io.hf import pull_pack, split_revision
     coord, revision = split_revision(target)
 
     if "/" not in coord:
@@ -320,8 +320,8 @@ def export_gguf(
 
     Returns the list of paths written.
     """
-    from saklas.gguf_io import write_gguf_profile
-    from saklas.vectors import load_profile
+    from saklas.io.gguf_io import write_gguf_profile
+    from saklas.core.vectors import load_profile
 
     concepts = resolve(selector)
     if len(concepts) != 1:
@@ -330,7 +330,7 @@ def export_gguf(
             f"{selector} matched {len(concepts)}"
         )
     concept = concepts[0]
-    from saklas.packs import ConceptFolder
+    from saklas.io.packs import ConceptFolder
     cf = ConceptFolder.load(concept.folder)
 
     if model_scope is not None:
@@ -406,7 +406,7 @@ def push(
     force: bool = False,
 ) -> tuple[str, str, Optional[str]]:
     """Back `saklas push`. Returns ``(coord, repo_url, commit_sha)``."""
-    from saklas import hf as hf_mod
+    from saklas.io import hf as hf_mod
 
     if statements_only and no_statements:
         raise RuntimeError("--statements-only and --no-statements are mutually exclusive")
@@ -476,10 +476,10 @@ def search_remote_packs(query: str, *, json_output: bool = False, verbose: bool 
 
     Backs `saklas pack search <query>`.
     """
-    from saklas.cli_selectors import Selector as _Sel
+    from saklas.cli.selectors import Selector as _Sel
     sel = _Sel(kind="name", value=query, namespace=None) if query else None
     try:
-        from saklas.hf import search_packs, HFError
+        from saklas.io.hf import search_packs, HFError
     except ImportError as e:
         print(f"saklas pack search unavailable: {e}")
         return
@@ -526,7 +526,7 @@ def list_concepts(
 
     hf_rows: list[dict] = []
     if hf:
-        from saklas.hf import HFError, search_packs
+        from saklas.io.hf import HFError, search_packs
         try:
             from huggingface_hub.utils import HfHubHTTPError
         except ImportError:
@@ -568,7 +568,7 @@ def list_concepts(
 
 
 def _row_from_concept(c: ResolvedConcept) -> dict:
-    from saklas.packs import ConceptFolder
+    from saklas.io.packs import ConceptFolder
     tensor_models: list[str] = []
     status = "installed"
     error: Optional[str] = None
@@ -619,7 +619,7 @@ def _print_list(concepts: list[ResolvedConcept], *, verbose: bool = False) -> No
 def _print_info(namespace: str, name: str, *, hf: bool, json_output: bool = False) -> None:
     folder = concept_dir(namespace, name)
     if folder.exists():
-        from saklas.packs import ConceptFolder
+        from saklas.io.packs import ConceptFolder
         cf = ConceptFolder.load(folder)
         if json_output:
             import json as _json
@@ -643,7 +643,7 @@ def _print_info(namespace: str, name: str, *, hf: bool, json_output: bool = Fals
         print(f"  tensors:     {', '.join(cf.tensor_models()) or '(none)'}")
         return
     if hf:
-        from saklas.hf import fetch_info
+        from saklas.io.hf import fetch_info
         info = fetch_info(f"{namespace}/{name}")
         if json_output:
             import json as _json

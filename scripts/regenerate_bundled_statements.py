@@ -32,9 +32,9 @@ from pathlib import Path
 
 import torch
 
-from saklas.session import SaklasSession
-from saklas.packs import PackMetadata, PackFormatError
-from saklas.generation import build_chat_input
+from saklas.core.session import SaklasSession
+from saklas.io.packs import PackMetadata, PackFormatError
+from saklas.core.generation import build_chat_input
 
 REPO = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO / "saklas" / "data" / "vectors"

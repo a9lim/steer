@@ -21,20 +21,20 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from saklas.datasource import DataSource
-from saklas.errors import SaklasError
-from saklas.generation import (
+from saklas.io.datasource import DataSource
+from saklas.core.errors import SaklasError
+from saklas.core.generation import (
     GenerationConfig,
     GenerationState,
     build_chat_input,
     generate_steered,
 )
-from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata, hash_file
-from saklas.paths import concept_dir, safe_model_id
-from saklas.vectors import load_profile as _load_profile
+from saklas.io.packs import NAME_REGEX, PackFormatError, PackMetadata, hash_file
+from saklas.io.paths import concept_dir, safe_model_id
+from saklas.core.vectors import load_profile as _load_profile
 
 if TYPE_CHECKING:
-    from saklas.session import SaklasSession
+    from saklas.core.session import SaklasSession
 
 _log = logging.getLogger(__name__)
 
@@ -220,7 +220,7 @@ def clone_from_corpus(
     model. Pass `force=True` to bypass.
     """
     # Local import to avoid a circular import with saklas.session.
-    from saklas.session import canonical_concept_name
+    from saklas.core.session import canonical_concept_name
 
     path = pathlib.Path(path)
     if not path.exists():
@@ -259,7 +259,7 @@ def clone_from_corpus(
                 profile, _m = _load_profile(str(cache_path))
                 profile = session._promote_profile(profile)
                 _log.info("cloned %s (cache hit) -> %s", canonical, folder)
-                from saklas.profile import Profile
+                from saklas.core.profile import Profile
                 return canonical, Profile(profile, metadata=_m)
         except (PackFormatError, FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
             pass

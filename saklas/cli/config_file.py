@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
-from saklas.errors import SaklasError
+from saklas.core.errors import SaklasError
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class ConfigFile:
     @classmethod
     def load_default(cls) -> Optional["ConfigFile"]:
         """Load ``~/.saklas/config.yaml`` if it exists, else return ``None``."""
-        from saklas.paths import saklas_home
+        from saklas.io.paths import saklas_home
         p = saklas_home() / "config.yaml"
         if not p.exists():
             return None
@@ -86,7 +86,7 @@ class ConfigFile:
         Bare poles like ``wolf`` resolve to ``deer.wolf`` with sign -1; the
         alpha is negated accordingly. Namespaced keys stay in their namespace.
         """
-        from saklas.cli_selectors import resolve_pole, AmbiguousSelectorError
+        from saklas.cli.selectors import resolve_pole, AmbiguousSelectorError
         out: dict[str, float] = {}
         for coord, alpha in self.vectors.items():
             if "/" in coord:
@@ -165,16 +165,16 @@ def ensure_vectors_installed(config: ConfigFile, *, strict: bool) -> list[str]:
     Returns a list of coords that could not be installed. In strict mode,
     raises on any failure instead of returning.
     """
-    from saklas.paths import concept_dir
-    from saklas.packs import materialize_bundled
-    from saklas import cache_ops
+    from saklas.io.paths import concept_dir
+    from saklas.io.packs import materialize_bundled
+    from saklas.io import cache_ops
 
     missing: list[str] = []
     for coord, _alpha in config.vectors.items():
         if "/" not in coord:
             # Bare name: resolve across namespaces. If a match exists locally,
             # treat as installed; otherwise require an explicit <ns>/<name>.
-            from saklas.cli_selectors import _all_concepts
+            from saklas.cli.selectors import _all_concepts
             matches = [c for c in _all_concepts() if c.name == coord]
             if matches:
                 continue

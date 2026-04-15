@@ -13,9 +13,9 @@ from typing import Callable, Iterator
 
 import torch
 
-from saklas.datasource import DataSource
-from saklas.errors import SaklasError
-from saklas.events import (
+from saklas.io.datasource import DataSource
+from saklas.core.errors import SaklasError
+from saklas.core.events import (
     EventBus,
     GenerationFinished,
     GenerationStarted,
@@ -24,18 +24,18 @@ from saklas.events import (
     SteeringCleared,
     VectorExtracted,
 )
-from saklas.generation import GenerationConfig, GenerationState, build_chat_input, generate_steered, supports_thinking
-from saklas.hooks import HiddenCapture, SteeringManager
-from saklas.model import load_model, get_layers, get_model_info
-from saklas.monitor import TraitMonitor
-from saklas.packs import PackFormatError, PackMetadata, hash_file, hash_folder_files
-from saklas.paths import concept_dir, safe_model_id
-from saklas.probes_bootstrap import bootstrap_probes, bootstrap_layer_means
-from saklas.profile import Profile
-from saklas.results import GenerationResult, TokenEvent, ProbeReadings
-from saklas.sampling import SamplingConfig
-from saklas.steering import Steering
-from saklas.vectors import (
+from saklas.core.generation import GenerationConfig, GenerationState, build_chat_input, generate_steered, supports_thinking
+from saklas.core.hooks import HiddenCapture, SteeringManager
+from saklas.core.model import load_model, get_layers, get_model_info
+from saklas.core.monitor import TraitMonitor
+from saklas.io.packs import PackFormatError, PackMetadata, hash_file, hash_folder_files
+from saklas.io.paths import concept_dir, safe_model_id
+from saklas.io.probes_bootstrap import bootstrap_probes, bootstrap_layer_means
+from saklas.core.profile import Profile
+from saklas.core.results import GenerationResult, TokenEvent, ProbeReadings
+from saklas.core.sampling import SamplingConfig
+from saklas.core.steering import Steering
+from saklas.core.vectors import (
     extract_contrastive,
     save_profile as _save_profile,
     load_profile as _load_profile,
@@ -355,6 +355,10 @@ class SaklasSession:
     def last_result(self) -> GenerationResult | None:
         return self._last_result
 
+    @property
+    def last_per_token_scores(self) -> dict[str, list[float]] | None:
+        return self._last_per_token_scores
+
     # -- Extraction --
 
     def _local_concept_folder(self, canonical: str) -> pathlib.Path:
@@ -653,7 +657,7 @@ class SaklasSession:
         # `/steer deer.wolf` hits an installed pack under any namespace,
         # not just default/. If no pack exists with this canonical name,
         # the concept extracts fresh under local/.
-        from saklas.cli_selectors import _all_concepts
+        from saklas.cli.selectors import _all_concepts
         curated_folder = None
         for c in _all_concepts():
             if c.name == canonical:
@@ -751,7 +755,7 @@ class SaklasSession:
         module for the full pipeline. Returns `(canonical_name, profile)`
         matching extract()'s return shape.
         """
-        from saklas.cloning import clone_from_corpus as _clone
+        from saklas.io.cloning import clone_from_corpus as _clone
         return _clone(
             self, path, name,
             n_pairs=n_pairs, seed=seed, batch_size=batch_size, force=force,
@@ -827,7 +831,7 @@ class SaklasSession:
         registered vector pass through unchanged — pre-resolved canonical
         names are always honored verbatim.
         """
-        from saklas.cli_selectors import resolve_pole
+        from saklas.cli.selectors import resolve_pole
 
         out: dict[str, float] = {}
         for name, alpha in alphas.items():

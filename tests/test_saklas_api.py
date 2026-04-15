@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from saklas.results import GenerationResult
+from saklas.core.results import GenerationResult
 
 
 def _mock_session():
@@ -45,6 +45,8 @@ def _mock_session():
     session._layers = []
     session._last_per_token_scores = None
     session._last_result = None
+    session.last_per_token_scores = None
+    session.last_result = None
 
     gen_state = MagicMock()
     gen_state.finish_reason = "stop"
@@ -69,7 +71,7 @@ def session_and_client():
 class TestSessions:
     def test_list(self, session_and_client):
         _, client = session_and_client
-        with patch("saklas.saklas_api.supports_thinking", return_value=False):
+        with patch("saklas.server.saklas_api.supports_thinking", return_value=False):
             resp = client.get("/saklas/v1/sessions")
         assert resp.status_code == 200
         data = resp.json()
@@ -82,21 +84,21 @@ class TestSessions:
 
     def test_create_idempotent(self, session_and_client):
         _, client = session_and_client
-        with patch("saklas.saklas_api.supports_thinking", return_value=False):
+        with patch("saklas.server.saklas_api.supports_thinking", return_value=False):
             resp = client.post("/saklas/v1/sessions", json={})
         assert resp.status_code == 200
         assert resp.json()["id"] == "default"
 
     def test_create_model_mismatch_logs_warning(self, session_and_client, caplog):
         _, client = session_and_client
-        with patch("saklas.saklas_api.supports_thinking", return_value=False):
+        with patch("saklas.server.saklas_api.supports_thinking", return_value=False):
             resp = client.post("/saklas/v1/sessions", json={"model": "other/model"})
         assert resp.status_code == 200
         assert resp.json()["model_id"] == "test/model"
 
     def test_get_by_default(self, session_and_client):
         _, client = session_and_client
-        with patch("saklas.saklas_api.supports_thinking", return_value=False):
+        with patch("saklas.server.saklas_api.supports_thinking", return_value=False):
             resp = client.get("/saklas/v1/sessions/default")
         assert resp.status_code == 200
 
@@ -112,7 +114,7 @@ class TestSessions:
 
     def test_patch_updates_config(self, session_and_client):
         session, client = session_and_client
-        with patch("saklas.saklas_api.supports_thinking", return_value=False):
+        with patch("saklas.server.saklas_api.supports_thinking", return_value=False):
             resp = client.patch(
                 "/saklas/v1/sessions/default",
                 json={"temperature": 0.3, "system_prompt": "Be brief."},
@@ -168,7 +170,7 @@ class TestProbes:
     def test_defaults(self, session_and_client):
         _, client = session_and_client
         with patch(
-            "saklas.saklas_api.load_defaults",
+            "saklas.server.saklas_api.load_defaults",
             return_value={"emotion": ["happiness"]},
         ):
             resp = client.get("/saklas/v1/sessions/default/probes/defaults")
@@ -234,9 +236,12 @@ class TestWebSocket:
                 finish_reason="stop",
             )
             session._last_result = result
-            session._last_per_token_scores = {
+            session.last_result = result
+            per_token = {
                 "happy": [0.1 * (i + 1) for i in range(len(tokens))],
             }
+            session._last_per_token_scores = per_token
+            session.last_per_token_scores = per_token
             return result
 
         session.generate.side_effect = _gen

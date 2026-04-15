@@ -12,12 +12,12 @@ from typing import Optional
 
 import torch
 
-from saklas.errors import SaklasError
-from saklas.packs import (
+from saklas.core.errors import SaklasError
+from saklas.io.packs import (
     ConceptFolder, PackMetadata, hash_file,
 )
-from saklas.paths import concept_dir, safe_model_id
-from saklas.vectors import load_profile, save_profile
+from saklas.io.paths import concept_dir, safe_model_id
+from saklas.core.vectors import load_profile, save_profile
 
 log = logging.getLogger(__name__)
 

@@ -176,7 +176,7 @@ def _encode_and_capture_all(model, tokenizer, text, layers, device):
 @functools.cache
 def _load_neutral_prompts() -> list[str]:
     """Load neutral prompts, preferring a user override at ~/.saklas/neutral_statements.json."""
-    from saklas.paths import neutral_statements_path
+    from saklas.io.paths import neutral_statements_path
     user_path = neutral_statements_path()
     if user_path.exists():
         with open(user_path) as f:
@@ -378,7 +378,7 @@ def save_profile(
     save_file(tensors, str(path))
 
     from saklas import __version__ as _saklas_version
-    from saklas.packs import PACK_FORMAT_VERSION
+    from saklas.io.packs import PACK_FORMAT_VERSION
     sidecar: dict = {
         "format_version": PACK_FORMAT_VERSION,
         "method": metadata.get("method", "contrastive_pca"),
@@ -409,7 +409,7 @@ def load_profile(path: str) -> tuple[dict[int, torch.Tensor], dict]:
     """
     path = Path(path)
     if path.suffix == ".gguf":
-        from saklas.gguf_io import read_gguf_profile
+        from saklas.io.gguf_io import read_gguf_profile
         return read_gguf_profile(path)
 
     tensors = load_file(str(path))
@@ -417,8 +417,8 @@ def load_profile(path: str) -> tuple[dict[int, torch.Tensor], dict]:
     with open(meta_path) as f:
         metadata = json.load(f)
 
-    from saklas.packs import PACK_FORMAT_VERSION
-    from saklas.profile import ProfileError
+    from saklas.io.packs import PACK_FORMAT_VERSION
+    from saklas.core.profile import ProfileError
     fmt_ver = metadata.get("format_version", 1)
     if not isinstance(fmt_ver, int) or fmt_ver < PACK_FORMAT_VERSION:
         raise ProfileError(

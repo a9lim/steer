@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from saklas.events import EventBus, SteeringApplied, SteeringCleared
-from saklas.session import SaklasSession, VectorNotRegisteredError
-from saklas.steering import Steering
+from saklas.core.events import EventBus, SteeringApplied, SteeringCleared
+from saklas.core.session import SaklasSession, VectorNotRegisteredError
+from saklas.core.steering import Steering
 
 
 class _Stub(SaklasSession):

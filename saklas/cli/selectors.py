@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from saklas.errors import SaklasError
-from saklas.packs import NAME_REGEX, PackFormatError, PackMetadata
-from saklas.paths import vectors_dir
+from saklas.core.errors import SaklasError
+from saklas.io.packs import NAME_REGEX, PackFormatError, PackMetadata
+from saklas.io.paths import vectors_dir
 
 
 class SelectorError(ValueError, SaklasError):
@@ -175,7 +175,7 @@ def resolve_pole(raw: str, namespace: Optional[str] = None) -> tuple[str, int, O
     """
     # Lazy import to avoid a cycle: session.py imports cli_selectors for
     # the broadened extract() lookup.
-    from saklas.session import BIPOLAR_SEP, canonical_concept_name
+    from saklas.core.session import BIPOLAR_SEP, canonical_concept_name
 
     slug = canonical_concept_name(raw)
     scope = [c for c in _all_concepts()

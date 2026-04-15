@@ -93,7 +93,7 @@ def upgrade_pack(folder: Path) -> bool:
 
 def _vectors_root() -> Path:
     try:
-        from saklas.paths import vectors_dir
+        from saklas.io.paths import vectors_dir
         return vectors_dir()
     except Exception:
         import os

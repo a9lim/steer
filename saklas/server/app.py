@@ -17,15 +17,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
-from saklas.cache_ops import InstallConflict, RefreshError
-from saklas.cli_selectors import AmbiguousSelectorError
-from saklas.config_file import ConfigFileError
-from saklas.errors import SaklasError
-from saklas.hf import HFError
-from saklas.packs import PackFormatError
-from saklas.sampling import SamplingConfig
-from saklas.session import ConcurrentGenerationError, SaklasSession
-from saklas.steering import Steering
+from saklas.io.cache_ops import InstallConflict, RefreshError
+from saklas.cli.selectors import AmbiguousSelectorError
+from saklas.cli.config_file import ConfigFileError
+from saklas.core.errors import SaklasError
+from saklas.io.hf import HFError
+from saklas.io.packs import PackFormatError
+from saklas.core.sampling import SamplingConfig
+from saklas.core.session import ConcurrentGenerationError, SaklasSession
+from saklas.core.steering import Steering
 
 
 SESSION_LOCK_TIMEOUT_SECONDS = 300
@@ -561,10 +561,10 @@ def create_app(session: SaklasSession, default_alphas: dict[str, float] | None =
     # Mount Ollama-compatible /api/* routes alongside OpenAI routes so any
     # Ollama client (Open WebUI, Enchanted, ollama-python, etc.) talks to
     # saklas as a drop-in replacement.
-    from saklas.ollama_api import register_ollama_routes
+    from saklas.server.ollama import register_ollama_routes
     register_ollama_routes(app)
 
-    from saklas.saklas_api import register_saklas_routes
+    from saklas.server.saklas_api import register_saklas_routes
     register_saklas_routes(app)
 
     return app
@@ -581,7 +581,7 @@ def _openai_known_model_names(session: SaklasSession) -> set[str]:
     — the OpenAI catalogue is a superset so clients hitting either
     protocol with the same name keep working.
     """
-    from saklas.ollama_api import _aliases_for
+    from saklas.server.ollama import _aliases_for
     return {n.lower() for n in {session.model_id, *_aliases_for(session)}}
 
 

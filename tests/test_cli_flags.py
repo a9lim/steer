@@ -1,6 +1,7 @@
 import pytest
 
 from saklas import cli
+from saklas.cli import runners as cli_runners
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +222,7 @@ def test_config_validate_local_vector_missing(monkeypatch, tmp_path):
 
 def test_run_refresh_bundled(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
     target = tmp_path / "vectors" / "default" / "angry.calm" / "statements.json"
     if not target.exists():
@@ -241,7 +242,7 @@ def test_run_refresh_neutrals(monkeypatch, tmp_path):
 
 def test_run_install_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path / "home"))
-    from saklas import packs
+    from saklas.io import packs
     src = tmp_path / "src" / "happy"
     src.mkdir(parents=True)
     (src / "statements.json").write_text("[]")
@@ -260,7 +261,7 @@ def test_run_ls_empty(monkeypatch, tmp_path, capsys):
     def boom(_sel):
         raise AssertionError("HF query must not run with pack ls")
 
-    monkeypatch.setattr("saklas.hf.search_packs", boom)
+    monkeypatch.setattr("saklas.io.hf.search_packs", boom)
     cli.main(["pack", "ls"])
     out = capsys.readouterr().out
     assert "NAME" in out
@@ -274,7 +275,7 @@ def test_run_search_calls_hf(monkeypatch, tmp_path, capsys):
         calls.append(sel)
         return [{"name": "happy", "namespace": "alice", "tags": [], "recommended_alpha": 0.5}]
 
-    monkeypatch.setattr("saklas.hf.search_packs", fake)
+    monkeypatch.setattr("saklas.io.hf.search_packs", fake)
     cli.main(["pack", "search", "happy"])
     assert calls and calls[0].value == "happy"
     out = capsys.readouterr().out
@@ -283,7 +284,7 @@ def test_run_search_calls_hf(monkeypatch, tmp_path, capsys):
 
 def test_run_rm_refuses_broad(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
     with pytest.raises(SystemExit):
         cli.main(["pack", "rm", "all"])
@@ -291,7 +292,7 @@ def test_run_rm_refuses_broad(monkeypatch, tmp_path):
 
 def test_run_rm_specific(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
     cli.main(["pack", "rm", "happy.sad"])
     assert not (tmp_path / "vectors" / "default" / "happy.sad").exists()
@@ -299,10 +300,10 @@ def test_run_rm_specific(monkeypatch, tmp_path):
 
 def test_run_extract_cache_hit_prints_already_extracted(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
 
-    from saklas.paths import vectors_dir, safe_model_id
+    from saklas.io.paths import vectors_dir, safe_model_id
     model_id = "fake/model"
     folder = vectors_dir() / "default" / "happy.sad"
     tensor = folder / f"{safe_model_id(model_id)}.safetensors"
@@ -321,9 +322,9 @@ def test_run_extract_cache_hit_prints_already_extracted(monkeypatch, tmp_path, c
         def extract(self, *a, **kw):
             raise AssertionError("extract() must not be called on cache hit")
 
-    monkeypatch.setattr(cli, "_make_session", lambda args: FakeSession())
-    monkeypatch.setattr(cli, "_print_model_info", lambda s: None)
-    monkeypatch.setattr(cli, "_print_startup", lambda args: None)
+    monkeypatch.setattr(cli_runners, "_make_session", lambda args: FakeSession())
+    monkeypatch.setattr(cli_runners, "_print_model_info", lambda s: None)
+    monkeypatch.setattr(cli_runners, "_print_startup", lambda args: None)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["pack", "extract", "happy.sad", "-m", model_id])
@@ -335,7 +336,7 @@ def test_run_extract_cache_hit_prints_already_extracted(monkeypatch, tmp_path, c
 
 def test_run_tui_registers_config_vectors(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
 
     p = tmp_path / "setup.yaml"
@@ -363,8 +364,8 @@ def test_run_tui_registers_config_vectors(monkeypatch, tmp_path):
         def run(self):
             pass
 
-    monkeypatch.setattr(cli, "_make_session", lambda args: FakeSession())
-    monkeypatch.setattr(cli, "_print_model_info", lambda s: None)
+    monkeypatch.setattr(cli_runners, "_make_session", lambda args: FakeSession())
+    monkeypatch.setattr(cli_runners, "_print_model_info", lambda s: None)
 
     import saklas.tui.app as _tui_app
     monkeypatch.setattr(_tui_app, "SaklasApp", FakeApp)
@@ -376,7 +377,7 @@ def test_run_tui_registers_config_vectors(monkeypatch, tmp_path):
 def test_config_bare_pole_resolves_canonical(monkeypatch, tmp_path):
     """Config YAML with bare pole 'wolf' should resolve to 'deer.wolf' with -1 sign."""
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    from saklas import packs
+    from saklas.io import packs
     packs.materialize_bundled()
 
     # Create a fake deer.wolf pack under local so resolve_pole sees it.
@@ -389,10 +390,10 @@ def test_config_bare_pole_resolves_canonical(monkeypatch, tmp_path):
         files={"statements.json": packs.hash_file(d / "statements.json")},
     ).write(d)
     # Invalidate selector cache so the new pack is visible.
-    from saklas.cli_selectors import invalidate
+    from saklas.cli.selectors import invalidate
     invalidate()
 
-    from saklas.config_file import ConfigFile
+    from saklas.cli.config_file import ConfigFile
     c = ConfigFile(vectors={"wolf": 0.5})
     resolved = c.resolve_poles()
     assert "deer.wolf" in resolved.vectors

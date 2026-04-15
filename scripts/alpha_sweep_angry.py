@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from saklas.session import SaklasSession
-from saklas.datasource import DataSource
+from saklas.core.session import SaklasSession
+from saklas.io.datasource import DataSource
 
 REPO = Path(__file__).resolve().parent.parent
 STATEMENTS = REPO / "saklas" / "data" / "vectors" / "angry.calm" / "statements.json"

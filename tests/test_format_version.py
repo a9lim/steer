@@ -6,10 +6,10 @@ import json
 import pytest
 import torch
 
-from saklas import packs
-from saklas.packs import PACK_FORMAT_VERSION, PackFormatError
-from saklas.profile import Profile, ProfileError
-from saklas.vectors import save_profile, load_profile
+from saklas.io import packs
+from saklas.io.packs import PACK_FORMAT_VERSION, PackFormatError
+from saklas.core.profile import Profile, ProfileError
+from saklas.core.vectors import save_profile, load_profile
 
 
 def test_save_profile_writes_format_version_in_sidecar(tmp_path):

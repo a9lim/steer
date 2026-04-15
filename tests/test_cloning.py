@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from saklas.cloning import (
+from saklas.io.cloning import (
     _BATCH_SIZE,
     _build_neutralize_prompt,
     _chunk,

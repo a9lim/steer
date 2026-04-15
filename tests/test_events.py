@@ -2,7 +2,7 @@
 
 import warnings
 
-from saklas.events import (
+from saklas.core.events import (
     EventBus,
     SteeringApplied,
     SteeringCleared,

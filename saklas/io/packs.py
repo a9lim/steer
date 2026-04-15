@@ -17,7 +17,7 @@ from importlib import resources as _resources
 from pathlib import Path
 from typing import Optional, Sequence
 
-from saklas.errors import SaklasError
+from saklas.core.errors import SaklasError
 
 
 NAME_REGEX = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
@@ -368,7 +368,7 @@ def materialize_bundled() -> None:
     - neutral_statements.json -> ~/.saklas/neutral_statements.json
     - saklas/data/vectors/<concept>/ -> ~/.saklas/vectors/default/<concept>/
     """
-    from saklas.paths import saklas_home, vectors_dir, neutral_statements_path
+    from saklas.io.paths import saklas_home, vectors_dir, neutral_statements_path
 
     home = saklas_home()
     home.mkdir(parents=True, exist_ok=True)

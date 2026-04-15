@@ -18,13 +18,13 @@ from textual.widgets import Input
 from textual.timer import Timer
 
 from saklas import SamplingConfig, Steering
-from saklas.cli_selectors import AmbiguousSelectorError, resolve_pole
-from saklas.generation import supports_thinking
-from saklas.model import _get_memory_gb
-from saklas.paths import saklas_home
-from saklas.probes_bootstrap import load_defaults
-from saklas.results import ResultCollector
-from saklas.session import MIN_ELAPSED_FOR_RATE
+from saklas.cli.selectors import AmbiguousSelectorError, resolve_pole
+from saklas.core.generation import supports_thinking
+from saklas.core.model import _get_memory_gb
+from saklas.io.paths import saklas_home
+from saklas.io.probes_bootstrap import load_defaults
+from saklas.core.results import ResultCollector
+from saklas.core.session import MIN_ELAPSED_FOR_RATE
 from saklas.tui.chat_panel import ChatPanel, _AssistantMessage
 from saklas.tui.vector_panel import LeftPanel, MAX_ALPHA
 from saklas.tui.trait_panel import TraitPanel
@@ -836,12 +836,12 @@ class SaklasApp(App):
     def _finalize_widget_highlight(self, widget: _AssistantMessage) -> None:
         """Pull per-token scores the session stashed during finalize and
         push to the widget for highlight-mode overlays."""
-        per_token = self._session._last_per_token_scores
+        per_token = self._session.last_per_token_scores
         if not per_token or not widget.is_mounted:
             return
         # The session decoded into history already; we need the token ids
         # from the last GenerationResult to render strings.
-        last = self._session._last_result
+        last = self._session.last_result
         if last is None or not last.tokens:
             return
         generated = list(last.tokens)
@@ -1014,7 +1014,7 @@ class SaklasApp(App):
             chat.add_system_message("Usage: /export <path>")
             return
         collector = ResultCollector()
-        last = self._session._last_result
+        last = self._session.last_result
         if last is not None:
             collector.add(last)
         path = Path(path_str).expanduser()
@@ -1056,12 +1056,12 @@ class SaklasApp(App):
             key=lambda kv: kv[1], reverse=True,
         )[:5]
         # Top-contributing tokens from last per-token scores.
-        per_token = self._session._last_per_token_scores or {}
+        per_token = self._session.last_per_token_scores or {}
         top_tokens = []
-        if probe in per_token and self._session._last_result is not None:
+        if probe in per_token and self._session.last_result is not None:
             scores = per_token[probe]
             tok = self._session._tokenizer
-            ids = self._session._last_result.tokens
+            ids = self._session.last_result.tokens
             strs = tok.batch_decode(
                 [[int(tid)] for tid in ids], skip_special_tokens=True,
             )

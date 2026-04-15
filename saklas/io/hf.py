@@ -12,8 +12,8 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from saklas.errors import SaklasError
-from saklas.packs import (
+from saklas.core.errors import SaklasError
+from saklas.io.packs import (
     NAME_REGEX,
     PackFormatError,
     PackMetadata,
@@ -261,7 +261,7 @@ def _install_synthesized_pack(
     # natively extracted tensors.
     if missing_sidecars:
         from saklas import __version__ as _saklas_version
-        from saklas.packs import PACK_FORMAT_VERSION
+        from saklas.io.packs import PACK_FORMAT_VERSION
         import json
         for stem in missing_sidecars:
             sc_path = target_folder / f"{stem}.json"
@@ -372,8 +372,8 @@ def push_pack(
     ``(repo_url, commit_sha)``; sha is ``None`` on dry-run.
     """
     import tempfile
-    from saklas.packs import ConceptFolder
-    from saklas.paths import safe_model_id as _safe_id
+    from saklas.io.packs import ConceptFolder
+    from saklas.io.paths import safe_model_id as _safe_id
 
     cf = ConceptFolder.load(folder)  # runs integrity check
     meta = cf.metadata

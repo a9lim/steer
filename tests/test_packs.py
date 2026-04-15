@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from saklas import packs
+from saklas.io import packs
 
 
 def _write_pack(tmp_path: Path, data: dict) -> Path:
@@ -204,7 +204,7 @@ def test_concept_folder_load_gguf_only(tmp_path):
     """A concept folder with only a .gguf tensor (no safetensors) should load."""
     pytest.importorskip("gguf")
     import torch
-    from saklas.gguf_io import write_gguf_profile
+    from saklas.io.gguf_io import write_gguf_profile
 
     d = tmp_path / "gguf_only"
     d.mkdir()
@@ -230,8 +230,8 @@ def test_concept_folder_prefers_safetensors_over_gguf(tmp_path):
     """Both safetensors and gguf present for the same model → safetensors wins."""
     pytest.importorskip("gguf")
     import torch
-    from saklas.gguf_io import write_gguf_profile
-    from saklas.vectors import save_profile
+    from saklas.io.gguf_io import write_gguf_profile
+    from saklas.core.vectors import save_profile
 
     d = tmp_path / "dual"
     d.mkdir()
@@ -292,7 +292,7 @@ def test_version_mismatch_detection():
 
 def test_save_load_profile_roundtrip_slim_sidecar(tmp_path):
     import torch
-    from saklas.vectors import save_profile, load_profile
+    from saklas.core.vectors import save_profile, load_profile
     profile = {
         0: torch.randn(8),
         14: torch.randn(8),

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from saklas.results import GenerationResult, TokenEvent
-from saklas.session import ConcurrentGenerationError
+from saklas.core.results import GenerationResult, TokenEvent
+from saklas.core.session import ConcurrentGenerationError
 
 
 # ---------------------------------------------------------------------------

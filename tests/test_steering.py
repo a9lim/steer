@@ -1,6 +1,6 @@
 """Steering dataclass unit tests — from_value coercion."""
 
-from saklas.steering import Steering
+from saklas.core.steering import Steering
 
 
 def test_construct():

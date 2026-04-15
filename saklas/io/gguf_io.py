@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 
-from saklas.errors import SaklasError
+from saklas.core.errors import SaklasError
 
 log = logging.getLogger(__name__)
 
