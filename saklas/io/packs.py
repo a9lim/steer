@@ -367,6 +367,12 @@ def materialize_bundled() -> None:
 
     - neutral_statements.json -> ~/.saklas/neutral_statements.json
     - saklas/data/vectors/<concept>/ -> ~/.saklas/vectors/default/<concept>/
+
+    On format-version drift (user's cached default/<concept>/pack.json is
+    older than the shipped format), re-copy the shipped pack.json +
+    statements.json in place. Extracted tensor files (<sid>.safetensors /
+    .json sidecar) stay put — they're per-model and expensive to recompute.
+    This keeps the upgrade path painless for existing installs.
     """
     from saklas.io.paths import saklas_home, vectors_dir, neutral_statements_path
 
@@ -383,7 +389,24 @@ def materialize_bundled() -> None:
     default_dir.mkdir(parents=True, exist_ok=True)
     for concept in bundled_concept_names():
         target = default_dir / concept
+        copy_shipped = True
         if target.exists():
+            pack_json = target / "pack.json"
+            if pack_json.exists():
+                try:
+                    with open(pack_json) as f:
+                        data = json.load(f)
+                    fmt = data.get("format_version")
+                    # Upgrade ONLY on an explicit stale format_version.  A
+                    # missing key means either a user-hand-edited file or
+                    # something we don't recognize — leave it alone.
+                    if not (isinstance(fmt, int) and fmt < PACK_FORMAT_VERSION):
+                        copy_shipped = False
+                except Exception:
+                    copy_shipped = False  # corrupt; don't stomp user state
+            else:
+                copy_shipped = False  # no pack.json, don't create one
+        if not copy_shipped:
             continue
         target.mkdir(parents=True, exist_ok=True)
         pkg_root = _resources.files("saklas.data.vectors").joinpath(concept)

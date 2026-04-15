@@ -5,6 +5,7 @@ google/gemma-3-4b-it (~8GB) on first run.
 from __future__ import annotations
 import pytest
 import torch
+from saklas.core.profile import Profile
 from saklas.core.results import GenerationResult, TokenEvent
 
 _HAS_GPU = torch.cuda.is_available() or torch.backends.mps.is_available()
@@ -52,11 +53,11 @@ class TestConstruction:
 class TestSteering:
     def test_extract_and_steer(self, session):
         name, profile = session.extract([("I am happy", "I am sad")])
-        assert isinstance(profile, dict)
+        assert isinstance(profile, Profile)
         assert all(isinstance(k, int) for k in profile)
         session.steer("happy", profile)
         assert "happy" in session.vectors
-        # vectors now returns name -> profile
+        # vectors registry returns the dict-shaped inner wire format.
         assert isinstance(session.vectors["happy"], dict)
 
     def test_unsteer(self, session):
@@ -66,14 +67,14 @@ class TestSteering:
     def test_extract_curated(self, session):
         name, profile = session.extract("happy", baseline="sad")
         assert name == "happy.sad"
-        assert isinstance(profile, dict)
+        assert isinstance(profile, Profile)
         assert len(profile) > 0
 
     def test_extract_datasource(self, session):
         from saklas.io.datasource import DataSource
         ds = DataSource(pairs=[("formal", "casual")])
         name, profile = session.extract(ds)
-        assert isinstance(profile, dict)
+        assert isinstance(profile, Profile)
 
 class TestMonitoring:
     def test_monitor_and_unmonitor(self, session):
@@ -196,7 +197,7 @@ class TestCloning:
                 str(corpus), name="pirate_test", n_pairs=10, seed=42, force=True,
             )
             assert canonical == "pirate_test"
-            assert isinstance(profile, dict) and len(profile) > 0
+            assert isinstance(profile, Profile) and len(profile) > 0
             assert all(isinstance(k, int) for k in profile)
             for layer_idx, tensor in profile.items():
                 assert tensor.numel() > 0
@@ -263,7 +264,7 @@ class TestCloning:
 
         try:
             proc = subprocess.run(
-                [sys.executable, "-m", "saklas", "extract",
+                [sys.executable, "-m", "saklas", "pack", "extract",
                  "happy.sad", "-m", MODEL_ID],
                 capture_output=True, text=True, timeout=600,
             )

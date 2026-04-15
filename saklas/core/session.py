@@ -830,6 +830,13 @@ class SaklasSession:
         all share the single resolver site.  Names already matching a
         registered vector pass through unchanged — pre-resolved canonical
         names are always honored verbatim.
+
+        Auto-loads cached tensors for bundled / installed concept packs on
+        first reference: if ``canonical`` names an installed concept with
+        a tensor file already on disk for this model, the tensor is loaded
+        into ``self._profiles`` inline.  This is cache-hit only — no PCA
+        extraction, no network, no surprise latency.  Missing tensors fall
+        through to the existing ``VectorNotRegisteredError`` path.
         """
         from saklas.cli.selectors import resolve_pole
 
@@ -846,12 +853,40 @@ class SaklasSession:
                 # callers that never went through a context manager.
                 out[name] = float(alpha)
                 continue
+            if canonical not in self._profiles:
+                self._try_autoload_vector(canonical)
             effective = float(alpha) * (1 if sign >= 0 else -1)
             if canonical in self._profiles:
                 out[canonical] = out.get(canonical, 0.0) + effective
             else:
                 out[name] = float(alpha)
         return out
+
+    def _try_autoload_vector(self, canonical: str) -> None:
+        """Cache-hit fast path: load an installed concept's tensor into _profiles.
+
+        Walks installed concept packs (default / local / hf://*), finds the
+        first one matching ``canonical``, and loads its per-model safetensors
+        into the registry if the file already exists. Silent no-op on any
+        failure — the caller falls through to the normal raise path.
+        """
+        from saklas.cli.selectors import _all_concepts
+        from saklas.io.paths import safe_model_id
+        from saklas.core.vectors import load_profile
+
+        sid = safe_model_id(self.model_id)
+        for concept in _all_concepts():
+            if concept.name != canonical:
+                continue
+            ts_path = concept.folder / f"{sid}.safetensors"
+            if not ts_path.is_file():
+                continue
+            try:
+                profile_dict, _meta = load_profile(str(ts_path))
+            except Exception:
+                continue
+            self._profiles[canonical] = self._promote_profile(profile_dict)
+            return
 
     def _push_steering(self, alphas: dict[str, float]) -> None:
         """Push an alphas dict onto the steering stack and rebuild hooks.

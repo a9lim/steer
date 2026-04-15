@@ -341,6 +341,36 @@ def test_materialize_does_not_overwrite(monkeypatch, tmp_path):
     assert target.read_text() == '{"user": "edited"}'
 
 
+def test_materialize_upgrades_stale_bundled(monkeypatch, tmp_path):
+    """Existing bundled folder with an explicit v1 format_version gets
+    upgraded in place on materialize_bundled — the hard-break migration
+    path for users who had saklas 1.x installed before the Profile refactor.
+    Any per-model tensor files already on disk stay untouched (they don't
+    exist here; the shipped bundled dir only contains pack.json +
+    statements.json)."""
+    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
+    concept_dir = tmp_path / "vectors" / "default" / "agentic"
+    concept_dir.mkdir(parents=True)
+    stale_pack = concept_dir / "pack.json"
+    # Minimal v1-shaped pack.json — missing files block, but carries an
+    # explicit format_version=1 that identifies it as a stale install.
+    stale_pack.write_text(
+        '{"name": "agentic", "description": "stale v1", "format_version": 1}'
+    )
+    fake_tensor = concept_dir / "stale_model.safetensors"
+    fake_tensor.write_bytes(b"\x00" * 8)
+    packs.materialize_bundled()
+    # pack.json is now the shipped v2.
+    upgraded = json.loads(stale_pack.read_text())
+    assert upgraded.get("format_version") == 2
+    assert upgraded.get("description") != "stale v1"
+    # statements.json got copied across.
+    assert (concept_dir / "statements.json").is_file()
+    # Pre-existing per-model tensor files are left alone.
+    assert fake_tensor.is_file()
+    assert fake_tensor.read_bytes() == b"\x00" * 8
+
+
 def test_materialize_partial_fills_gaps(monkeypatch, tmp_path):
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
     # Pre-create `agentic` with user edits; materialization should still
