@@ -139,17 +139,30 @@ def _load_text_from_multimodal(
     import json
     import os
     from safetensors.torch import load_file
-    from transformers.utils import cached_file, SAFE_WEIGHTS_INDEX_NAME
+    from transformers.utils import (
+        cached_file,
+        SAFE_WEIGHTS_INDEX_NAME,
+        SAFE_WEIGHTS_NAME,
+    )
 
     # Create directly on target device — avoids a CPU copy that would
     # spike RSS and eat into MPS's unified memory budget.
     with torch.device(device):
         model = AutoModelForCausalLM.from_config(text_config, dtype=dtype)
 
-    index_path = cached_file(model_id, SAFE_WEIGHTS_INDEX_NAME)
-    model_dir = os.path.dirname(index_path)
-    with open(index_path) as f:
-        shard_files = sorted(set(json.load(f)["weight_map"].values()))
+    # Prefer the sharded index; fall back to a single `model.safetensors`
+    # for repos that ship consolidated weights (e.g. Ministral-3-3B).
+    index_path = cached_file(
+        model_id, SAFE_WEIGHTS_INDEX_NAME, _raise_exceptions_for_missing_entries=False
+    )
+    if index_path is not None:
+        model_dir = os.path.dirname(index_path)
+        with open(index_path) as f:
+            shard_files = sorted(set(json.load(f)["weight_map"].values()))
+    else:
+        single_path = cached_file(model_id, SAFE_WEIGHTS_NAME)
+        model_dir = os.path.dirname(single_path)
+        shard_files = [os.path.basename(single_path)]
 
     prefix = "language_model."
 
