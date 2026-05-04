@@ -23,6 +23,32 @@ def _histc_mps_safe(input, bins=100, min=0, max=0, *, out=None):
 
 torch.histc = _histc_mps_safe
 
+# MPS has no torch.ldexp kernel as of PyTorch 2.11. transformers'
+# MXFP4 weight dequant (`convert_moe_packed_tensors` for gpt-oss
+# experts) calls torch.ldexp on whatever device the checkpoint is
+# loading to; on Apple Silicon this raises
+# ``DispatchStub: missing kernel for mps`` mid-load and aborts.
+# Round-trip through CPU when the input lives on MPS, no-op on
+# CPU/CUDA. ``out=`` is honored — `convert_moe_packed_tensors`
+# uses it for in-place dequant.
+_orig_ldexp = torch.ldexp
+
+
+def _ldexp_mps_safe(input, other, *, out=None):
+    if hasattr(input, "device") and input.device.type == "mps":
+        in_cpu = input.cpu()
+        other_cpu = other.cpu() if hasattr(other, "device") else other
+        res = _orig_ldexp(in_cpu, other_cpu)
+        if out is not None:
+            out.copy_(res.to(out.device))
+            return out
+        return res.to(input.device)
+    return _orig_ldexp(input, other, out=out) if out is not None \
+        else _orig_ldexp(input, other)
+
+
+torch.ldexp = _ldexp_mps_safe
+
 def _MODEL_LAYERS(m): return m.model.layers
 def _TRANSFORMER_H(m): return m.transformer.h
 def _VLM_LANGUAGE_LAYERS(m): return m.model.language_model.layers

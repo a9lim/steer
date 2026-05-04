@@ -4,7 +4,7 @@ Engine layer: model loading, contrastive PCA extraction, steering hooks, trait m
 
 ## model.py
 
-HF causal LM loading. `_LAYER_ACCESSORS` maps `model_type` → layer-list accessor (`def`, not lambdas). `_TESTED_ARCHS` frozenset gates a one-time `UserWarning` (via `_warned: set[str]`) when `model_type` isn't known-working. Cascading fallbacks on attention impl (SDPA → eager), dtype, device. `_load_text_from_multimodal` extracts text-only sub-models (Ministral-as-Mistral3), strips `language_model.` prefixes, dequantizes FP8 inline. Patches `torch.histc` for MPS MoE routing.
+HF causal LM loading. `_LAYER_ACCESSORS` maps `model_type` → layer-list accessor (`def`, not lambdas). `_TESTED_ARCHS` frozenset gates a one-time `UserWarning` (via `_warned: set[str]`) when `model_type` isn't known-working. Cascading fallbacks on attention impl (SDPA → eager), dtype, device. `_load_text_from_multimodal` extracts text-only sub-models (Ministral-as-Mistral3), strips `language_model.` prefixes, dequantizes FP8 inline. Patches `torch.histc` for MPS MoE routing and `torch.ldexp` for MPS MXFP4 dequant (gpt-oss expert weights via transformers' `convert_moe_packed_tensors` — round-trips through CPU, honors `out=`).
 
 ## vectors.py
 
