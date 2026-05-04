@@ -78,7 +78,7 @@ def stage_gen() -> int:
     statements_path = SCRATCH / "statements_120.json"
     if statements_path.exists():
         print(f"[gen] {statements_path} already exists; refusing to overwrite.")
-        print(f"[gen] delete it manually if you want to regenerate.")
+        print("[gen] delete it manually if you want to regenerate.")
         return 0
 
     bundled_pairs = json.loads((BUNDLED_DIR / "statements.json").read_text())
@@ -346,7 +346,7 @@ def stage_sweep(
     outputs: dict[str, str] = {}
     for alpha in alphas:
         if alpha == 0.0:
-            print(f"\n--- α=0.0 (vanilla, no steering) ---", flush=True)
+            print("\n--- α=0.0 (vanilla, no steering) ---", flush=True)
             r = session.generate(prompt, sampling=sampling)
             text = r.text.strip()
             print(text)
