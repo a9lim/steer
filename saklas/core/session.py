@@ -39,6 +39,101 @@ from saklas.core.vectors import load_profile as _load_profile
 
 _log = logging.getLogger(__name__)
 
+# Hybrid linear-attention models (qwen3.6-27b, lfm2, etc.) carry a
+# recurrent state (``conv_states`` + ``recurrent_states``) per LA layer
+# alongside the dynamic K/V cache.  ``DynamicLayer.crop`` truncates K/V
+# but transformers' ``LinearAttentionLayer.crop`` is a documented no-op
+# — there is no sequence dimension to truncate on a recurrent state.
+# That breaks ``cache_prefix`` correctness on hybrid models: after a
+# generate, the LA state has been advanced through both prefix AND
+# suffix tokens; the next reuse of the cached prefix would resume from
+# a polluted state, silently producing wrong outputs.
+#
+# Fix: on prefix install, snapshot each LA layer's ``conv_states`` /
+# ``recurrent_states`` (cheap — bounded-size tensors, kernel-sized conv
+# state and ``(num_heads, head_dim, head_dim)`` recurrent state).  On
+# ``crop``, restore from the snapshot in-place (preserving the
+# cudagraph-static address ``lazy_initialization`` set up).
+#
+# Patch is installed at module import; idempotent.  No-op when
+# transformers doesn't expose the LA cache classes (older versions).
+def _install_la_cache_patch() -> bool:
+    try:
+        from transformers.cache_utils import (
+            LinearAttentionLayer,
+            LinearAttentionAndFullAttentionLayer,
+            DynamicLayer,
+        )
+    except ImportError:
+        return False
+
+    if getattr(LinearAttentionLayer, "_saklas_crop_patched", False):
+        return False
+
+    _orig_la_crop = LinearAttentionLayer.crop  # documented no-op upstream
+
+    def _save_la_snapshot(layer) -> None:
+        snap = {}
+        if getattr(layer, "is_conv_states_initialized", False):
+            snap["conv"] = layer.conv_states.detach().clone()
+        if getattr(layer, "is_recurrent_states_initialized", False):
+            snap["recurrent"] = layer.recurrent_states.detach().clone()
+        layer._saklas_la_snapshot = snap if snap else None
+
+    def _la_crop_with_restore(self, max_length: int):
+        _orig_la_crop(self, max_length)
+        snap = getattr(self, "_saklas_la_snapshot", None)
+        if not snap:
+            return
+        # ``conv_states`` / ``recurrent_states`` were created during the
+        # prefill forward, which runs inside ``torch.inference_mode()``,
+        # so the underlying tensors are inference tensors.  In-place
+        # ``.copy_(...)`` from outside inference_mode raises
+        # ``RuntimeError: Inplace update to inference tensor outside
+        # InferenceMode is not allowed``.  Wrap the restore so the
+        # in-place mutation is legal regardless of caller context.
+        with torch.inference_mode():
+            if "conv" in snap and getattr(self, "is_conv_states_initialized", False):
+                self.conv_states.copy_(snap["conv"])
+            if "recurrent" in snap and getattr(self, "is_recurrent_states_initialized", False):
+                self.recurrent_states.copy_(snap["recurrent"])
+
+    def _hybrid_crop(self, max_length: int):
+        DynamicLayer.crop(self, max_length)
+        _la_crop_with_restore(self, max_length)
+
+    setattr(LinearAttentionLayer, "crop", _la_crop_with_restore)
+    setattr(LinearAttentionAndFullAttentionLayer, "crop", _hybrid_crop)
+    setattr(LinearAttentionLayer, "_saklas_save_snapshot", _save_la_snapshot)
+    setattr(LinearAttentionLayer, "_saklas_crop_patched", True)
+    return True
+
+
+_install_la_cache_patch()
+
+
+def _snapshot_la_layers(cache) -> None:
+    """Walk a Cache's layers and snapshot any linear-attention state.
+
+    Called from :meth:`SaklasSession.cache_prefix` right after the
+    prefill forward, before the cache is stored.  No-op for caches with
+    no LA layers (standard transformer models).
+    """
+    layers = getattr(cache, "layers", None)
+    if not layers:
+        return
+    for layer in layers:
+        save = getattr(layer, "_saklas_save_snapshot", None)
+        if save is not None:
+            # ``_saklas_save_snapshot`` is ``setattr``-ed on the
+            # ``LinearAttentionLayer`` class, so attribute lookup on an
+            # instance returns a bound method — ``self`` (the layer) is
+            # already passed automatically. Calling ``save(layer)`` here
+            # would hand layer through *twice*, raising
+            # ``TypeError: takes 1 positional argument but 2 were given``.
+            save()
+
+
 _N_PAIRS = 45
 _N_SCENARIOS = 9           # default broad domains per concept
 _N_PAIRS_PER_SCENARIO = 5  # default pairs sampled within each domain
@@ -1651,6 +1746,11 @@ class SaklasSession:
             # Model doesn't expose KV cache (custom modeling that ignores
             # use_cache).  Nothing to cache; drop the prefix.
             return 0
+
+        # Snapshot any linear-attention recurrent state so the patched
+        # ``crop`` can restore it on prefix reuse.  No-op for standard
+        # transformer caches (no LA layers).
+        _snapshot_la_layers(past_key_values)
 
         # Store on CPU so we can ``.equal`` against fresh device tensors
         # without round-trip cost; the cache itself stays on device.
