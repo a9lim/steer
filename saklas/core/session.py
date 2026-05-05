@@ -85,10 +85,18 @@ def _install_la_cache_patch() -> bool:
         snap = getattr(self, "_saklas_la_snapshot", None)
         if not snap:
             return
-        if "conv" in snap and getattr(self, "is_conv_states_initialized", False):
-            self.conv_states.copy_(snap["conv"])
-        if "recurrent" in snap and getattr(self, "is_recurrent_states_initialized", False):
-            self.recurrent_states.copy_(snap["recurrent"])
+        # ``conv_states`` / ``recurrent_states`` were created during the
+        # prefill forward, which runs inside ``torch.inference_mode()``,
+        # so the underlying tensors are inference tensors.  In-place
+        # ``.copy_(...)`` from outside inference_mode raises
+        # ``RuntimeError: Inplace update to inference tensor outside
+        # InferenceMode is not allowed``.  Wrap the restore so the
+        # in-place mutation is legal regardless of caller context.
+        with torch.inference_mode():
+            if "conv" in snap and getattr(self, "is_conv_states_initialized", False):
+                self.conv_states.copy_(snap["conv"])
+            if "recurrent" in snap and getattr(self, "is_recurrent_states_initialized", False):
+                self.recurrent_states.copy_(snap["recurrent"])
 
     def _hybrid_crop(self, max_length: int):
         DynamicLayer.crop(self, max_length)
