@@ -46,6 +46,9 @@ def _skeleton_session() -> SaklasSession:
     session._layer_means = {}  # type: ignore[attr-defined]
     session._steering = SteeringManager()
     session._steering_stack = []
+    session._steering_override_stack = []  # type: ignore[attr-defined]
+    session._injection_mode = "additive"  # type: ignore[attr-defined]
+    session._theta_max = 1.5707963267948966  # type: ignore[attr-defined]
     session.events = EventBus()
     session._history = []
     return session

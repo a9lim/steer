@@ -121,6 +121,7 @@ class _Stub(SaklasSession):
     def __init__(self, profiles: dict) -> None:  # type: ignore[override]
         self._profiles = dict(profiles)
         self._steering_stack = []
+        self._steering_override_stack = []
         self.events = EventBus()
         self._rebuild_calls: list[dict[str, float]] = []
         self._rebuild_entries: list[dict[str, tuple[float, Trigger]]] = []

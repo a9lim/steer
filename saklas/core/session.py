@@ -293,25 +293,44 @@ class _SteeringContext:
     an :class:`~saklas.core.steering_expr.AblationTerm` for mean-replacement
     ablation.  Bare-alpha inputs to the public ``steering()`` API are
     normalized before we get here.
+
+    ``_injection_mode`` and ``_theta_max`` carry the per-call overrides
+    forward through the stack so nested scopes can flip the steering
+    math (or the angular cap) for the duration of the inner block.
+    ``None`` means "inherit": stack walks the LIFO from top, picking the
+    first non-``None`` value, falling through to the session default if
+    every scope is ``None``.
     """
 
-    __slots__ = ("_session", "_entries", "_entered")
+    __slots__ = (
+        "_session", "_entries", "_entered",
+        "_injection_mode", "_theta_max",
+    )
 
     def __init__(
         self,
         session: "SaklasSession",
         entries: dict[str, SteeringStackEntry],
+        *,
+        injection_mode: str | None = None,
+        theta_max: float | None = None,
     ) -> None:
         self._session = session
         self._entries = entries
         self._entered = False
+        self._injection_mode = injection_mode
+        self._theta_max = theta_max
 
     def __enter__(self) -> "_SteeringContext":
         # _push_steering rolls its own stack entry back if _rebuild_steering_hooks
         # raises (e.g. VectorNotRegisteredError).  __enter__ only flips
         # `_entered=True` AFTER a clean push so a mid-__enter__ failure leaves
         # no stale state for __exit__ to pop.
-        self._session._push_steering(self._entries)
+        self._session._push_steering(
+            self._entries,
+            injection_mode=self._injection_mode,
+            theta_max=self._theta_max,
+        )
         self._entered = True
         return self
 
@@ -340,12 +359,20 @@ class SaklasSession:
         probes: list[str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int = 1024,
+        injection_mode: str = "angular",
+        theta_max: float | None = None,
     ) -> "SaklasSession":
         """Load a HF model + tokenizer and return a fully initialized session.
 
         This is the primary entry point for library users; it owns all the
         HF-loading heavy lifting. To wrap an already-loaded model use the
         plain ``__init__(model, tokenizer, ...)`` form.
+
+        ``injection_mode`` selects the steering math: ``"angular"``
+        (default, v2.1+) maps user α to a rotation angle; ``"additive"``
+        is the legacy v1.x additive + norm-preserving path.  ``theta_max``
+        sets the maximum rotation angle under angular mode (default π/2,
+        i.e. α=1 fully aligns the residual with the concept direction).
         """
         model, tokenizer = load_model(model_id, quantize=quantize, device=device, dtype=dtype)
         return cls(
@@ -353,6 +380,8 @@ class SaklasSession:
             probes=probes,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
+            injection_mode=injection_mode,
+            theta_max=theta_max,
         )
 
     def __init__(
@@ -363,6 +392,8 @@ class SaklasSession:
         probes: list[str] | None = None,
         system_prompt: str | None = None,
         max_tokens: int = 1024,
+        injection_mode: str = "angular",
+        theta_max: float | None = None,
     ):
         self._model = model
         self._tokenizer = tokenizer
@@ -381,8 +412,24 @@ class SaklasSession:
         # Vector registry: name -> profile. No alphas, no hooks.
         self._profiles: dict[str, dict[int, torch.Tensor]] = {}
 
-        # Transient steering manager — used only during generation
-        self._steering = SteeringManager()
+        # Transient steering manager — used only during generation.  The
+        # session-level injection_mode + θ_max are stamped onto every hook
+        # at apply time; per-call ``Steering.injection_mode`` overrides
+        # this default in ``_rebuild_steering_hooks``.
+        from saklas.core.hooks import DEFAULT_THETA_MAX
+        if injection_mode not in ("angular", "additive"):
+            raise ValueError(
+                f"injection_mode must be 'angular' or 'additive', "
+                f"got {injection_mode!r}"
+            )
+        self._injection_mode: str = injection_mode
+        self._theta_max: float = (
+            DEFAULT_THETA_MAX if theta_max is None else float(theta_max)
+        )
+        self._steering = SteeringManager(
+            injection_mode=self._injection_mode,  # type: ignore[arg-type]
+            theta_max=self._theta_max,
+        )
         # LIFO stack of per-scope entries dicts pushed by session.steering().
         # Each entry is ``{name: (alpha, Trigger)}`` — triggers are
         # preserved through stack flattening so nested scopes with
@@ -390,6 +437,13 @@ class SaklasSession:
         # (later entries overwrite earlier ones) is what the steering
         # manager installs when a generation begins.
         self._steering_stack: list[dict[str, SteeringStackEntry]] = []
+        # Parallel LIFO of per-scope (injection_mode, theta_max) overrides.
+        # Each element matches its sibling in ``_steering_stack``; ``None``
+        # means "inherit".  Walked top-down by ``_resolve_steering_override``
+        # to find the active value, with the session default as the floor.
+        self._steering_override_stack: list[
+            tuple[str | None, float | None]
+        ] = []
 
         # Synchronous event bus.  Emits on extraction, steering enter/exit,
         # probe scoring, generation start/finish.  Subscribers run on the
@@ -948,6 +1002,7 @@ class SaklasSession:
         sae: str | None = None,
         sae_revision: str | None = None,
         namespace: str | None = None,
+        method: str = "dim",
     ) -> tuple[str, Profile]:
         """Extract a steering vector profile and emit ``VectorExtracted``.
 
@@ -1003,6 +1058,7 @@ class SaklasSession:
                 sae=sae,
                 sae_revision=sae_revision,
                 namespace=namespace,
+                method=method,  # type: ignore[arg-type]
             )
         finally:
             self._gen_lock.release()
@@ -1126,7 +1182,20 @@ class SaklasSession:
                     # with the shared VectorNotRegisteredError shape.
                     pass
             resolved[key] = val
-        return _SteeringContext(self, resolved)
+        # Per-call overrides ride along with the entries.  ``None`` means
+        # "inherit"; the resolver folds session defaults at hook-install.
+        mode_override = getattr(steering_obj, "injection_mode", None)
+        theta_override = getattr(steering_obj, "theta_max", None)
+        if mode_override is not None and mode_override not in ("angular", "additive"):
+            raise ValueError(
+                f"Steering.injection_mode must be 'angular' or 'additive', "
+                f"got {mode_override!r}"
+            )
+        return _SteeringContext(
+            self, resolved,
+            injection_mode=mode_override,
+            theta_max=theta_override,
+        )
 
     def _materialize_projections(self, steering: Steering) -> None:
         """Populate ``self._profiles`` with derived profiles for every
@@ -1306,20 +1375,30 @@ class SaklasSession:
             )
 
     def _push_steering(
-        self, entries: dict[str, SteeringStackEntry],
+        self,
+        entries: dict[str, SteeringStackEntry],
+        *,
+        injection_mode: str | None = None,
+        theta_max: float | None = None,
     ) -> None:
         """Push an entries dict onto the steering stack and rebuild hooks.
 
-        If ``_rebuild_steering_hooks`` raises (e.g. an unknown vector name
-        hits ``VectorNotRegisteredError``) the just-pushed entry is rolled
-        back before the exception propagates, so the stack is never left
-        with stale half-committed state.
+        ``injection_mode`` / ``theta_max`` are per-scope overrides; any
+        ``None`` field falls through to the next outer scope (LIFO walk)
+        and ultimately to the session-level default.
+
+        If ``_rebuild_steering_hooks`` raises (e.g. an unknown vector
+        name hits ``VectorNotRegisteredError``) the just-pushed entry is
+        rolled back before the exception propagates, so the stack is
+        never left with stale half-committed state.
         """
         self._steering_stack.append(dict(entries))
+        self._steering_override_stack.append((injection_mode, theta_max))
         try:
             self._rebuild_steering_hooks()
         except BaseException:
             self._steering_stack.pop()
+            self._steering_override_stack.pop()
             raise
         # Steering hooks just changed; the prefix cache (built under the
         # previous regime) no longer represents the current pre-attention
@@ -1332,6 +1411,8 @@ class SaklasSession:
         if not self._steering_stack:
             return
         self._steering_stack.pop()
+        if self._steering_override_stack:
+            self._steering_override_stack.pop()
         self._rebuild_steering_hooks()
         self._invalidate_prefix_cache()
         if not self._steering_stack:
@@ -1365,6 +1446,30 @@ class SaklasSession:
         for entry in self._steering_stack:
             flat.update(entry)
         return flat
+
+    def _resolve_steering_override(
+        self,
+    ) -> tuple[str, float]:
+        """Effective ``(injection_mode, theta_max)`` for the active scope.
+
+        Walks the override LIFO from the top, picking the first non-None
+        value for each field; falls back to the session-level default
+        when no scope set it.  Symmetric across the two fields so a
+        scope can override mode without setting θ_max and vice versa.
+        """
+        eff_mode: str | None = None
+        eff_theta: float | None = None
+        for mode, theta in reversed(self._steering_override_stack):
+            if eff_mode is None and mode is not None:
+                eff_mode = mode
+            if eff_theta is None and theta is not None:
+                eff_theta = theta
+            if eff_mode is not None and eff_theta is not None:
+                break
+        return (
+            eff_mode if eff_mode is not None else self._injection_mode,
+            eff_theta if eff_theta is not None else self._theta_max,
+        )
 
     def _rebuild_steering_hooks(self) -> None:
         """Tear down existing hooks and install from the flattened stack head.
@@ -1401,7 +1506,12 @@ class SaklasSession:
             self._steering.add_vector(
                 name, self._profiles[name], alpha, trigger,
             )
-        self._steering.apply_to_model(self._layers, self._device, self._dtype)
+        eff_mode, eff_theta = self._resolve_steering_override()
+        self._steering.apply_to_model(
+            self._layers, self._device, self._dtype,
+            injection_mode=eff_mode,  # type: ignore[arg-type]
+            theta_max=eff_theta,
+        )
 
     def _apply_steering(
         self, entries: dict[str, SteeringStackEntry],

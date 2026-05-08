@@ -15,10 +15,19 @@ from saklas.io.packs import (
     hash_file, materialize_bundled,
 )
 from saklas.io.paths import (
-    concept_dir, model_dir, neutral_statements_path, safe_model_id, vectors_dir,
+    concept_dir,
+    model_dir,
+    neutral_statements_path,
+    safe_model_id,
+    sidecar_filename,
+    tensor_filename,
+    vectors_dir,
 )
 from saklas.core.vectors import (
-    compute_layer_means, extract_contrastive, load_contrastive_pairs,
+    compute_layer_means,
+    extract_contrastive,
+    extract_difference_of_means,
+    load_contrastive_pairs,
     load_profile, save_profile,
 )
 
@@ -89,25 +98,44 @@ def bootstrap_layer_means(
 
 
 def bootstrap_probes(
-    model: Any, tokenizer: Any, layers: list[Any], model_info: dict[str, Any], categories: list[str],
+    model: Any,
+    tokenizer: Any,
+    layers: list[Any],
+    model_info: dict[str, Any],
+    categories: list[str],
+    *,
+    method: str = "dim",
 ) -> dict[str, dict[int, torch.Tensor]]:
-    """Load or extract probe vector profiles for the given categories."""
+    """Load or extract probe vector profiles for the given categories.
+
+    ``method`` selects the extraction algorithm for any probes that need
+    re-extraction.  Defaults to ``"dim"`` (difference-of-means, v2.1+);
+    pass ``"pca"`` to recover the legacy contrastive-PCA path.  Cached
+    tensors are loaded as-is regardless of method — the sidecar carries
+    the method that produced them.
+    """
     from saklas import __version__ as _saklas_version
 
     defaults = load_defaults()
     model_id = model_info.get("model_id", "unknown")
     sid = safe_model_id(model_id)
+    if method not in ("dim", "pca"):
+        raise ValueError(
+            f"unknown extraction method {method!r} (expected 'dim' | 'pca')"
+        )
 
     probes: dict[str, dict[int, torch.Tensor]] = {}
     to_extract: list[tuple[str, Path, Path]] = []
 
     allow_stale = os.environ.get("SAKLAS_ALLOW_STALE") == "1"
+    ts_name = tensor_filename(model_id, method=method)
+    sc_name = sidecar_filename(model_id, method=method)
 
     for cat in categories:
         for probe_name in defaults.get(cat, []):
             cdir = concept_dir("default", probe_name)
-            ts = cdir / f"{sid}.safetensors"
-            sc_path = cdir / f"{sid}.json"
+            ts = cdir / ts_name
+            sc_path = cdir / sc_name
             if ts.exists() and sc_path.exists():
                 try:
                     profile, meta = load_profile(str(ts))
@@ -161,15 +189,21 @@ def bootstrap_probes(
         datasets_to_extract.append((name, cdir, ts, pairs_data, stmts_path))
 
     model_device = next(model.parameters()).device
+    extractor = (
+        extract_difference_of_means if method == "dim" else extract_contrastive
+    )
+    method_label = (
+        "difference_of_means" if method == "dim" else "contrastive_pca"
+    )
     for name, cdir, ts, ds, stmts_path in progress(datasets_to_extract, desc="Extracting probes", unit="probe"):
         try:
-            profile, diagnostics = extract_contrastive(
+            profile, diagnostics = extractor(
                 model, tokenizer, ds["pairs"], layers=layers,
                 concept_label=f"default/{name}",
             )
             probes[name] = profile
             save_meta: dict[str, Any] = {
-                "method": "contrastive_pca",
+                "method": method_label,
                 "statements_sha256": hash_file(stmts_path),
             }
             if diagnostics:

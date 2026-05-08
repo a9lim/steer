@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 import torch
 
@@ -32,10 +32,55 @@ from saklas.io.packs import hash_file
 from saklas.io.paths import tensor_filename
 from saklas.core.vectors import (
     extract_contrastive,
+    extract_difference_of_means,
     save_profile as _save_profile,
     load_profile as _load_profile,
     load_contrastive_pairs,
 )
+
+
+# Default extraction method for fresh extractions.  v2.1 flips the
+# default from contrastive PCA to difference-of-means (Im & Li 2025);
+# ``--method pca`` and the matching API kwarg keep the legacy path
+# accessible for direct A/B comparisons and reproducing v1.x results.
+DEFAULT_EXTRACTION_METHOD: Literal["dim", "pca"] = "dim"
+
+
+def _method_label(
+    method: Literal["dim", "pca"], sae_backend: SaeBackend | None,
+) -> str:
+    """Sidecar ``method`` label for an extraction.
+
+    DiM extractions write ``"difference_of_means"`` (raw) or
+    ``"dim_sae"`` (SAE feature space).  PCA extractions preserve the
+    pre-v2.1 labels ``"contrastive_pca"`` / ``"pca_center_sae"`` so
+    older readers and on-disk tensors round-trip unchanged.
+    """
+    if method == "dim":
+        return "dim_sae" if sae_backend is not None else "difference_of_means"
+    if method == "pca":
+        return "pca_center_sae" if sae_backend is not None else "contrastive_pca"
+    raise ValueError(
+        f"unknown extraction method {method!r} (expected 'dim' | 'pca')"
+    )
+
+
+def _extractor_for(
+    method: Literal["dim", "pca"],
+):
+    """Return the per-method low-level extractor function.
+
+    Resolves through the module namespace (``globals()``) rather than the
+    closed-over import binding so test monkeypatches at module scope reach
+    the dispatcher.
+    """
+    if method == "dim":
+        return globals()["extract_difference_of_means"]
+    if method == "pca":
+        return globals()["extract_contrastive"]
+    raise ValueError(
+        f"unknown extraction method {method!r} (expected 'dim' | 'pca')"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -177,12 +222,21 @@ class ExtractionPipeline:
         sae: str | SaeBackend | None = None,
         sae_revision: str | None = None,
         namespace: str | None = None,
+        method: Literal["dim", "pca"] = DEFAULT_EXTRACTION_METHOD,
     ) -> tuple[str, Profile]:
         """Extract a steering vector profile and emit ``VectorExtracted``.
 
         Mirrors the historical ``SaklasSession.extract`` signature: ``sae``
         accepts a release-name string (resolved via :func:`load_sae_backend`)
         or an already-resolved :class:`SaeBackend` for direct injection.
+
+        ``method`` selects the per-layer direction algorithm:
+
+        - ``"dim"`` (default, v2.1+) — difference-of-means; provably
+          optimal for the linear-steering objective (Im & Li 2025).
+        - ``"pca"`` — legacy contrastive PCA; first principal component
+          of the diffs.  Retained for backward compatibility and
+          side-by-side comparison via the ``:pca`` selector variant.
 
         Cache-hit semantics:
 
@@ -202,6 +256,7 @@ class ExtractionPipeline:
             sae=sae,
             sae_revision=sae_revision,
             namespace=namespace,
+            method=method,
         )
         try:
             meta = dict(profile.metadata) if hasattr(profile, "metadata") else {}
@@ -226,6 +281,7 @@ class ExtractionPipeline:
         sae: str | SaeBackend | None = None,
         sae_revision: str | None = None,
         namespace: str | None = None,
+        method: Literal["dim", "pca"] = DEFAULT_EXTRACTION_METHOD,
     ) -> tuple[str, Profile]:
         """Extraction body.  See :meth:`extract` for the wrapper.
 
@@ -291,13 +347,14 @@ class ExtractionPipeline:
                 "sae_ids_by_layer": getattr(sae_backend, "sae_ids_by_layer", {}),
             }
 
+        method_label = _method_label(method, sae_backend)
+        extractor = _extractor_for(method)
+
         def _build_return(
             profile_dict: dict,
             diagnostics: dict[int, dict[str, float]] | None = None,
         ) -> tuple[str, Profile]:
-            meta: dict = {
-                "method": "pca_center_sae" if sae_backend is not None else "contrastive_pca",
-            }
+            meta: dict = {"method": method_label}
             meta.update(sae_metadata)
             if diagnostics:
                 meta["diagnostics"] = diagnostics
@@ -313,9 +370,7 @@ class ExtractionPipeline:
             *,
             diagnostics: dict[int, dict[str, float]] | None = None,
         ) -> dict:
-            meta: dict = {
-                "method": "pca_center_sae" if sae_backend is not None else "contrastive_pca",
-            }
+            meta: dict = {"method": method_label}
             if extra:
                 meta.update(extra)
             meta.update(sae_metadata)
@@ -328,6 +383,11 @@ class ExtractionPipeline:
         layers = self._handle.layers
         model_id = self._handle.model_id
 
+        def _path_for(folder: pathlib.Path) -> str:
+            return str(folder / tensor_filename(
+                model_id, release=sae_release, method=method,
+            ))
+
         # For DataSource or raw pairs, skip the full pipeline — just extract.
         if isinstance(source, (DataSource, list)):
             if isinstance(source, list):
@@ -335,7 +395,7 @@ class ExtractionPipeline:
             else:
                 ds = source
             folder = self._packs._local_concept_folder(canonical)
-            cache_path = str(folder / tensor_filename(model_id, release=sae_release))
+            cache_path = _path_for(folder)
             try:
                 profile, _meta = _load_profile(cache_path)
                 profile = self._packs._promote_profile(profile)
@@ -351,7 +411,7 @@ class ExtractionPipeline:
 
             _progress(f"Extracting profile ({len(ds.pairs)} pairs)...")
             pairs = [{"positive": p, "negative": n} for p, n in ds.pairs]
-            profile, diagnostics = extract_contrastive(
+            profile, diagnostics = extractor(
                 model, tokenizer, pairs, layers=layers,
                 sae=sae_backend,
                 concept_label=canonical,
@@ -382,11 +442,10 @@ class ExtractionPipeline:
         pack_folder = matches[0].folder if matches else None
 
         if pack_folder is not None:
-            cache_path = str(pack_folder / tensor_filename(model_id, release=sae_release))
+            cache_path = _path_for(pack_folder)
         else:
-            cache_path = str(
+            cache_path = _path_for(
                 pathlib.Path(self._packs._local_concept_folder(canonical))
-                / tensor_filename(model_id, release=sae_release)
             )
 
         # 1. Vector cache — short-circuits unless a regen path is requested.
@@ -420,7 +479,7 @@ class ExtractionPipeline:
             if pack_stmts.exists():
                 _progress(f"Using curated statements for '{canonical}'...")
                 ds = load_contrastive_pairs(str(pack_stmts))
-                profile, diagnostics = extract_contrastive(
+                profile, diagnostics = extractor(
                     model, tokenizer, ds["pairs"],
                     layers=layers,
                     sae=sae_backend,
@@ -516,8 +575,10 @@ class ExtractionPipeline:
             )
 
         # 5. Extract.
-        _progress(f"Extracting contrastive profile ({len(pairs)} pairs)...")
-        profile, diagnostics = extract_contrastive(
+        _progress(
+            f"Extracting {method_label} profile ({len(pairs)} pairs)..."
+        )
+        profile, diagnostics = extractor(
             model, tokenizer, pairs, layers=layers,
             sae=sae_backend,
             concept_label=canonical,

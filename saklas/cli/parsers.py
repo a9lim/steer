@@ -66,6 +66,28 @@ _VECTOR_VERBS: list[tuple[str, str]] = [
 ]
 
 
+def _add_injection_args(p: argparse.ArgumentParser) -> None:
+    """Steering-injection options shared between ``tui`` and ``serve``.
+
+    ``None`` defaults flow through to the YAML override layer (or
+    ultimately to the v2.1 session defaults: angular + π/2).
+    """
+    p.add_argument(
+        "--steer-mode", dest="injection_mode",
+        choices=["angular", "additive"], default=None,
+        help="Steering injection math.  'angular' (default) maps user α "
+             "to a rotation angle; 'additive' is the legacy v1.x add+"
+             "rescale path.  Unset = inherit YAML / session default.",
+    )
+    p.add_argument(
+        "--theta-max", dest="theta_max", type=float, default=None,
+        metavar="RAD",
+        help="Maximum rotation angle for angular mode (radians).  Default "
+             "π/2 (≈1.5708) — α=1 fully aligns the residual with the "
+             "concept direction.  No effect under --steer-mode additive.",
+    )
+
+
 def _build_tui_parser(parser: argparse.ArgumentParser) -> None:
     # When a model supplies -c/--config pointing at a YAML with model: set,
     # the positional can be omitted. Handled in _run_tui via composed config.
@@ -79,6 +101,7 @@ def _build_tui_parser(parser: argparse.ArgumentParser) -> None:
                         help="Probe categories (default: all)")
     parser.add_argument("--max-tokens", type=int, default=1024,
                         help="Default max generation tokens")
+    _add_injection_args(parser)
     _add_config_args(parser)
 
 
@@ -95,6 +118,7 @@ def _build_serve_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-web", dest="no_web", action="store_true",
                         help="Skip the analytics dashboard mount at / "
                              "(API-only mode for production / proxied deployments)")
+    _add_injection_args(parser)
     _add_config_args(parser)
 
 
@@ -206,6 +230,15 @@ def _build_vector_extract(p: argparse.ArgumentParser) -> None:
                    help="Either one concept (e.g. 'happy.sad') or two poles (e.g. 'happy' 'sad')")
     p.add_argument("-m", "--model", default=None, metavar="MODEL_ID")
     p.add_argument("-f", "--force", action="store_true")
+    p.add_argument(
+        "--method", choices=["dim", "pca"], default=None,
+        help="Extraction algorithm: 'dim' (difference-of-means, default) or "
+             "'pca' (legacy contrastive PCA).  DiM is the v2.1+ default per "
+             "Im & Li 2025; --method pca recovers the v1.x path and writes "
+             "to the legacy ``_pca`` filename suffix for side-by-side "
+             "comparison.  Unset = defer to YAML ``extraction_method:`` if "
+             "configured, else 'dim'.",
+    )
     p.add_argument(
         "--sae", default=None, metavar="RELEASE",
         help="Extract via a SAELens SAE release (requires `pip install .[sae]`). "

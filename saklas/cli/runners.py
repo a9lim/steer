@@ -53,11 +53,18 @@ def _resolve_probes(raw: list[str] | None) -> list[str]:
 def _make_session(args: argparse.Namespace):
     from saklas.core.session import SaklasSession
     probe_categories = _resolve_probes(args.probes)
+    # Steering-injection options: ``None`` flows through to the v2.1
+    # session defaults (angular + π/2).  CLI flag and YAML are both
+    # already merged onto ``args`` by ``_load_effective_config``.
+    injection_mode = getattr(args, "injection_mode", None) or "angular"
+    theta_max = getattr(args, "theta_max", None)
     return SaklasSession.from_pretrained(
         args.model, device=args.device, quantize=args.quantize,
         probes=probe_categories,
         system_prompt=getattr(args, "system_prompt", None),
         max_tokens=getattr(args, "max_tokens", 1024),
+        injection_mode=injection_mode,
+        theta_max=theta_max,
     )
 
 
@@ -97,6 +104,24 @@ def _load_effective_config(args: argparse.Namespace):
     args.system_prompt = composed.system_prompt
     args.max_tokens = composed.max_tokens if composed.max_tokens is not None else 1024
     args.config_vectors = composed.vectors
+    # Honor YAML ``extraction_method:`` only when the user hasn't already
+    # set --method on the CLI (argparse defaults the attr to "dim").
+    if (
+        composed.extraction_method is not None
+        and getattr(args, "method", None) is None
+    ):
+        args.method = composed.extraction_method
+    # Steering-injection options on tui/serve: YAML wins when CLI is unset.
+    if (
+        composed.injection_mode is not None
+        and getattr(args, "injection_mode", None) is None
+    ):
+        args.injection_mode = composed.injection_mode
+    if (
+        composed.theta_max is not None
+        and getattr(args, "theta_max", None) is None
+    ):
+        args.theta_max = composed.theta_max
     ensure_vectors_installed(composed, strict=getattr(args, "strict", False))
     return composed
 
@@ -479,10 +504,16 @@ def _run_extract(args: argparse.Namespace) -> None:
     import pathlib
     from saklas.io.paths import tensor_filename
     from saklas.io.selectors import _all_concepts
+    # ``method`` may be ``None`` when neither --method nor YAML supplied a
+    # value — fall through to the v2.1 default ("dim").  The YAML override
+    # already applied earlier in ``_load_effective_config`` if present.
+    method = getattr(args, "method", None) or "dim"
     candidate_folders = [c.folder for c in _all_concepts() if c.name == canonical]
     candidate_folders.append(session._local_concept_folder(canonical))
     requested_release = getattr(args, "sae", None)
-    candidate_tensor_name = tensor_filename(session.model_id, release=requested_release)
+    candidate_tensor_name = tensor_filename(
+        session.model_id, release=requested_release, method=method,
+    )
     candidate_paths = [
         pathlib.Path(folder) / candidate_tensor_name for folder in candidate_folders
     ]
@@ -497,7 +528,7 @@ def _run_extract(args: argparse.Namespace) -> None:
             if p.exists():
                 p.unlink()
 
-    extract_kwargs = {}
+    extract_kwargs: dict = {"method": method}
     if getattr(args, "sae", None):
         extract_kwargs["sae"] = args.sae
     if getattr(args, "sae_revision", None):
@@ -515,17 +546,21 @@ def _run_extract(args: argparse.Namespace) -> None:
     # `canonical` may be "name:sae-<release>" — peel it for filename construction.
     if ":sae-" in canonical:
         core_name, _, rel = canonical.partition(":sae-")
-        tensor_name = tensor_filename(session.model_id, release=rel)
+        tensor_name = tensor_filename(
+            session.model_id, release=rel, method=method,
+        )
     else:
         core_name = canonical
-        tensor_name = tensor_filename(session.model_id, release=None)
+        tensor_name = tensor_filename(
+            session.model_id, release=None, method=method,
+        )
     final_paths = [pathlib.Path(f) / tensor_name for f in candidate_folders]
     final_path = next((p for p in final_paths if p.exists()), None)
     if final_path is None:
         final_path = (
             pathlib.Path(session._local_concept_folder(core_name)) / tensor_name
         )
-    print(f"extracted {canonical} -> {final_path}")
+    print(f"extracted {canonical} ({method}) -> {final_path}")
 
 
 _PACK_RUNNERS = {
