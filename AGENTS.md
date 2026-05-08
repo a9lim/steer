@@ -2,7 +2,7 @@
 
 ## What this is
 
-`saklas` is a Python library + Textual TUI + dual-protocol HTTP server (OpenAI `/v1/*` **and** Ollama `/api/*` on the same port) for activation steering and trait monitoring on HuggingFace causal LMs. Representation Engineering via contrastive PCA; per-call alpha control; no model mutation. Three frontends over one engine: `SaklasSession` (programmatic), `saklas serve` (HTTP), `saklas tui` (TUI).
+`saklas` is a Python library + Textual TUI + dual-protocol HTTP server (OpenAI `/v1/*` **and** Ollama `/api/*` on the same port) for activation steering and trait monitoring on HuggingFace causal LMs. Representation Engineering via difference-of-means (default since v2.1; contrastive-PCA via `--method pca` for legacy parity), with angular (rotation-based) injection by default and additive + norm-preserving available via `--steer-mode additive`. Per-call alpha control, no model mutation. Three frontends over one engine: `SaklasSession` (programmatic), `saklas serve` (HTTP), `saklas tui` (TUI).
 
 Version lives in `saklas/__init__.py` as `__version__`. `pyproject.toml` reads it dynamically via `version = {attr = "saklas.__version__"}`, so there's only one place to bump.
 
@@ -27,8 +27,8 @@ pip install -e ".[serve]"                       # fastapi + uvicorn
 pip install -e ".[gguf]"                        # llama.cpp GGUF I/O
 pip install -e ".[cuda]"                        # bitsandbytes + flash-attn (Linux/CUDA)
 pip install -e ".[sae]"                         # SAELens-backed SAE extraction (sae-lens)
-saklas tui <model_id>                           # TUI (explicit subcommand)
-saklas serve <model_id>                         # OpenAI + Ollama API (dual-protocol)
+saklas tui <model_id> [--steer-mode {angular,additive}] [--theta-max RAD]
+saklas serve <model_id> [--steer-mode {angular,additive}] [--theta-max RAD]
 saklas pack install <target> [-s|-a NS/N|-f]    # HF coord or folder; -s = statements only
 saklas pack refresh <selector> [-m MODEL]       # re-pull; `refresh neutrals` is reserved
 saklas pack clear <selector> [-m MODEL] [--variant raw|sae|all]  # delete per-model tensors (keep statements)
@@ -37,7 +37,7 @@ saklas pack ls [selector] [-j|-v]               # LOCAL installed packs only
 saklas pack search <query> [-j|-v]              # search HF hub for saklas-pack repos
 saklas pack push <selector> [-a OWNER/NAME] [-p] [-m MODEL] [-s|-n] [-t] [-d] [-f] [--variant raw|sae|all]
 saklas pack export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
-saklas vector extract <concept>|<pos> <neg> [-m MODEL] [-f] [--sae RELEASE [--sae-revision REV]]
+saklas vector extract <concept>|<pos> <neg> [-m MODEL] [-f] [--method dim|pca] [--sae RELEASE [--sae-revision REV]]
 saklas vector merge <name> <expression> [-m]    # shared steering grammar: "0.3 ns/a + 0.5 ns/b~ns/c"
 saklas vector clone <corpus> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
 saklas vector compare <concepts...> -m MODEL [-v] [-j]       # cosine similarity between vectors
@@ -51,19 +51,37 @@ Root parser has exactly five verbs — `tui`, `serve`, `pack`, `vector`, `config
 
 Every subcommand that takes `-c/--config` auto-loads `~/.saklas/config.yaml` first, then composes any explicit `-c` files on top (later overrides earlier). `ConfigFile.effective(extras, include_default=...)` is the single entry point. `ConfigFile.vectors` is a steering expression string — parsed lazily through `saklas.core.steering_expr.parse_expr`, which resolves bare poles (`wolf → deer.wolf @ -0.5`) via `cli.selectors.resolve_pole` and produces the canonical `Steering` IR every surface speaks.
 
-Selector grammar (shared): `<name>`, `<ns>/<name>`, `tag:<t>`, `namespace:<ns>`, `default`, `all`, optionally suffixed with `:<variant>` where `<variant>` is `raw` (default), `sae` (unique SAE variant for the concept), or `sae-<release>` (specific SAELens release). Bare names resolve cross-namespace and raise `AmbiguousSelectorError` on collision; bare `:sae` raises `AmbiguousVariantError` when more than one SAE release is extracted for a concept. `pack refresh` silently skips `source=local`; `pack refresh neutrals` rewrites `~/.saklas/neutral_statements.json` from the bundled copy. `pack rm` refuses broad selectors without `-y`; bundled concepts respawn on next session init. `pack ls` is local-only; HF hub search is `pack search`.
+Selector grammar (shared): `<name>`, `<ns>/<name>`, `tag:<t>`, `namespace:<ns>`, `default`, `all`, optionally suffixed with `:<variant>` where `<variant>` is `raw` (canonical DiM, default since v2.1), `pca` (legacy PCA tensor at `<safe>_pca.safetensors`), `sae` (unique SAE variant for the concept), or `sae-<release>` (specific SAELens release). Bare names resolve cross-namespace and raise `AmbiguousSelectorError` on collision; bare `:sae` raises `AmbiguousVariantError` when more than one SAE release is extracted for a concept. `pack refresh` silently skips `source=local`; `pack refresh neutrals` rewrites `~/.saklas/neutral_statements.json` from the bundled copy. `pack rm` refuses broad selectors without `-y`; bundled concepts respawn on next session init. `pack ls` is local-only; HF hub search is `pack search`.
+
+## Extraction methods (v2.1)
+
+Two extractors share `_capture_diffs_for_pairs` (forward-pass capture) and `_share_bake_and_warn` (edge-drop + share-baking + diagnostics warning) in `saklas/core/vectors.py`; only the per-layer direction computation differs:
+
+- `extract_difference_of_means` (default, `--method dim`): per-layer direction = `mean(diffs_per_layer[L])`. Score = `||direction|| / ref_norm`. Sidecar `method` label `"difference_of_means"` (raw) / `"dim_sae"` (SAE feature space). Im & Li 2025 / AxBench 2025 motivation.
+- `extract_contrastive` (legacy, `--method pca`): per-layer direction = first principal component of the diffs (batched SVD). Score = explained-variance ratio. Sidecar label `"contrastive_pca"` / `"pca_center_sae"` — bit-identical to v2.0.x output.
+
+Tensor filenames carry the method as a suffix: `<safe>.safetensors` (raw DiM, canonical), `<safe>_pca.safetensors` (raw PCA legacy), `<safe>_sae-<release>.safetensors` (DiM in SAE feature space), `<safe>_sae-<release>_pca.safetensors` (PCA in SAE feature space, legacy). `tensor_filename(model_id, *, release=None, transferred_from=None, method="dim")` and `parse_tensor_filename` round-trip; `enumerate_variants` keys are `raw` / `pca` / `sae-<release>` / `sae-<release>-pca` / `from-<safe_src>`. Existing v1.x PCA tensors at the canonical `<safe>.safetensors` path keep loading — sidecar method tells the runtime what's stored.
 
 ## SAE pipeline (optional)
 
-`saklas vector extract <concept> --sae <release>` runs contrastive PCA in SAE feature space rather than raw residual-stream space, then decodes back to model space. Uses SAELens as the loader, so any published release it covers (GemmaScope, Eleuther, Joseph Bloom's, Apollo/Goodfire) works on day one. Install with `pip install -e ".[sae]"`.
+`saklas vector extract <concept> --sae <release>` runs extraction in SAE feature space (DiM by default; `--method pca` for the legacy SAE-PCA path). Encodes the per-pair pos/neg stacks through `SaeBackend.encode_layer`, runs the chosen extractor in feature space, decodes the resulting direction back through `SaeBackend.decode_layer`, then hands off to share-baking. Uses SAELens as the loader, so any published release it covers (GemmaScope, Eleuther, Joseph Bloom's, Apollo/Goodfire) works on day one. Install with `pip install -e ".[sae]"`.
 
-Output tensors coexist with raw-PCA tensors in the same concept folder: `<model>.safetensors` (raw) alongside `<model>_sae-<release>.safetensors` (SAE). Select at steer time with the `:sae[-<release>]` suffix in the shared steering expression grammar — `session.steering("0.3 honest:sae")` from Python, `vectors: "0.3 honest:sae"` in the config file, `/steer 0.3 honest:sae` in the TUI. A bare `:sae` picks the unique SAE variant; explicit `:sae-<release>` picks one when multiple coexist.
+Output tensors coexist with raw tensors in the same concept folder. Select at steer time with the `:sae[-<release>]` suffix in the shared steering expression grammar — `session.steering("0.3 honest:sae")` from Python, `vectors: "0.3 honest:sae"` in the config file, `/steer 0.3 honest:sae` in the TUI. A bare `:sae` picks the unique SAE variant; explicit `:sae-<release>` picks one when multiple coexist.
 
 SAE profiles are subset-layer (only layers the release covers). Share-baking redistributes over the covered subset — hook math and monitor scoring are unchanged. Release selection at extract time requires an explicit SAELens release name (SAELens ships many per base model — `gemma-scope-2b-pt-res`, `-mlp`, `-att`, etc. — and there's no sensible implicit default); if multiple SAEs exist per layer within a release, saklas picks the narrowest-width and emits a warning.
 
-Sidecar JSON records `sae_release`, `sae_revision`, `sae_ids_by_layer` alongside the usual `method: "pca_center_sae"` / `statements_sha256` fields. `pack push --variant sae|all` opts into sharing SAE tensors (push defaults to `raw` so provenance-stronger SAE flavors don't ship accidentally); `pack clear --variant raw|sae|all` scopes deletions (defaults to `all`).
+Sidecar JSON records `sae_release`, `sae_revision`, `sae_ids_by_layer` alongside the usual `method` / `statements_sha256` fields. `pack push --variant sae|all` opts into sharing SAE tensors (push defaults to `raw` so provenance-stronger SAE flavors don't ship accidentally); `pack clear --variant raw|sae|all` scopes deletions (defaults to `all`).
 
-## Python API (v2.0)
+## Injection modes (v2.1)
+
+Set per session via `SaklasSession.from_pretrained(injection_mode="angular"|"additive", theta_max=π/2)` or per call via `Steering(injection_mode=..., theta_max=...)`. CLI flags `--steer-mode` and `--theta-max` on `tui`/`serve`; YAML keys `injection_mode:` and `theta_max:`. `Steering.injection_mode = None` (default) inherits the session-level setting; nested `session.steering(...)` scopes resolve inner-wins via a parallel LIFO override stack.
+
+- **Angular (default)**: per layer L, `θ_L = share_L × ||composed_unit_sum||_L × θ_max` where `composed_unit_sum_L = Σ_i α_i × (baked_i_L / ||baked_i_L||)` and `share_L = ||baked_L|| / Σ_L' ||baked_L'||`. Cumulative budget across the residual stream sums to `|α| × θ_max`, so `α=1` ↔ full π/2 rotation toward the concept, `α=0.5` ↔ 45° cumulative. Hot path is a Givens rotation in the (h_unit, d_perp_unit) plane: norm-preserving exactly, no rescale. Cached `_d_hat` / `_theta` / `_cos_t` / `_sin_t` at `recompose` time so hook_fn has zero `.item()` calls.
+- **Additive (legacy)**: `effective_alpha = user_alpha × _STEER_GAIN`; per-layer `composed_L = effective_alpha × baked_L` (share built into magnitude). Hook math is `vector_norm → add_(composed) → vector_norm.clamp_(1e-6) → mul_(ratio)`. Bit-identical to v1.x when explicitly selected. `_STEER_GAIN = 2.0` calibrated on gemma-4-31b-it; coherent band ≈ α 0.3–0.85, cliff ≈ α 0.95+. Cross-model validation on Qwen3.5-9B and Llama-3.2-3B-Instruct confirms the cliff transfers within ±0.1α.
+
+Empirical angular band (gemma-4-e4b-it / `default/angry.calm` / `seed=42`): coherent ≈ α [-1.0, +0.7], cliff at α=+1.0. Asymmetry between calm and angry sides is consistent with the documented `angry.calm ↔ authoritative.submissive` entanglement on this checkpoint.
+
+## Python API (v2.1)
 
 Every surface — Python, YAML, HTTP, TUI, `vector merge` — speaks the same steering-expression grammar out of `saklas.core.steering_expr`:
 
@@ -139,6 +157,11 @@ Hard-break notes vs v1.4:
 - Every saklas-raised exception is a `SaklasError` subclass while preserving its stdlib MRO, so `except SaklasError` catches the whole family and `except ValueError` / `except RuntimeError` at existing sites still works.
 - `GenerationResult.applied_steering` carries the canonical expression string that produced the result (or `None` for unsteered generations) — round-trips through `saklas.core.steering_expr.parse_expr`.
 
+Additive-only changes since v2.1:
+- Default extractor flipped to DiM. Existing PCA tensors at the canonical `<safe>.safetensors` path keep loading (sidecar method tells the runtime); fresh extractions write DiM. Pass `--method pca` to opt into legacy contrastive PCA, which writes to the suffixed `<safe>_pca.safetensors` so both can coexist.
+- Default injection flipped to angular (Givens rotation toward `d̂`). `Steering` gains optional `injection_mode` and `theta_max` fields (both `None` = inherit session default). `SaklasSession.from_pretrained` and `SaklasSession.__init__` gain `injection_mode="angular"`, `theta_max=π/2` defaults. `--steer-mode` and `--theta-max` on `tui`/`serve`; YAML keys `injection_mode:` and `theta_max:`.
+- `_STEER_GAIN = 2.0` only multiplies under `injection_mode="additive"`. Under angular, user α maps directly to a rotation angle (`Σ_L θ_L = |α| × θ_max`).
+
 ## Cache layout
 
 All state under `~/.saklas/` (override via `SAKLAS_HOME`):
@@ -170,13 +193,13 @@ All state under `~/.saklas/` (override via `SAKLAS_HOME`):
 
 These gate `test_session.py::test_throughput` (steered ≥ 85% of vanilla tok/s):
 
-- **Hot-path hooks**: no Python allocation, no `.item()`, no CPU sync, in-place only. Norm preservation adds two `torch.linalg.vector_norm(dtype=float32)` calls + one in-place `mul_` per steered layer per step.
+- **Hot-path hooks**: no Python allocation, no `.item()`, no CPU sync, in-place only. Angular path runs ~1 vector_norm + 1 dot + a handful of muls/subs in fp32 + an in-place `copy_` per layer per step; additive path keeps the v1.x two `vector_norm` + `add_` + `mul_(ratio)` rescale.
 - **`torch.inference_mode()`** wraps the entire generation loop.
-- **In-place ops**: `logits.div_()`, `logits.clamp_()`, `probs.div_()`, `hidden.add_()` / `mul_()`.
+- **In-place ops**: `logits.div_()`, `logits.clamp_()`, `probs.div_()`, `hidden.add_()` / `mul_()` / `copy_()`.
 - **Top-p via `torch.topk`**, not full-vocab sort. `k = min(config.top_k or 1024, vocab)`; `top_k` is a hard cap applied before top-p (matches llama.cpp/Ollama).
-- **Norms use fp32** — fp16 sum-of-squares overflows at hidden_dim ≥ 2048. Applies to extraction-time direction norms **and** the norm-preserving hook's pre/post captures.
-- **Shares baked at extraction, flat scalar at apply.** Stored direction = `unit_direction * ref_norm * (score / sum(scores))` over retained layers (first/last 2 dropped per `drop_edges=(2,2)` default — see `core/vectors.py`); hook math is `user_alpha * _STEER_GAIN * sum(baked)`. Per-unit-α injection is invariant across layer count and absolute score magnitude. `_STEER_GAIN = 2.0` calibrated on gemma-4-31b-it with the bundled 21-probe pack post-edge-drop; coherent band ≈ α 0.3–0.85, cliff ≈ α 0.95+. Cross-model validation on Qwen3.5-9B and Llama-3.2-3B-Instruct confirms the cliff transfers within ±0.1α.
-- **Norm preservation is unconditional.** Every steered layer's output rescaled back to pre-injection per-position magnitude. The v1.3.1 sweep confirmed norm preservation made injection **more** efficient per unit α — unconstrained addition also inflates magnitude which implicitly attenuates directional change.
+- **Norms use fp32** — fp16 sum-of-squares overflows at hidden_dim ≥ 2048. Applies to extraction-time direction norms **and** the per-position norms inside both injection paths.
+- **Shares baked at extraction, mode-specific at apply.** Stored direction = `unit_direction * ref_norm * (score / sum(scores))` over retained layers (first/last 2 dropped per `drop_edges=(2,2)` default — see `core/vectors.py`). Additive: per-layer `composed = user_alpha * _STEER_GAIN * baked_L`, share is automatic via magnitude. Angular: per-layer `effective_alpha_L = user_alpha * share_L` (share computed from `||baked_L||` at `apply_to_model` time), so cumulative `Σ_L θ_L` sums to `|α| * θ_max` regardless of layer count.
+- **Norm preservation is mode-specific.** Additive: explicit per-position rescale via `vector_norm` pre/post. Angular: rotation is exactly norm-preserving by construction (Givens in the `(h_unit, d_perp_unit)` plane), no rescale. Near-aligned positions (`||d_perp|| < 1e-6`) get a `torch.where` no-op fallback to avoid the `cos_t * h_unit + sin_t * 0` shrinkage pathology.
 - **Monitor capture is hook-driven, inline with generation.** `HiddenCapture` hooks union of probe layers for the run; `score_per_token` scores from captured tensors afterward — no second forward pass. Per-layer weight = `||baked||` (= share × ref_norm). Per-layer stacked cache — one matmul per layer scores all probes simultaneously; one `.cpu().tolist()` per measure regardless of probe count.
 - **Steering hooks are transient** — composed before generation, removed after.
 - **Contrastive diffs in float32** — fp16 subtraction between close vectors loses precision.

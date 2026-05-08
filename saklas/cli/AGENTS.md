@@ -14,7 +14,7 @@ Five-verb root parser (`tui`/`serve`/`pack`/`vector`/`config`) split across:
 
 ## Config loading
 
-`_load_effective_config(args)` is the shared entry point every subcommand that takes `-c` calls. Composes `~/.saklas/config.yaml` + explicit `-c` files and stamps `args.config_vectors` (a steering expression string, or `None`) / `args.temperature` / `args.top_p` / `args.max_tokens` in place. The `vectors:` YAML key is a single steering expression — parsed through `saklas.core.steering_expr.parse_expr` which resolves bare poles (`wolf → deer.wolf @ -0.5`) via `io.selectors.resolve_pole`. `ConfigFile.load` validates the expression at load time and stores the raw string; re-parsing happens on consumption.
+`_load_effective_config(args)` is the shared entry point every subcommand that takes `-c` calls. Composes `~/.saklas/config.yaml` + explicit `-c` files and stamps `args.config_vectors` (a steering expression string, or `None`) / `args.temperature` / `args.top_p` / `args.max_tokens` / `args.method` (extraction) / `args.injection_mode` / `args.theta_max` in place. The `vectors:` YAML key is a single steering expression — parsed through `saklas.core.steering_expr.parse_expr` which resolves bare poles (`wolf → deer.wolf @ -0.5`) via `io.selectors.resolve_pole`. `ConfigFile.load` validates the expression at load time and stores the raw string; re-parsing happens on consumption.
 
 ## Warmup
 
@@ -22,7 +22,9 @@ Five-verb root parser (`tui`/`serve`/`pack`/`vector`/`config`) split across:
 
 ## Flags
 
+- `tui` / `serve`: `--steer-mode {angular,additive}` (default `angular`) and `--theta-max RAD` (default π/2 ≈ 1.5708) flow into `SaklasSession.from_pretrained` via `_make_session` and stamp the session-level injection mode. Both default to `None` on argparse; YAML `injection_mode:` and `theta_max:` win when CLI is unset, session defaults win otherwise.
 - `serve`: `--host/-H`, `--port/-P`, `--steer/-S EXPR`, `--cors/-C`, `--api-key/-k`, plus `-c/--config`. `--steer` takes one steering expression string (the shared grammar); combine multiple terms with `+`/`-`.
+- `vector extract`: `--method {dim,pca}` (default `dim`) selects the per-layer extractor. Tensor filenames diverge: `--method dim` writes to `<safe_model>.safetensors` (canonical); `--method pca` writes to `<safe_model>_pca.safetensors` (legacy). Both can coexist on disk; the steering grammar's `:pca` variant addresses the legacy tensor.
 - `vector merge`: positional `expression` argument — a steering expression such as `"0.3 ns/a + 0.4 ns/b"` or `"0.5 ns/a~ns/b"` for projection-removal. The comma-separated legacy form is gone.
 - `pack ls` is local-only; `pack search` is the HF-remote verb.
 - `pack rm` replaces `uninstall`; `pack ls` replaces `list`.
