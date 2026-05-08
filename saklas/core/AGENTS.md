@@ -17,6 +17,8 @@ One forward pass per prompt; `_capture_all_hidden_states` hooks every layer in a
 
 **Shared share-bake**: each direction scaled to mean activation norm of its layer, then multiplied by `score_i / sum(scores)`. The angular hook reads `||baked_L||` as the layer share at apply time; the additive hook absorbs share into magnitude. All-zero fallback to uniform.
 
+**Score metric (v2.1+)**. Both extractors accept `whitener: LayerWhitener | None = None`. When provided, DiM scores via `||mean_diff||_M / ref_norm` (Mahalanobis bake, default in real session-driven extraction); the `/ref_norm` makes per-layer `ref_norm` cancel from the hook share, so `share_L_hook = ||m_L||_M / Σ_L' ||m_L'||_M` — pure Mahalanobis weighting, same algebraic shape as the Euclidean fallback `||m||_2 / Σ ||m||_2`. PCA path ignores the whitener (EVR is metric-invariant). Sidecar `bake` field records `"mahalanobis"` or `"euclidean"`; runtime hook reads tensor magnitudes regardless of bake flavor, so the field is informational. Layers absent from the whitener fall back to Euclidean per layer.
+
 **Edge-layer drop**: `drop_edges=(2, 2)` default excludes the first 2 and last 2 model layers from the share distribution before the `score_i / sum(scores)` normalization. Early layers carry tokenization / lexical features (L0 PCA on contrastive English pairs is often dominated by literal pos/neg word identity); late layers are strongly aligned with the unembedding head. Steering at either end corrupts surface form rather than latent meaning — on ministral-3 (loaded via `_load_text_from_multimodal`) the L0 `share × spread` ratio inflates to 3–4× the model median, producing immediate grammar collapse at otherwise-coherent α. Dropped layers are omitted from the returned profile entirely (no zero-tensor hooks attached downstream). Pass `drop_edges=(0, 0)` to restore pre-fix behavior (used by SAE mock-model tests where N ≤ 4). Small models where the requested drop would leave no retained layers raise `ValueError`. Validation lives in shared `_validate_drop_edges`.
 
 Returns `(profile, diagnostics)`: `dict[int, Tensor]` covering every retained layer + `dict[int, dict[str, float]]` of probe-quality metrics on the same key set. Empty diagnostics dict for `n_pairs < 2` paths where the SVD-fed metrics degenerate. `compute_layer_means` averages 90 neutral prompts for centering. `load_profile` dispatches on extension. `_template_overhead_cache` is keyed by `id(tokenizer)` — safe only while one tokenizer lives the session lifetime.
@@ -134,7 +136,17 @@ Per-call `SamplingConfig` (frozen with `merged_with`), `Steering` (frozen; `from
 
 ## vectors.py::project_profile
 
-`project_profile(base, onto, operator)` — per-layer projection helper used by `_SteeringContext.__enter__` to materialize runtime projections. `operator="~"` returns the component of base aligned with onto; `operator="|"` returns the orthogonal component. Layers in base but not onto pass through unchanged for `|`, drop for `~`. Near-zero `||onto|| < 1e-12` mirrors that rule. Result dtype matches base. Hook path is unchanged — projected tensors look like any other baked direction to `SteeringManager`.
+`project_profile(base, onto, operator, *, whitener=None)` — per-layer projection helper used by `_SteeringContext.__enter__` to materialize runtime projections. `operator="~"` returns the component of base aligned with onto; `operator="|"` returns the orthogonal component. Layers in base but not onto pass through unchanged for `|`, drop for `~`. Near-zero `||onto|| < 1e-12` mirrors that rule. With `whitener=None` (current `_SteeringContext` call shape) the math is plain Gram-Schmidt; with a whitener the projection runs in the Mahalanobis metric, equivalent to the closed-form LEACE projector for a single direction (Belrose et al., 2023, arXiv 2306.03819). Result dtype matches base. Hook path is unchanged — projected tensors look like any other baked direction to `SteeringManager`.
+
+## mahalanobis.py
+
+`LayerWhitener` holds per-layer centered neutral activations `X_L ∈ ℝ^(N=90, D)` and the small Woodbury inverse `K_L = (NλI + X X^T)^{-1}`; `apply_inv(layer, v)` computes `Σ_reg^{-1} v = (1/λ)(v − X^T K X v)` in O(ND) per matvec without materializing `D×D`. Ridge `λ_L = (||X_L||_F² / (N · D)) · ridge_scale` (mean diagonal of the un-regularized sample covariance; `ridge_scale=1.0` default). Built lazily from the existing `~/.saklas/models/<id>/{layer_means,neutral_activations}.safetensors` pair via `from_neutral_activations` (in-memory) or `from_cache(model_id)` (disk-only path used by `vector compare --metric mahalanobis`). Three primitives:
+
+- `mahalanobis_cosine(layer, u, v)` — whitened cosine `<u,v>_M / (||u||_M · ||v||_M)`.
+- `leace_project(layer, base, onto, operator)` — Mahalanobis-metric projection, closed-form LEACE for a single direction.
+- `apply_inv(layer, v)` — `Σ⁻¹ v` for any other Mahalanobis math callers want to do.
+
+`Profile.cosine_similarity(other, *, per_layer=False, whitener=None)` and `vectors.project_profile(..., whitener=None)` are the two integration points; both fall back to Euclidean when `whitener=None` so existing call sites are unchanged. `SaklasSession.whitener` is a lazy property; `bootstrap_probes` builds the whitener eagerly before extraction so v2.1 default-extraction paths are end-to-end Mahalanobis.
 
 ## generation.py
 

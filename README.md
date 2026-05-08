@@ -30,7 +30,7 @@ If you notice any errors while using the program, please update to the most rece
 
 The contrastive-pair approach comes from the Representation Engineering paper ([Zou et al., 2023](https://arxiv.org/abs/2310.01405)). [repeng](https://github.com/vgel/repeng) by Theia Vogel is the well-known implementation in this space and is what most people might reach for. Saklas implements the same idea from a different angle: repeng is lean and more of a library, saklas is more of a TUI with monitoring and a chat server bundled in. Both are worth your time!
 
-Since v2.1 the default extractor is difference-of-means (DiM) per [Im & Li, 2025](https://arxiv.org/abs/2502.02716); the original contrastive-PCA path is still available via `--method pca`.
+Since v2.1 the default extractor is difference-of-means (DiM) per [Im & Li, 2025](https://arxiv.org/abs/2502.02716), and the per-layer share allocation runs in the Mahalanobis metric (whitened against per-model activation covariance) instead of the v1.x Euclidean magnitude. The legacy v1.x stack (PCA extraction, additive steering, Euclidean shares and cosine) is available all together via `--legacy` on `tui`, `serve`, `vector extract`, and `vector compare`, or piecemeal via `--method pca`, `--steer-mode additive`, and `--metric euclidean` on the relevant verbs.
 
 ---
 
@@ -188,7 +188,7 @@ Bundled probes extracted before v1.6 don't carry diagnostics on disk. Please run
 
 ### Vector comparison
 
-`Profile.cosine_similarity(other)` gives you weighted cosine similarity between two steering profiles over their shared layers. The CLI has three modes: ranked comparison of one selected vector against all installed profiles, direct pairwise comparison, and N×N similarity matrices. The TUI has `/compare` for interactive use.
+`Profile.cosine_similarity(other)` gives you weighted cosine similarity between two steering profiles over their shared layers. Pass `whitener=session.whitener` to score in the Mahalanobis metric instead of Euclidean. The CLI has three modes: ranked comparison of one selected vector against all installed profiles, direct pairwise comparison, and N×N similarity matrices, with `--metric mahalanobis` to switch metrics. The TUI has `/compare` for interactive use.
 
 This lets you find concepts that are correlated. For example, on Gemma 4 the model encodes `masculine.feminine` and `traditional.progressive` along the same direction (+0.53 to +0.59 weighted cosine across the 31b and e4b checkpoints), and `hallucinating.grounded` overlaps with `humorous.serious` (+0.53 to +0.66). Steering one nudges the other; the entanglement is in the model's representation, not in the probe extraction.
 
@@ -231,6 +231,7 @@ There are three panels: a vector registry on the left, chat in the center, and a
 | `-p`, `--probes` | Categories: `all`, `none`, `affect`, `epistemic`, `alignment`, `register`, `social_stance`, `cultural` |
 | `--steer-mode` | `angular` (default) or `additive` (legacy v1.x add-and-rescale path) |
 | `--theta-max` | Max rotation angle for angular mode (radians; default π/2 ≈ 1.5708) |
+| `--legacy` | v2.0 backcompat preset: PCA extraction with additive injection. Mutually exclusive with `--steer-mode`. |
 | `-c`, `--config` | Load setup YAML |
 | `-s`, `--strict` | With `-c`: fail on missing vectors |
 
@@ -488,6 +489,7 @@ curl -N http://localhost:8000/api/chat -d '{
 | `-S`, `--steer` | None | Default steering expression, e.g. `"0.2 cheerful"` |
 | `--steer-mode` | `angular` | `angular` (default) or `additive` (legacy v1.x path) |
 | `--theta-max` | `π/2` | Max rotation angle for angular mode (radians) |
+| `--legacy` | off | v2.0 backcompat preset: PCA extraction with additive injection. Mutually exclusive with `--steer-mode`. |
 | `-C`, `--cors` | None | CORS origin, repeatable |
 | `-k`, `--api-key` | None | Bearer auth. Falls back to `$SAKLAS_API_KEY`. |
 
@@ -517,14 +519,14 @@ saklas pack export gguf <selector> [-m MODEL] [-o PATH] [--model-hint HINT]
 ### Vector operations
 
 ```bash
-saklas vector extract <concept> | <pos> <neg> [-m MODEL] [-f] [--method dim|pca] [--sae RELEASE [--sae-revision REV]]
+saklas vector extract <concept> | <pos> <neg> [-m MODEL] [-f] [--method dim|pca] [--sae RELEASE [--sae-revision REV]] [--legacy]
 saklas vector merge <name> <expression> [-m] [-f] [-s]
 saklas vector clone <corpus-file> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
-saklas vector compare <concepts...> -m MODEL [-v] [-j]
+saklas vector compare <concepts...> -m MODEL [-v] [-j] [--metric euclidean|mahalanobis] [--legacy]
 saklas vector why <concept> -m MODEL [-j]
 ```
 
-`--method dim` (default) writes to `<concept>/<safe_model>.safetensors`; `--method pca` writes to `<concept>/<safe_model>_pca.safetensors` so the two can coexist on disk. Address either at steer time with the variant suffix: `0.3 honest` picks the canonical (DiM) tensor, `0.3 honest:pca` picks the legacy PCA tensor.
+`--method dim` (default) writes to `<concept>/<safe_model>.safetensors`; `--method pca` writes to `<concept>/<safe_model>_pca.safetensors` so the two can coexist on disk. Address either at steer time with the variant suffix: `0.3 honest` picks the canonical (DiM) tensor, `0.3 honest:pca` picks the legacy PCA tensor. The `--legacy` shorthand sets `--method pca` for v2.0 reproduction.
 
 Merge expressions share the steering grammar. Terms combine with `+` or `-`, coefficients lead each term, `~` keeps the component aligned with another direction, and `|` projects another direction's component out. For example, `saklas vector merge dehallu "0.8 default/creative.conventional|default/hallucinating.grounded"` gives you creative with hallucination projected out.
 
