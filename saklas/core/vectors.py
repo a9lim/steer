@@ -502,10 +502,22 @@ def compute_dls_mask(
     if layer_means is None or not layer_means:
         return set(mu_pos)
     keep: set[int] = set()
+    # ``checkable`` is the set of layers we *attempted* the
+    # discriminative test on — i.e. layers with a valid direction.
+    # Layers explicitly skipped for missing direction or zero-norm
+    # direction are excluded from the all-failed fallback (they're
+    # degenerate by construction; re-including them via the fallback
+    # would silently undo the skip).
+    checkable: set[int] = set()
     for L in mu_pos:
         d = directions.get(L)
         if d is None:
             continue
+        d32 = d.to(dtype=torch.float32, device="cpu").reshape(-1)
+        d_norm = float(d32.norm())
+        if d_norm < 1e-12:
+            continue  # degenerate direction — drop, do not include in fallback
+        checkable.add(L)
         mu_n = layer_means.get(L)
         if mu_n is None:
             # Layer-means doesn't cover this layer.  Conservative: keep —
@@ -513,10 +525,6 @@ def compute_dls_mask(
             # discriminative layer due to missing baseline data.
             keep.add(L)
             continue
-        d32 = d.to(dtype=torch.float32, device="cpu").reshape(-1)
-        d_norm = float(d32.norm())
-        if d_norm < 1e-12:
-            continue  # degenerate direction — drop
         d_hat = d32 / d_norm
         mu_n_cpu = mu_n.to(dtype=torch.float32, device="cpu").reshape(-1)
         mu_p_cpu = mu_pos[L].to(dtype=torch.float32, device="cpu").reshape(-1)
@@ -526,18 +534,22 @@ def compute_dls_mask(
         if proj_pos * proj_neg < 0.0:
             keep.add(L)
     if not keep:
-        # All layers failed the discriminative check.  Probe is
-        # degenerate on this model (the diagnostics warning will fire
-        # separately).  Keep everything so downstream share-bake has
-        # something to work with rather than raising mid-extraction.
+        # All checkable layers failed the discriminative check.  Probe
+        # is degenerate on this model (the diagnostics warning will
+        # fire separately).  Keep the *checkable* set rather than every
+        # layer in ``mu_pos`` — re-including layers explicitly skipped
+        # for missing/zero-norm directions would silently undo the
+        # skip.  When no layers are checkable at all (caller passed
+        # all-degenerate directions) the fallback returns an empty
+        # set; the share-bake step's all-zero handler kicks in.
         warnings.warn(
             "DLS: no layers pass the discriminative check; falling back "
-            "to keep-all.  Probe likely degenerate on this model — "
-            "review the diagnostics warning above.",
+            "to keep-all-checkable.  Probe likely degenerate on this "
+            "model — review the diagnostics warning above.",
             UserWarning,
             stacklevel=3,
         )
-        return set(mu_pos)
+        return checkable
     return keep
 
 

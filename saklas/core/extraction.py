@@ -367,26 +367,41 @@ class ExtractionPipeline:
         # check fires when both are present.  Tests / mock stubs that
         # don't carry layer_means just keep all layers.
         bake_label = "euclidean"
-        # ``layer_means`` via the public property triggers lazy
-        # bootstrap on ``probes=[]`` sessions (closes the v2.1 footgun
-        # where DLS silently disabled because ``self._layer_means``
-        # was an empty dict).  Test stubs without a real model
-        # override the property to return ``{}`` directly.  ``dls``
-        # is per-call (defaults to ``True`` here, but the
-        # ``SaklasSession.extract`` wrapper threads its own session-
-        # level ``self._dls`` through, so ``--legacy`` flows correctly
-        # even on bare ``session.extract(...)`` calls).
-        extract_kwargs: dict = {
+        # Eager kwargs — cheap, always known.  The expensive fields
+        # (``layer_means``, ``whitener``) are deferred to
+        # :func:`_resolve_extract_kwargs` so a cache-hit short-circuit
+        # below doesn't trigger ``handle.layer_means`` / ``handle.whitener``
+        # — both can launch a lazy ``bootstrap_layer_means`` /
+        # ``LayerWhitener`` build that runs forward passes through the
+        # model, which is exactly the work the cache hit was supposed
+        # to avoid.  Pre-v2.1 this dict was eager and
+        # ``probes=[]`` sessions paid the neutral build on every
+        # cache-hit ``session.extract`` call.
+        eager_kwargs: dict = {
             "sae": sae_backend,
             "concept_label": canonical,
             "dls": dls,
-            "layer_means": getattr(self._handle, "layer_means", None),
         }
-        if method == "dim":
-            handle_whitener = getattr(self._handle, "whitener", None)
-            if handle_whitener is not None:
-                extract_kwargs["whitener"] = handle_whitener
-                bake_label = "mahalanobis"
+
+        def _resolve_extract_kwargs() -> dict:
+            """Materialize the full extractor kwargs dict on demand.
+
+            Resolves ``layer_means`` and ``whitener`` from the handle
+            — both of which may trigger lazy bootstrap — and mutates
+            the closed-over ``bake_label`` when the whitener loads
+            successfully.  Called at every extractor call site
+            *after* the cache-hit short-circuit so cache hits skip
+            the bootstrap.
+            """
+            nonlocal bake_label
+            out = dict(eager_kwargs)
+            out["layer_means"] = getattr(self._handle, "layer_means", None)
+            if method == "dim":
+                handle_whitener = getattr(self._handle, "whitener", None)
+                if handle_whitener is not None:
+                    out["whitener"] = handle_whitener
+                    bake_label = "mahalanobis"
+            return out
 
         def _build_return(
             profile_dict: dict,
@@ -451,7 +466,7 @@ class ExtractionPipeline:
             pairs = [{"positive": p, "negative": n} for p, n in ds.pairs]
             profile, diagnostics = extractor(
                 model, tokenizer, pairs, layers=layers,
-                **extract_kwargs,
+                **_resolve_extract_kwargs(),
             )
             _save_profile(profile, cache_path, _save_meta(diagnostics=diagnostics))
             self._packs._update_local_pack_files(folder)
@@ -527,7 +542,7 @@ class ExtractionPipeline:
                 profile, diagnostics = extractor(
                     model, tokenizer, ds["pairs"],
                     layers=layers,
-                    **extract_kwargs,
+                    **_resolve_extract_kwargs(),
                 )
                 _save_profile(profile, cache_path, _save_meta(
                     {"statements_sha256": hash_file(pack_stmts)},
@@ -626,7 +641,7 @@ class ExtractionPipeline:
         )
         profile, diagnostics = extractor(
             model, tokenizer, pairs, layers=layers,
-            **extract_kwargs,
+            **_resolve_extract_kwargs(),
         )
         _save_profile(profile, cache_path, _save_meta(
             {"statements_sha256": hash_file(pathlib.Path(stmt_cache_path))},

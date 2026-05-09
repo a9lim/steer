@@ -468,6 +468,42 @@ class TestComputeDlsMaskEmptyGuard:
         out = compute_dls_mask(mu_pos, mu_neg, directions, {})
         assert out == {0, 1}
 
+    def test_all_failed_fallback_excludes_skipped_layers(self):
+        # All layers fail the discriminative test, but layers 0+1 also
+        # had degenerate directions that the loop explicitly skipped.
+        # Fallback should return only the *checkable* set (layer 2),
+        # not every layer in mu_pos — re-including skipped layers via
+        # the fallback would silently undo the skip.
+        import warnings as _warnings
+        from saklas.core.vectors import compute_dls_mask
+        mu_pos = {
+            0: torch.tensor([0.5, 0.0]),
+            1: torch.tensor([0.7, 0.0]),
+            2: torch.tensor([0.6, 0.0]),
+        }
+        mu_neg = {
+            0: torch.tensor([0.3, 0.0]),
+            1: torch.tensor([0.4, 0.0]),
+            2: torch.tensor([0.4, 0.0]),
+        }
+        # Layers 0+1 have zero-norm directions (skipped).
+        directions = {
+            0: torch.zeros(2),
+            1: torch.zeros(2),
+            2: mu_pos[2] - mu_neg[2],  # non-degenerate, but won't pass DLS
+        }
+        layer_means = {0: torch.zeros(2), 1: torch.zeros(2), 2: torch.zeros(2)}
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            out = compute_dls_mask(mu_pos, mu_neg, directions, layer_means)
+
+        # Layer 2 is checkable but failed; fallback returns just it.
+        # Layers 0+1 stay dropped despite the fallback.
+        assert out == {2}
+        msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+        assert any("DLS" in m for m in msgs)
+
     def test_partial_layer_means_runs_check(self):
         """Layers with a baseline get checked; layers without fall
         through the per-layer ``mu_n is None`` conservative-keep."""
