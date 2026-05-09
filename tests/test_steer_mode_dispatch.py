@@ -51,6 +51,7 @@ class _Stub(SaklasSession):
         *,
         injection_mode: str = "angular",
         theta_max: float | None = None,
+        projection_metric: str = "mahalanobis",
     ) -> None:  # type: ignore[override]
         self._profiles = dict(profiles)
         self._steering_stack = []
@@ -60,10 +61,18 @@ class _Stub(SaklasSession):
         self._theta_max = (
             DEFAULT_THETA_MAX if theta_max is None else float(theta_max)
         )
+        # v2.2 default — see ``SaklasSession.__init__``.
+        self._projection_metric = projection_metric
+        self._whitener = None
+        self._layer_means = {}
         self._steering = SteeringManager(
             injection_mode=injection_mode,  # type: ignore[arg-type]
             theta_max=self._theta_max,
         )
+
+    @property
+    def whitener(self) -> None:  # type: ignore[override]
+        return None
         # apply_to_model walks model_layers / device / dtype but only the
         # observable mode/theta on the manager is what we assert against.
         self._layers = torch.nn.ModuleList()

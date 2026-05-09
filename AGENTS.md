@@ -70,13 +70,13 @@ Under DiM, score = `||mean_diff||_M / ref_norm` makes per-layer `ref_norm` cance
 
 `project_profile(base, onto, operator, *, whitener=None)` and `Profile.cosine_similarity(other, *, whitener=None)` accept the same primitive. With `whitener=None` they fall back to Euclidean Gram-Schmidt and standard cosine; with a whitener, `|`/`~` use the closed-form LEACE projector for a single direction (Belrose et al., 2023, arXiv 2306.03819) and cosine uses `<u,v>_M = u^T Σ^{-1} v`. Layers absent from the whitener fall back to Euclidean per layer (whitener may legitimately cover a subset, e.g. SAE-only releases).
 
-Runtime `|`/`~` projection at steering time (`_materialize_projections` in `session.py`) currently calls `project_profile` without a whitener — Euclidean Gram-Schmidt at hook materialization. The LEACE primitive is opt-in via direct programmatic call for now; flipping the runtime default is a follow-up that would change semantics of existing steering recipes like `0.3 honest|sycophantic`.
+Runtime `|`/`~` projection at steering time (`_materialize_projections` in `session.py`) defaults to Mahalanobis since v2.2 — `project_profile` is called with `session.whitener`, switching `~` and `|` to the closed-form LEACE projector. The session-level default is set by `SaklasSession(projection_metric="mahalanobis")` (the new kwarg, default `"mahalanobis"`); per-call overrides ride on `Steering.projection_metric: Literal["mahalanobis", "euclidean"] | None = None` (None = inherit). YAML `projection_metric:` and CLI `--projection-metric {mahalanobis,euclidean}` on `tui`/`serve` mirror the kwarg. `--legacy` flips it to `"euclidean"` (plain Gram-Schmidt, the v2.0/v2.1 behavior). When the whitener is unavailable for a layer (no neutral-activation cache yet), `project_profile` falls back to Euclidean per-layer transparently. Steering recipes like `0.3 honest|sycophantic` produce more aggressive concept removal under the new default — LEACE removes all linearly-decodable `sycophantic` information from `honest`, vs. Euclidean's literal-direction subtraction. Use `--legacy` (or per-call `projection_metric="euclidean"`) to reproduce the older shape.
 
 Empirical (gemma-4-e4b-it / `default/angry.calm`, single-seed sweep): Mahalanobis bake redistributes top-share layers from the v2.0 Euclidean `[9-13]` mid-stack to `[14-16, 25-26]`. Cross-architecture spot-check on Qwen3.6-27B concentrates top share at very late layers `[57-61]` with peak/mean=3.57 (vs e4b's 1.64); coherent steering survives at α=+0.6 with surface-form intact, suggesting the late-layer concentration is a real architecture difference rather than metric pathology, but the distinguishing experiment (re-running Qwen with Euclidean bake) hasn't been done yet.
 
 ## Backcompat (`--legacy`)
 
-Single-flag preset on `tui`, `serve`, `vector extract`, and `vector compare` that bundles the v2.0 stack: PCA extraction (`--method pca`), additive injection (`--steer-mode additive`), and Euclidean cosine (`--metric euclidean`). Mutually exclusive with the per-flag controls on the same verb (passing both `--legacy` and `--method dim` errors out at parse time before model load). For `tui`/`serve`, `--legacy` flips `extraction_method="pca"` on the session so first-run probe bootstrap matches the v2.0 stack; for `vector extract`, it flips `--method` only; for `vector compare`, it flips `--metric` only.
+Single-flag preset on `tui`, `serve`, `vector extract`, and `vector compare` that bundles the v2.0 stack: PCA extraction (`--method pca`), additive injection (`--steer-mode additive`), Euclidean cosine (`--metric euclidean`), and Euclidean `~`/`|` projection (`--projection-metric euclidean`). Mutually exclusive with the per-flag controls on the same verb (passing both `--legacy` and `--method dim` errors out at parse time before model load). For `tui`/`serve`, `--legacy` flips `extraction_method="pca"` and `projection_metric="euclidean"` on the session so first-run probe bootstrap *and* runtime projection match the v2.0 stack; for `vector extract`, it flips `--method` only; for `vector compare`, it flips `--metric` only (which now defaults to `mahalanobis`).
 
 `SaklasSession.from_pretrained` and `__init__` gain `extraction_method: Literal["dim", "pca"] = "dim"`; `bootstrap_probes` accepts `method=` and `whitener=`. Sidecars carry the bake choice in the `bake` field so cross-version diagnostics know which scoring drove the magnitudes on disk.
 
@@ -104,15 +104,19 @@ Empirical angular band (gemma-4-e4b-it / `default/angry.calm`): under v2.0 Eucli
 Every surface — Python, YAML, HTTP, TUI, `vector merge` — speaks the same steering-expression grammar out of `saklas.core.steering_expr`:
 
 ```
-expr     := term (("+" | "-") term)*
-term     := [coeff "*"?] ["!"] selector ["@" trigger]    # coeff optional; omit → 0.5 (additive) or 1.0 (ablation)
-selector := atom (("~" | "|") atom)?
-atom     := [ns "/"] NAME ["." NAME] [":" variant]  # NAME uses _ for multi-word
-trigger  := before | after | both | thinking | response | prompt | generated
-variant  := raw | sae | sae-<release>
+expr        := term (("+" | "-") term)*
+term        := [coeff "*"?] ["!"] selector ["@" trigger]    # coeff optional; omit → 0.5 (additive) or 1.0 (ablation)
+selector    := atom (("~" | "|") atom)?
+atom        := [ns "/"] NAME ["." NAME] [":" variant]  # NAME uses _ for multi-word
+trigger     := preset | gate
+preset      := before | after | both | thinking | response | prompt | generated
+gate        := "when" ":" probe_atom op NUM
+probe_atom  := NAME ["." NAME]
+op          := > | >= | < | <=
+variant     := raw | sae | sae-<release>
 ```
 
-`+`/`-` add terms, `*` attaches a coefficient, `~` projects onto a direction (keeps the shared component), `|` projects orthogonal (removes the shared component), `!` mean-ablates the concept from the residual stream at hook time (`h' = h - α(h·d̂ - μ·d̂)d̂`; bare `!x` defaults to α=1.0, fully replace). `@trigger` tags a per-term trigger override. `:variant` routes to SAE tensors. `!` cannot compose with `~` or `|`.
+`+`/`-` add terms, `*` attaches a coefficient, `~` projects onto a direction (keeps the shared component), `|` projects orthogonal (removes the shared component), `!` mean-ablates the concept from the residual stream at hook time (`h' = h - α(h·d̂ - μ·d̂)d̂`; bare `!x` defaults to α=1.0, fully replace). `@<preset>` tags a per-term trigger override. `@when:<probe><op><threshold>` (v2.2) is a probe-gated trigger — fires only on decode steps where the named monitor probe's last reading satisfies the comparison; implicit `prompt=False` since probe scores aren't available during prefill. `:variant` routes to SAE tensors. `!` cannot compose with `~` or `|`. Compound triggers (`@<preset>&when:...`) are programmatic-only in v2.2 — build the `Trigger` directly via `dataclasses.replace` for "after-thinking AND when:angry>0.4" semantics.
 
 ```python
 from saklas import SaklasSession, SamplingConfig, Steering, Trigger, Profile
@@ -136,6 +140,15 @@ with SaklasSession.from_pretrained("google/gemma-3-4b-it", device="auto") as ses
     result = session.generate(
         "Solve this, then answer politely.",
         steering="0.3 honest + 0.4 warm@after - 0.2 sycophantic|honest",
+    )
+
+    # Probe-gated trigger (v2.2): fire calm-steering only when the angry
+    # probe reads above 0.4 during decoding.  ``score_callback`` runs
+    # after every forward to refresh ``ctx.probe_scores``; gates skip
+    # firing during prefill (no monitor reading yet).
+    result = session.generate(
+        "What's the weather like?",
+        steering="0.5 calm@when:angry.calm>0.4",
     )
 
     # Pre-built Steering objects are still accepted for typed construction.

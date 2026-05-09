@@ -60,6 +60,7 @@ def _make_session(args: argparse.Namespace):
     # ``--method`` on ``vector extract`` is independent (per-call).
     legacy = bool(getattr(args, "legacy", False))
     injection_explicit = getattr(args, "injection_mode", None)
+    metric_explicit = getattr(args, "projection_metric", None)
     if legacy and injection_explicit is not None:
         print(
             f"--legacy and --steer-mode are mutually exclusive "
@@ -68,15 +69,30 @@ def _make_session(args: argparse.Namespace):
             file=sys.stderr,
         )
         sys.exit(2)
+    if legacy and metric_explicit is not None:
+        print(
+            f"--legacy and --projection-metric are mutually exclusive "
+            f"(--legacy implies --projection-metric euclidean); got "
+            f"--projection-metric {metric_explicit}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # ``--legacy`` also flips the runtime ``~`` / ``|`` projection
+    # metric to Euclidean (the v2.0/v2.1 plain Gram-Schmidt behavior).
+    # The v2.2 default is ``"mahalanobis"`` — closed-form LEACE per
+    # Belrose et al. 2023, threaded through ``project_profile`` via
+    # ``session.whitener``.
     if legacy:
         injection_mode = "additive"
         extraction_method = "pca"
+        projection_metric = "euclidean"
     else:
         # Steering-injection options: ``None`` flows through to the v2.1
         # session defaults (angular + π/2).  CLI flag and YAML are both
         # already merged onto ``args`` by ``_load_effective_config``.
         injection_mode = injection_explicit or "angular"
         extraction_method = "dim"
+        projection_metric = getattr(args, "projection_metric", None) or "mahalanobis"
     theta_max = getattr(args, "theta_max", None)
     return SaklasSession.from_pretrained(
         args.model, device=args.device, quantize=args.quantize,
@@ -86,6 +102,7 @@ def _make_session(args: argparse.Namespace):
         injection_mode=injection_mode,
         theta_max=theta_max,
         extraction_method=extraction_method,
+        projection_metric=projection_metric,
     )
 
 
@@ -143,6 +160,11 @@ def _load_effective_config(args: argparse.Namespace):
         and getattr(args, "theta_max", None) is None
     ):
         args.theta_max = composed.theta_max
+    if (
+        composed.projection_metric is not None
+        and getattr(args, "projection_metric", None) is None
+    ):
+        args.projection_metric = composed.projection_metric
     ensure_vectors_installed(composed, strict=getattr(args, "strict", False))
     return composed
 
@@ -786,11 +808,11 @@ def _run_compare(args: argparse.Namespace) -> None:
     from saklas.core.profile import Profile, ProfileError
 
     # ``--legacy`` is a v2.0-backcompat shorthand for ``--metric euclidean``.
-    # Mutually exclusive with an explicit ``--metric``.
+    # Mutually exclusive with an explicit ``--metric``.  Default since
+    # v2.2 is ``"mahalanobis"`` — ``args.metric is None`` means "use the
+    # default" (and ``--legacy`` overrides to euclidean).
     legacy = bool(getattr(args, "legacy", False))
-    explicit_metric = (
-        "metric" in vars(args) and vars(args).get("metric") != "euclidean"
-    )
+    explicit_metric = vars(args).get("metric") is not None
     if legacy and explicit_metric:
         print(
             "compare: --legacy and --metric are mutually exclusive "
@@ -798,7 +820,10 @@ def _run_compare(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    metric = "euclidean" if legacy else getattr(args, "metric", "euclidean")
+    if legacy:
+        metric = "euclidean"
+    else:
+        metric = getattr(args, "metric", None) or "mahalanobis"
 
     # Mahalanobis path: load the per-model whitener once up front, share
     # across every ``cosine_similarity`` call below.  Failure is fatal —

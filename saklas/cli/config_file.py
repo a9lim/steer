@@ -21,10 +21,12 @@ _KNOWN_KEYS = {
     "temperature", "top_p", "max_tokens", "system_prompt",
     "extraction_method",
     "injection_mode", "theta_max",
+    "projection_metric",
 }
 
 _VALID_EXTRACTION_METHODS = ("dim", "pca")
 _VALID_INJECTION_MODES = ("angular", "additive")
+_VALID_PROJECTION_METRICS = ("mahalanobis", "euclidean")
 
 
 class ConfigFileError(ValueError, SaklasError):
@@ -44,6 +46,7 @@ class ConfigFile:
     extraction_method: Optional[str] = None  # "dim" | "pca"; None = use default
     injection_mode: Optional[str] = None     # "angular" | "additive"; None = default
     theta_max: Optional[float] = None        # radians; None = default π/2
+    projection_metric: Optional[str] = None  # "mahalanobis" | "euclidean"; None = default
 
     @classmethod
     def load_default(cls) -> Optional["ConfigFile"]:
@@ -168,6 +171,18 @@ class ConfigFile:
                 )
             theta_max = float(theta_max)
 
+        projection_metric = data.get("projection_metric")
+        if projection_metric is not None:
+            if (
+                not isinstance(projection_metric, str)
+                or projection_metric not in _VALID_PROJECTION_METRICS
+            ):
+                raise ConfigFileError(
+                    f"{path}: projection_metric must be one of "
+                    f"{list(_VALID_PROJECTION_METRICS)} "
+                    f"(got {projection_metric!r})"
+                )
+
         return cls(
             model=data.get("model"),
             vectors=vectors,
@@ -179,6 +194,7 @@ class ConfigFile:
             extraction_method=extraction_method,
             injection_mode=injection_mode,
             theta_max=theta_max,
+            projection_metric=projection_metric,
         )
 
 
@@ -195,6 +211,7 @@ def compose(configs: list[ConfigFile]) -> ConfigFile:
             "model", "thinking", "temperature",
             "top_p", "max_tokens", "system_prompt", "vectors",
             "extraction_method", "injection_mode", "theta_max",
+            "projection_metric",
         ):
             v = getattr(c, f)
             if v is not None:

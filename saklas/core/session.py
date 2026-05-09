@@ -304,7 +304,7 @@ class _SteeringContext:
 
     __slots__ = (
         "_session", "_entries", "_entered",
-        "_injection_mode", "_theta_max",
+        "_injection_mode", "_theta_max", "_projection_metric",
     )
 
     def __init__(
@@ -314,12 +314,14 @@ class _SteeringContext:
         *,
         injection_mode: str | None = None,
         theta_max: float | None = None,
+        projection_metric: str | None = None,
     ) -> None:
         self._session = session
         self._entries = entries
         self._entered = False
         self._injection_mode = injection_mode
         self._theta_max = theta_max
+        self._projection_metric = projection_metric
 
     def __enter__(self) -> "_SteeringContext":
         # _push_steering rolls its own stack entry back if _rebuild_steering_hooks
@@ -330,6 +332,7 @@ class _SteeringContext:
             self._entries,
             injection_mode=self._injection_mode,
             theta_max=self._theta_max,
+            projection_metric=self._projection_metric,
         )
         self._entered = True
         return self
@@ -362,6 +365,7 @@ class SaklasSession:
         injection_mode: str = "angular",
         theta_max: float | None = None,
         extraction_method: str = "dim",
+        projection_metric: str = "mahalanobis",
     ) -> "SaklasSession":
         """Load a HF model + tokenizer and return a fully initialized session.
 
@@ -374,6 +378,12 @@ class SaklasSession:
         is the legacy v1.x additive + norm-preserving path.  ``theta_max``
         sets the maximum rotation angle under angular mode (default π/2,
         i.e. α=1 fully aligns the residual with the concept direction).
+        ``projection_metric`` selects the metric used when materializing
+        ``~`` / ``|`` projection terms in steering expressions:
+        ``"mahalanobis"`` (default since v2.2) uses the closed-form
+        LEACE projector against the per-model whitener — provably erases
+        linearly-decodable information along ``onto`` from ``base``;
+        ``"euclidean"`` is plain Gram-Schmidt (the v2.0/v2.1 behavior).
         """
         model, tokenizer = load_model(model_id, quantize=quantize, device=device, dtype=dtype)
         return cls(
@@ -384,6 +394,7 @@ class SaklasSession:
             injection_mode=injection_mode,
             theta_max=theta_max,
             extraction_method=extraction_method,
+            projection_metric=projection_metric,
         )
 
     def __init__(
@@ -397,6 +408,7 @@ class SaklasSession:
         injection_mode: str = "angular",
         theta_max: float | None = None,
         extraction_method: str = "dim",
+        projection_metric: str = "mahalanobis",
     ):
         self._model = model
         self._tokenizer = tokenizer
@@ -429,6 +441,21 @@ class SaklasSession:
         self._theta_max: float = (
             DEFAULT_THETA_MAX if theta_max is None else float(theta_max)
         )
+        if projection_metric not in ("mahalanobis", "euclidean"):
+            raise ValueError(
+                f"projection_metric must be 'mahalanobis' or 'euclidean', "
+                f"got {projection_metric!r}"
+            )
+        # Default for runtime ``~`` / ``|`` projection.  Mahalanobis is
+        # default since v2.2: per-layer ``project_profile`` calls receive
+        # ``self.whitener`` so projection erases linearly-decodable
+        # concept information along ``onto`` (closed-form LEACE per
+        # Belrose et al. 2023).  ``"euclidean"`` keeps the v2.0/v2.1
+        # plain Gram-Schmidt semantics — what ``--legacy`` selects.
+        # When the whitener is unavailable (e.g. ``probes=[]`` session
+        # with no neutral-activation cache yet), the materialize site
+        # falls back to Euclidean per layer transparently.
+        self._projection_metric: str = projection_metric
         self._steering = SteeringManager(
             injection_mode=self._injection_mode,  # type: ignore[arg-type]
             theta_max=self._theta_max,
@@ -440,12 +467,15 @@ class SaklasSession:
         # (later entries overwrite earlier ones) is what the steering
         # manager installs when a generation begins.
         self._steering_stack: list[dict[str, SteeringStackEntry]] = []
-        # Parallel LIFO of per-scope (injection_mode, theta_max) overrides.
-        # Each element matches its sibling in ``_steering_stack``; ``None``
-        # means "inherit".  Walked top-down by ``_resolve_steering_override``
-        # to find the active value, with the session default as the floor.
+        # Parallel LIFO of per-scope (injection_mode, theta_max,
+        # projection_metric) overrides.  Each element matches its sibling
+        # in ``_steering_stack``; ``None`` means "inherit".  Walked
+        # top-down by ``_resolve_steering_override`` to find the active
+        # value, with the session default as the floor.  Triplet shape so
+        # all three knobs (steering math, rotation cap, projection
+        # metric) compose under nesting.
         self._steering_override_stack: list[
-            tuple[str | None, float | None]
+            tuple[str | None, float | None, str | None]
         ] = []
 
         # Synchronous event bus.  Emits on extraction, steering enter/exit,
@@ -1277,15 +1307,24 @@ class SaklasSession:
         # "inherit"; the resolver folds session defaults at hook-install.
         mode_override = getattr(steering_obj, "injection_mode", None)
         theta_override = getattr(steering_obj, "theta_max", None)
+        metric_override = getattr(steering_obj, "projection_metric", None)
         if mode_override is not None and mode_override not in ("angular", "additive"):
             raise ValueError(
                 f"Steering.injection_mode must be 'angular' or 'additive', "
                 f"got {mode_override!r}"
             )
+        if metric_override is not None and metric_override not in (
+            "mahalanobis", "euclidean",
+        ):
+            raise ValueError(
+                f"Steering.projection_metric must be 'mahalanobis' or "
+                f"'euclidean', got {metric_override!r}"
+            )
         return _SteeringContext(
             self, resolved,
             injection_mode=mode_override,
             theta_max=theta_override,
+            projection_metric=metric_override,
         )
 
     def _materialize_projections(self, steering: Steering) -> None:
@@ -1301,9 +1340,34 @@ class SaklasSession:
         used for the ``Steering.alphas`` key, so downstream pole
         resolution + hook install find the profile via the
         ``name in self._profiles`` fast path.
+
+        Metric selection (v2.2): the active projection metric is
+        resolved via :meth:`_resolve_projection_metric`, which composes
+        the per-call ``Steering.projection_metric`` override (if set)
+        with any outer-scope override on
+        ``_steering_override_stack`` and the session-level default.
+        Under ``"mahalanobis"`` (default since v2.2) the call site
+        passes ``self.whitener`` to ``project_profile``, which switches
+        ``~`` / ``|`` to the closed-form LEACE projector — provably
+        erases linearly-decodable concept information along ``onto``.
+        Under ``"euclidean"`` we pass ``whitener=None`` and get plain
+        Gram-Schmidt (the v2.0/v2.1 behavior).  When the whitener is
+        unavailable for this session (no neutral-activation cache, e.g.
+        a ``probes=[]`` session that hasn't extracted yet) the call
+        gracefully falls back to Euclidean per-layer transparently —
+        ``project_profile``'s coverage check handles per-layer misses.
         """
         from saklas.core.steering_expr import ProjectedTerm
         from saklas.core.vectors import project_profile
+
+        # Compute once per ``steering()`` call.  The resolver consults
+        # the per-call override first, then any outer scope on the
+        # override stack (this scope hasn't been pushed yet — it will
+        # be on ``__enter__``), then the session default.
+        metric = self._resolve_projection_metric(
+            getattr(steering, "projection_metric", None),
+        )
+        whitener = self.whitener if metric == "mahalanobis" else None
 
         for syn_key, val in steering.alphas.items():
             if not isinstance(val, ProjectedTerm):
@@ -1312,7 +1376,10 @@ class SaklasSession:
             self._ensure_profile_loaded(val.onto)
             base_tensors = self._profiles[val.base]
             onto_tensors = self._profiles[val.onto]
-            projected = project_profile(base_tensors, onto_tensors, val.operator)
+            projected = project_profile(
+                base_tensors, onto_tensors, val.operator,
+                whitener=whitener,
+            )
             self._profiles[syn_key] = projected
 
     def _ensure_profile_loaded(self, key: str) -> None:
@@ -1471,12 +1538,18 @@ class SaklasSession:
         *,
         injection_mode: str | None = None,
         theta_max: float | None = None,
+        projection_metric: str | None = None,
     ) -> None:
         """Push an entries dict onto the steering stack and rebuild hooks.
 
-        ``injection_mode`` / ``theta_max`` are per-scope overrides; any
-        ``None`` field falls through to the next outer scope (LIFO walk)
-        and ultimately to the session-level default.
+        ``injection_mode`` / ``theta_max`` / ``projection_metric`` are
+        per-scope overrides; any ``None`` field falls through to the
+        next outer scope (LIFO walk) and ultimately to the session-level
+        default.  ``projection_metric`` doesn't drive hook rebuild on its
+        own (projection materialization happens in ``steering()`` before
+        ``__enter__``); it's recorded here for symmetry with the other
+        two so :meth:`_resolve_steering_override` can answer "what
+        metric does the active scope want?" uniformly.
 
         If ``_rebuild_steering_hooks`` raises (e.g. an unknown vector
         name hits ``VectorNotRegisteredError``) the just-pushed entry is
@@ -1484,7 +1557,9 @@ class SaklasSession:
         never left with stale half-committed state.
         """
         self._steering_stack.append(dict(entries))
-        self._steering_override_stack.append((injection_mode, theta_max))
+        self._steering_override_stack.append(
+            (injection_mode, theta_max, projection_metric),
+        )
         try:
             self._rebuild_steering_hooks()
         except BaseException:
@@ -1550,7 +1625,7 @@ class SaklasSession:
         """
         eff_mode: str | None = None
         eff_theta: float | None = None
-        for mode, theta in reversed(self._steering_override_stack):
+        for mode, theta, _pm in reversed(self._steering_override_stack):
             if eff_mode is None and mode is not None:
                 eff_mode = mode
             if eff_theta is None and theta is not None:
@@ -1561,6 +1636,79 @@ class SaklasSession:
             eff_mode if eff_mode is not None else self._injection_mode,
             eff_theta if eff_theta is not None else self._theta_max,
         )
+
+    def _steering_needs_probe_gating(self) -> bool:
+        """Return True iff any active steering trigger carries a
+        :class:`~saklas.core.triggers.ProbeGate`.
+
+        Walks the flattened steering stack head — entry tuples'
+        triggers and ablation entries' triggers both inspected.
+        Cheap pre-flight check that lets ``_generate_core`` decide
+        whether to wire the per-step score callback at all.
+        """
+        flat = self._flatten_steering_stack()
+        for entry in flat.values():
+            if isinstance(entry, AblationTerm):
+                if entry.trigger.gate is not None:
+                    return True
+                continue
+            # entry is (alpha, Trigger) — the additive / projection shape
+            _alpha, trig = entry
+            if trig.gate is not None:
+                return True
+        return False
+
+    def _build_gating_score_callback(self):
+        """Return a closure that scores latest captures into a
+        ``dict[str, float]`` for ``generate_steered``'s ``score_callback``.
+
+        The closure pulls ``self._capture.latest_per_layer()`` (the
+        most-recent ``[D]`` slice per layer the steering hooks
+        captured) and runs it through :meth:`TraitMonitor.score_single_token`.
+        Returns an empty dict when the capture is empty (e.g. before
+        the first forward) so probe gates report inactive instead of
+        seeing stale values from a previous gen.
+
+        Caller-side guard: only invoked when
+        :meth:`_steering_needs_probe_gating` is True, so the no-gate
+        path stays at zero overhead.
+        """
+        capture = self._capture
+        monitor = self._monitor
+
+        def _score() -> dict[str, float]:
+            latest = capture.latest_per_layer()
+            if not latest:
+                return {}
+            return monitor.score_single_token(latest)
+
+        return _score
+
+    def _resolve_projection_metric(
+        self, override: str | None = None,
+    ) -> str:
+        """Effective projection metric for the about-to-materialize scope.
+
+        Walks the override LIFO top-down for the first non-None
+        ``projection_metric`` entry; ``override`` (the about-to-push
+        scope's value, not yet on the stack) takes priority over the
+        stack so a per-call ``Steering.projection_metric`` wins over
+        any outer scope.  Falls back to the session-level default
+        (``self._projection_metric``) when nothing is set.
+
+        Used by :meth:`_materialize_projections` — by the time
+        ``__enter__`` pushes the new scope onto
+        ``_steering_override_stack``, projection materialization has
+        already run and committed derived profiles to ``self._profiles``.
+        Threading the override here keeps the v2.2 default end-to-end
+        correct without re-running materialization on every scope flip.
+        """
+        if override is not None:
+            return override
+        for _mode, _theta, pm in reversed(self._steering_override_stack):
+            if pm is not None:
+                return pm
+        return self._projection_metric
 
     def _rebuild_steering_hooks(self) -> None:
         """Tear down existing hooks and install from the flattened stack head.
@@ -2330,6 +2478,21 @@ class SaklasSession:
                         effective_input_ids = suffix_ids
 
                 start = time.monotonic()
+                # Probe-gate score callback (v2.2): wire only when the
+                # active steering stack carries at least one probe-gated
+                # trigger.  ``_steering_needs_probe_gating`` is a cheap
+                # walk over the flattened head; the closure references
+                # ``self._capture`` and ``self._monitor`` directly so the
+                # generation thread doesn't pay attribute lookups in the
+                # hot path beyond what a single method call costs.  No
+                # gate ⇒ ``None`` ⇒ ``generate_steered`` skips the
+                # callback entirely.
+                gating_callback = (
+                    self._build_gating_score_callback()
+                    if self._steering_needs_probe_gating()
+                    else None
+                )
+
                 generated_ids = generate_steered(
                     self._model, self._tokenizer, effective_input_ids,
                     gen_config, self._gen_state, thinking=use_thinking,
@@ -2341,6 +2504,7 @@ class SaklasSession:
                     trigger_ctx=self._steering.ctx,
                     past_key_values=cached_pkv,
                     cache_position_offset=cache_position_offset,
+                    score_callback=gating_callback,
                 )
                 elapsed = time.monotonic() - start
 

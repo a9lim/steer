@@ -87,12 +87,25 @@ def _add_injection_args(p: argparse.ArgumentParser) -> None:
              "concept direction.  No effect under --steer-mode additive.",
     )
     p.add_argument(
+        "--projection-metric", dest="projection_metric",
+        choices=["mahalanobis", "euclidean"], default=None,
+        help="Metric for runtime ``~`` / ``|`` projection in steering "
+             "expressions.  'mahalanobis' (default since v2.2) uses the "
+             "closed-form LEACE projector against the per-model whitener "
+             "(Belrose et al. 2023) — provably erases linearly-decodable "
+             "concept information along ``onto`` from ``base``.  "
+             "'euclidean' is plain Gram-Schmidt (the v2.0/v2.1 behavior).  "
+             "Unset = inherit YAML / session default.",
+    )
+    p.add_argument(
         "--legacy", action="store_true",
         help="v2.0 backcompat preset for steering: equivalent to "
              "``--steer-mode additive`` plus PCA extraction on first-run "
-             "probe bootstrap (instead of v2.1's DiM + Mahalanobis bake "
-             "+ angular).  Useful for A/B-comparing the v2.0 stack on "
-             "the same model.  Mutually exclusive with ``--steer-mode``.",
+             "probe bootstrap and Euclidean ``~`` / ``|`` projection "
+             "(instead of v2.2's DiM + Mahalanobis bake + angular + "
+             "LEACE projection).  Useful for A/B-comparing the v2.0 "
+             "stack on the same model.  Mutually exclusive with "
+             "``--steer-mode`` and ``--projection-metric``.",
     )
 
 
@@ -301,14 +314,15 @@ def _build_vector_compare(p: argparse.ArgumentParser) -> None:
     p.add_argument("-j", "--json", dest="json_output", action="store_true",
                    help="Emit machine-readable JSON")
     p.add_argument(
-        "--metric", choices=("euclidean", "mahalanobis"), default="euclidean",
+        "--metric", choices=("euclidean", "mahalanobis"), default=None,
         help=(
-            "Cosine metric. 'euclidean' (default) = standard cosine. "
-            "'mahalanobis' = whitened cosine ⟨u,v⟩_M = u^T Σ^{-1} v "
-            "(Belrose et al. 2023), reads cached neutral activations + "
-            "layer means under ~/.saklas/models/<id>/ to build the per-"
-            "layer whitener; falls back to Euclidean per layer when the "
-            "whitener doesn't cover that layer."
+            "Cosine metric. 'mahalanobis' (default since v2.2) = whitened "
+            "cosine ⟨u,v⟩_M = u^T Σ^{-1} v (Belrose et al. 2023), reads "
+            "cached neutral activations + layer means under "
+            "~/.saklas/models/<id>/ to build the per-layer whitener; "
+            "falls back to Euclidean per layer when the whitener doesn't "
+            "cover that layer.  'euclidean' = standard cosine (the "
+            "v2.0/v2.1 behavior; selected by ``--legacy``)."
         ),
     )
     p.add_argument(
@@ -323,10 +337,8 @@ def _build_vector_compare(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--legacy", action="store_true",
         help=(
-            "v2.0 backcompat preset: equivalent to ``--metric euclidean`` "
-            "(currently the default; future-proofs this verb against a "
-            "Mahalanobis default flip).  Mutually exclusive with "
-            "``--metric``."
+            "v2.0 backcompat preset: equivalent to ``--metric euclidean``."
+            "  Mutually exclusive with ``--metric``."
         ),
     )
 

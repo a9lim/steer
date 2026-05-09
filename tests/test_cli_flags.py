@@ -515,7 +515,11 @@ def test_run_compare_one_arg_verbose_text(monkeypatch, tmp_path, capsys):
     from saklas.io.selectors import invalidate
     invalidate()
 
-    cli.main(["vector", "compare", "angry.calm", "-m", model_id, "-v"])
+    # ``--metric euclidean`` keeps the mock-driven test runner-focused —
+    # the v2.2 default flipped to ``mahalanobis``, which would try to
+    # load a real whitener from disk and fail under the mocked Profile.
+    cli.main(["vector", "compare", "angry.calm", "-m", model_id, "-v",
+              "--metric", "euclidean"])
     out = capsys.readouterr().out
     assert "angry.calm vs all installed" in out
     assert "happy.sad" in out
@@ -556,7 +560,8 @@ def test_run_compare_one_arg_verbose_json(monkeypatch, tmp_path, capsys):
     from saklas.io.selectors import invalidate
     invalidate()
 
-    cli.main(["vector", "compare", "angry.calm", "-m", model_id, "-v", "-j"])
+    cli.main(["vector", "compare", "angry.calm", "-m", model_id, "-v", "-j",
+              "--metric", "euclidean"])
     out = capsys.readouterr().out
     data = _json.loads(out)
     assert data["target"] == "angry.calm"
@@ -595,7 +600,8 @@ def test_run_compare_matrix_verbose_json(monkeypatch, tmp_path, capsys):
     from saklas.io.selectors import invalidate
     invalidate()
 
-    cli.main(["vector", "compare"] + concepts + ["-m", model_id, "-v", "-j"])
+    cli.main(["vector", "compare"] + concepts + ["-m", model_id, "-v", "-j",
+                                                  "--metric", "euclidean"])
     out = capsys.readouterr().out
     data = _json.loads(out)
     assert "per_layer" in data
@@ -633,7 +639,8 @@ def test_run_compare_matrix_verbose_text_unchanged(monkeypatch, tmp_path, capsys
     from saklas.io.selectors import invalidate
     invalidate()
 
-    cli.main(["vector", "compare"] + concepts + ["-m", model_id, "-v"])
+    cli.main(["vector", "compare"] + concepts + ["-m", model_id, "-v",
+                                                  "--metric", "euclidean"])
     out = capsys.readouterr().out
     assert "per-layer" not in out
     assert "per_layer" not in out
@@ -926,6 +933,7 @@ def test_run_compare_accepts_sae_suffix(monkeypatch, tmp_path, capsys):
         "vector", "compare",
         "angry.calm:sae-my-release", "happy.sad",
         "-m", model_id,
+        "--metric", "euclidean",
     ])
     out = capsys.readouterr().out
     # Variant suffix carries into display keys.

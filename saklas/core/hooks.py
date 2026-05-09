@@ -134,6 +134,23 @@ class HiddenCapture:
                 out[idx] = torch.stack(bucket)
         return out
 
+    def latest_per_layer(self) -> dict[int, torch.Tensor]:
+        """Return the most-recent capture per layer as ``[D]`` tensors.
+
+        Used by the per-step probe-gate scorer in ``generate_steered``:
+        feeds ``TraitMonitor.score_single_token`` with the latest
+        hidden-state slice per layer so probe gates can consult last-
+        step monitor readings.  Layers with no captures are omitted —
+        the monitor handles missing layers as zero-weight contributors.
+        Zero allocation other than the dict itself; the underlying
+        tensors are the same `[D]` slices the hot path stored.
+        """
+        out: dict[int, torch.Tensor] = {}
+        for idx, bucket in self._per_layer.items():
+            if bucket:
+                out[idx] = bucket[-1]
+        return out
+
 
 class SteeringHook:
     """Pre-composed steering vectors and ablation data for a single layer.

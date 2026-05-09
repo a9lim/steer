@@ -122,9 +122,25 @@ class _Stub(SaklasSession):
         self._profiles = dict(profiles)
         self._steering_stack = []
         self._steering_override_stack = []
+        # v2.2 session-level defaults consulted by ``_resolve_*``
+        # helpers when the override LIFO has no entries.
+        from saklas.core.hooks import DEFAULT_THETA_MAX as _DTM
+        self._injection_mode = "angular"
+        self._theta_max = _DTM
+        self._projection_metric = "mahalanobis"
+        self._whitener = None
+        self._layer_means = {}
         self.events = EventBus()
         self._rebuild_calls: list[dict[str, float]] = []
         self._rebuild_entries: list[dict[str, tuple[float, Trigger]]] = []
+
+    @property
+    def whitener(self) -> None:  # type: ignore[override]
+        # No model in stub mode — return None so
+        # ``_materialize_projections`` falls back to Euclidean
+        # per-layer (the path real sessions hit when neutrals aren't
+        # cached yet).
+        return None
 
     def _rebuild_steering_hooks(self) -> None:  # type: ignore[override]
         flat = self._flatten_steering_stack()
@@ -222,3 +238,128 @@ class TestSessionProjection:
                 assert s._rebuild_calls[-1] == {"a": 0.3, "a|b": 0.5}
             assert s._rebuild_calls[-1] == {"a": 0.3}
         assert s._rebuild_calls[-1] == {}
+
+
+# ---------------------------------------- v2.2 metric-default integration ---
+
+class _MetricStub(_Stub):
+    """Variant of ``_Stub`` that lets tests select a metric and stand-in
+    whitener.  ``project_profile`` is patched per-test to record kwarg
+    shape rather than do real math.
+    """
+
+    def __init__(
+        self,
+        profiles: dict,
+        *,
+        projection_metric: str = "mahalanobis",
+        whitener_value: object = "WHITENER",
+    ) -> None:
+        super().__init__(profiles)
+        self._projection_metric = projection_metric
+        # Sentinel — patched ``project_profile`` only checks ``is None``.
+        self._whitener_sentinel = whitener_value
+
+    @property
+    def whitener(self) -> object:  # type: ignore[override]
+        return self._whitener_sentinel
+
+
+class TestProjectionMetricDefault:
+    """The v2.2 default flips runtime ``~`` / ``|`` to Mahalanobis.
+
+    Verifies that ``_materialize_projections`` passes ``self.whitener``
+    to ``project_profile`` under the default metric, and ``None``
+    under ``"euclidean"`` (the ``--legacy`` path).
+    """
+
+    def _patch_project(self, monkeypatch, calls: list) -> None:
+        # ``_materialize_projections`` imports ``project_profile``
+        # lazily inside the method (``from saklas.core.vectors import
+        # project_profile``), so we patch it on the source module.
+        from saklas.core import vectors as vectors_mod
+
+        def _spy(base, onto, operator, *, whitener=None):
+            calls.append((operator, whitener is None))
+            return {0: torch.tensor([0.0, 1.0])}
+
+        monkeypatch.setattr(vectors_mod, "project_profile", _spy)
+
+    def test_default_passes_whitener(self, monkeypatch):
+        calls: list = []
+        s = _MetricStub({"a": _profile_a(), "b": _profile_b()})
+        self._patch_project(monkeypatch, calls)
+        with s.steering(parse_expr("0.5 a|b")):
+            pass
+        assert calls == [("|", False)], (
+            "default session should hand session.whitener to project_profile"
+        )
+
+    def test_legacy_metric_passes_none(self, monkeypatch):
+        calls: list = []
+        s = _MetricStub(
+            {"a": _profile_a(), "b": _profile_b()},
+            projection_metric="euclidean",
+        )
+        self._patch_project(monkeypatch, calls)
+        with s.steering(parse_expr("0.5 a|b")):
+            pass
+        assert calls == [("|", True)], (
+            "euclidean session should pass whitener=None"
+        )
+
+    def test_per_call_override_flips_metric(self, monkeypatch):
+        from saklas.core.steering import Steering
+
+        calls: list = []
+        s = _MetricStub({"a": _profile_a(), "b": _profile_b()})
+        self._patch_project(monkeypatch, calls)
+        # First scope inherits the session default ("mahalanobis").
+        with s.steering(parse_expr("0.5 a|b")):
+            pass
+        # Second scope overrides to euclidean via Steering.projection_metric.
+        # parse_expr doesn't surface this field — programmatic-only.
+        base = parse_expr("0.5 a|b")
+        override = Steering(
+            alphas=base.alphas,
+            thinking=base.thinking,
+            trigger=base.trigger,
+            projection_metric="euclidean",
+        )
+        with s.steering(override):
+            pass
+        assert calls == [("|", False), ("|", True)]
+
+    def test_per_call_override_inherits_to_inner_scope(self, monkeypatch):
+        from saklas.core.steering import Steering
+
+        calls: list = []
+        s = _MetricStub({"a": _profile_a(), "b": _profile_b()})
+        self._patch_project(monkeypatch, calls)
+        # Outer scope sets "euclidean"; inner scope ``None`` inherits it.
+        outer = Steering(
+            alphas=parse_expr("0.5 a|b").alphas,
+            projection_metric="euclidean",
+        )
+        with s.steering(outer):
+            with s.steering(parse_expr("0.5 a~b")):
+                pass
+        # Both calls should run with whitener=None.
+        assert calls == [("|", True), ("~", True)], (
+            "inner scope without override should inherit outer's "
+            "euclidean choice via _resolve_projection_metric"
+        )
+
+    def test_invalid_metric_rejected(self, monkeypatch):
+        from saklas.core.steering import Steering
+
+        calls: list = []
+        s = _MetricStub({"a": _profile_a(), "b": _profile_b()})
+        self._patch_project(monkeypatch, calls)
+        bad = Steering(
+            alphas=parse_expr("0.5 a|b").alphas,
+            projection_metric="bogus",
+        )
+        with pytest.raises(ValueError, match="projection_metric"):
+            with s.steering(bad):
+                pass

@@ -71,6 +71,15 @@ class Steering:
     theta_max: per-call override for the angular rotation cap (radians).
         Defaults to the session value (``π/2`` unless overridden).  Has
         no effect under ``injection_mode="additive"``.
+    projection_metric: per-call override for the metric used when
+        materializing ``~`` / ``|`` projection terms.  ``"mahalanobis"``
+        uses the closed-form LEACE projector against the session's
+        :class:`~saklas.core.mahalanobis.LayerWhitener` (default since
+        v2.2 — provably erases linearly-decodable information along
+        ``onto`` from ``base``).  ``"euclidean"`` is plain Gram-Schmidt
+        (the v2.0/v2.1 behavior).  ``None`` (default) inherits the
+        session-level setting.  Programmatic only — the canonical
+        expression grammar does not (yet) round-trip this field.
     """
 
     alphas: Mapping[str, AlphaEntry]
@@ -78,6 +87,7 @@ class Steering:
     trigger: Trigger = Trigger.BOTH
     injection_mode: str | None = None
     theta_max: float | None = None
+    projection_metric: str | None = None
 
     @classmethod
     def from_value(
