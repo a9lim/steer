@@ -1342,7 +1342,26 @@ async def _ws_handle_generate(
     generation_id = uuid.uuid4().hex[:12]
 
     sampling = _build_sampling(msg.sampling)
-    steering = _build_steering(msg.steering, default_steering)
+    try:
+        steering = _build_steering(msg.steering, default_steering)
+    except SaklasError as e:
+        # ``_build_steering`` -> ``parse_expr`` -> ``resolve_pole`` can
+        # raise ``SteeringExprError`` / ``AmbiguousSelectorError`` /
+        # ``AmbiguousVariantError`` on malformed or colliding input.
+        # FastAPI's ``@app.exception_handler(SaklasError)`` doesn't apply
+        # to WebSocket routes, so without this guard the exception falls
+        # through to the outer reader loop's ``except Exception`` which
+        # closes the socket with code 1011. A 400-grade user mistake
+        # shouldn't kill the connection — send the error frame and let
+        # the client try again on the same WS.
+        status, message = e.user_message()
+        await websocket.send_json({
+            "type": "error",
+            "message": message,
+            "code": type(e).__name__,
+            "status": status,
+        })
+        return
 
     token_queue: asyncio.Queue[Any] = asyncio.Queue()
     _SENTINEL = object()

@@ -422,6 +422,56 @@ class TestWebSocket:
             msg = ws.receive_json()
             assert msg["type"] == "error"
 
+    def test_bad_steering_does_not_kill_connection(self, session_and_client, monkeypatch):
+        """Regression: a bad steering expression on a generate frame used
+        to escape ``_build_steering`` and bubble out to the outer reader
+        loop's ``except Exception``, which closed the WS with code 1011.
+
+        FastAPI's ``@app.exception_handler(SaklasError)`` doesn't apply
+        to WebSocket routes, so the handler has to convert the error in-
+        band itself. Contract: the server emits a ``{type: "error"}``
+        frame and stays open for a follow-up generate.
+        """
+        from saklas.io.selectors import AmbiguousSelectorError
+        import saklas.core.steering_expr as _sx
+
+        session, client = session_and_client
+        self._attach_generate(session, ["ok"])
+
+        real_parse = _sx.parse_expr
+
+        def _fake_parse(text, *, namespace=None):
+            if text.strip() == "0.5 wolf":
+                raise AmbiguousSelectorError(
+                    "ambiguous pole 'wolf': matches alice/wolf, default/deer.wolf"
+                )
+            return real_parse(text, namespace=namespace)
+
+        monkeypatch.setattr(_sx, "parse_expr", _fake_parse)
+
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate", "input": "hi", "steering": "0.5 wolf",
+            })
+            msg = ws.receive_json()
+            assert msg["type"] == "error"
+            assert "ambiguous pole 'wolf'" in msg["message"]
+            assert msg["code"] == "AmbiguousSelectorError"
+            assert msg["status"] == 400
+
+            # Connection still alive — follow-up turn succeeds.
+            ws.send_json({"type": "generate", "input": "hi"})
+            started = ws.receive_json()
+            assert started["type"] == "started"
+            tokens = []
+            while True:
+                m = ws.receive_json()
+                if m["type"] == "token":
+                    tokens.append(m["text"])
+                elif m["type"] == "done":
+                    break
+            assert tokens == ["ok"]
+
 
 # ---- Live traits SSE stream -----------------------------------------------
 

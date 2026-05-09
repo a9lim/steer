@@ -543,6 +543,73 @@ class TestOllamaApi:
         resp = c.get("/api/tags", headers={"Authorization": "Bearer secret"})
         assert resp.status_code == 200
 
+    def test_chat_streaming_bad_steer_returns_400_not_mid_stream_disconnect(
+        self, session_and_client, monkeypatch,
+    ):
+        """Regression: ``options.steer`` parsing used to live inside the
+        NDJSON streaming generator. By the time ``parse_expr`` raised,
+        ``StreamingResponse`` had already flushed 200 OK headers, so the
+        FastAPI ``SaklasError`` handler couldn't rewrite the response —
+        the client saw a TCP cutoff mid-stream with no body.
+
+        Fix: option resolution is hoisted to the route handler, so a bad
+        steering expression now surfaces as the canonical Ollama-shape
+        ``{"error": "..."}`` 400.
+        """
+        from saklas.io.selectors import AmbiguousSelectorError
+        import saklas.core.steering_expr as _sx
+
+        session, client = session_and_client
+
+        real_parse = _sx.parse_expr
+
+        def _fake_parse(text, *, namespace=None):
+            if text.strip() == "0.5 wolf":
+                raise AmbiguousSelectorError(
+                    "ambiguous pole 'wolf': matches alice/wolf, default/deer.wolf"
+                )
+            return real_parse(text, namespace=namespace)
+
+        monkeypatch.setattr(_sx, "parse_expr", _fake_parse)
+
+        resp = client.post("/api/chat", json={
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True,
+            "options": {"steer": "0.5 wolf"},
+        })
+        # Clean 400 with Ollama error shape — not a 200 OK that cuts off.
+        assert resp.status_code == 400
+        assert resp.headers["content-type"].startswith("application/json")
+        body = resp.json()
+        assert "error" in body
+        assert "ambiguous pole 'wolf'" in body["error"]
+        # ``session.generate_stream`` was never called — the stream never
+        # started, so there's nothing to clean up.
+        session.generate_stream.assert_not_called()
+
+    def test_chat_non_streaming_bad_steer_returns_400(
+        self, session_and_client, monkeypatch,
+    ):
+        """Belt-and-suspenders: non-streaming Ollama already routed
+        ``SaklasError`` through the FastAPI handler. Pin the contract."""
+        from saklas.io.selectors import AmbiguousSelectorError
+        import saklas.core.steering_expr as _sx
+
+        session, client = session_and_client
+
+        def _fake_parse(text, *, namespace=None):
+            raise AmbiguousSelectorError("ambiguous pole 'wolf': matches a/wolf, b/wolf")
+        monkeypatch.setattr(_sx, "parse_expr", _fake_parse)
+
+        resp = client.post("/api/chat", json={
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": False,
+            "options": {"steer": "0.5 wolf"},
+        })
+        assert resp.status_code == 400
+        assert resp.json()["error"].startswith("ambiguous pole 'wolf'")
+        session.generate.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Cluster 4: LangChain compat, native steering field, session.lock back-pressure
