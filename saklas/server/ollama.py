@@ -577,11 +577,19 @@ def register_ollama_routes(app: FastAPI) -> None:
                 ),
             )
 
-    async def _run_and_build_chat_response(body: dict, is_chat: bool) -> dict:
-        """Shared non-streaming path for /api/chat and /api/generate."""
-        default_steering = app.state.default_steering
-        gen_kwargs, system = _resolve_options(body, default_steering)
+    async def _run_and_build_chat_response(
+        body: dict,
+        is_chat: bool,
+        gen_kwargs: dict,
+        system: str | None,
+    ) -> dict:
+        """Shared non-streaming path for /api/chat and /api/generate.
 
+        Option resolution is hoisted to the route handler so any
+        ``SaklasError`` from ``parse_expr`` (bad/colliding ``steer``
+        expression) reaches FastAPI's ``@app.exception_handler`` cleanly
+        before this helper runs.
+        """
         if is_chat:
             msgs = _extract_messages(body)
             if system:
@@ -636,10 +644,21 @@ def register_ollama_routes(app: FastAPI) -> None:
             **stats,
         }
 
-    async def _stream_chat_or_generate(body: dict, is_chat: bool):
-        default_steering = app.state.default_steering
-        gen_kwargs, system = _resolve_options(body, default_steering)
+    async def _stream_chat_or_generate(
+        body: dict,
+        is_chat: bool,
+        gen_kwargs: dict,
+        system: str | None,
+    ):
+        """Streaming NDJSON body for /api/chat and /api/generate.
 
+        ``gen_kwargs`` and ``system`` are resolved by the caller (the
+        route handler) so any ``SaklasError`` from ``parse_expr`` raises
+        *before* ``StreamingResponse`` flushes headers. Once the stream
+        has started, FastAPI's exception handler can no longer convert
+        an exception to a 400 — the client would just see a TCP cutoff
+        mid-stream.
+        """
         if is_chat:
             msgs = _extract_messages(body)
             if system:
@@ -750,20 +769,35 @@ def register_ollama_routes(app: FastAPI) -> None:
     async def api_chat(request: Request):
         body = await request.json()
         _check_model_or_404(body)
+        # Resolve options (including the steering expression) here so a
+        # ``SaklasError`` from ``parse_expr`` is caught by FastAPI's
+        # exception handler and returned as a clean Ollama-shape 400.
+        # Once ``StreamingResponse`` flushes headers the handler can't
+        # rewrite the response — we'd disconnect mid-stream.
+        gen_kwargs, system = _resolve_options(body, app.state.default_steering)
         if body.get("stream", True):
             return StreamingResponse(
-                _stream_chat_or_generate(body, is_chat=True),
+                _stream_chat_or_generate(
+                    body, is_chat=True, gen_kwargs=gen_kwargs, system=system,
+                ),
                 media_type="application/x-ndjson",
             )
-        return await _run_and_build_chat_response(body, is_chat=True)
+        return await _run_and_build_chat_response(
+            body, is_chat=True, gen_kwargs=gen_kwargs, system=system,
+        )
 
     @app.post("/api/generate")
     async def api_generate(request: Request):
         body = await request.json()
         _check_model_or_404(body)
+        gen_kwargs, system = _resolve_options(body, app.state.default_steering)
         if body.get("stream", True):
             return StreamingResponse(
-                _stream_chat_or_generate(body, is_chat=False),
+                _stream_chat_or_generate(
+                    body, is_chat=False, gen_kwargs=gen_kwargs, system=system,
+                ),
                 media_type="application/x-ndjson",
             )
-        return await _run_and_build_chat_response(body, is_chat=False)
+        return await _run_and_build_chat_response(
+            body, is_chat=False, gen_kwargs=gen_kwargs, system=system,
+        )

@@ -695,3 +695,55 @@ def test_handle_extract_bare_sae_uses_autoload(monkeypatch, tmp_path):
         on_success=_on_success, variant="sae",
     )
     assert captured["name"] == "honest:sae"
+
+
+# ---- /steer error-path regression tests ----
+
+
+def test_handle_steer_ambiguous_pole_does_not_crash(monkeypatch):
+    """Regression: ``/steer 0.5 <bare colliding name>`` used to escape
+    ``except SteeringExprError`` because ``AmbiguousSelectorError`` is
+    a ``SelectorError(ValueError, SaklasError)`` rather than a
+    ``SteeringExprError``. The exception bubbled out of the slash-command
+    handler, killed the Textual worker, and landed in ``crash.log``.
+
+    Contract: ambiguous bare poles surface as a system message in the
+    chat pane and ``_handle_steer`` returns cleanly. State (alphas,
+    enabled, session steer calls) stays untouched.
+    """
+    from saklas.io.selectors import AmbiguousSelectorError
+    import saklas.io.selectors as _sel
+
+    app = _make_app()
+
+    def _ambiguous(*_args, **_kwargs):
+        raise AmbiguousSelectorError(
+            "ambiguous pole 'wolf': matches alice/wolf, default/deer.wolf"
+        )
+    # ``parse_expr`` imports ``resolve_pole`` lazily inside ``_resolve_atom``,
+    # so monkeypatching the module attribute reaches the parser.
+    monkeypatch.setattr(_sel, "resolve_pole", _ambiguous)
+
+    app._handle_command("/steer 0.5 wolf")
+
+    msgs = _msgs(app)
+    assert "ambiguous pole 'wolf'" in msgs
+    assert "alice/wolf" in msgs and "default/deer.wolf" in msgs
+    # User-facing disambiguation hint comes from ``user_message()``.
+    assert "namespace/name" in msgs
+    # Slash command bailed before any state mutation.
+    assert app._alphas == {}
+    assert app._enabled == {}
+    app._session.steer.assert_not_called()
+
+
+def test_handle_steer_expression_error_still_caught(monkeypatch):
+    """Negative control: keep the original ``SteeringExprError`` arm
+    working — bad grammar still emits the ``Steering expression error``
+    prefix, not the generic ``Error`` one introduced by the new arm."""
+    app = _make_app()
+    # Empty expression after the slash command's own usage check passes.
+    app._handle_command("/steer @@@nonsense")
+    msgs = _msgs(app)
+    assert "Steering expression error" in msgs
+    assert app._alphas == {}

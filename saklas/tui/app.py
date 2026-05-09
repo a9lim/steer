@@ -612,6 +612,15 @@ class SaklasApp(App):
         except SteeringExprError as e:
             chat.add_system_message(f"Steering expression error: {e.user_message()[1]}")
             return
+        except SaklasError as e:
+            # ``parse_expr`` calls ``resolve_pole`` per term, which raises
+            # ``AmbiguousSelectorError`` (a ``SelectorError(ValueError,
+            # SaklasError)``) on cross-namespace bare-pole collisions —
+            # not caught by the ``SteeringExprError`` arm above. Same for
+            # ``AmbiguousVariantError`` from ``:sae`` resolution. Surface
+            # cleanly instead of crashing the Textual worker.
+            chat.add_system_message(f"Error: {e.user_message()[1]}")
+            return
 
         # Iterate the parsed IR; for each term dispatch through the
         # existing extract pipeline to load or compute profiles, then
