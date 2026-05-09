@@ -359,9 +359,17 @@ class ExtractionPipeline:
         # handle via getattr — keeps the ModelHandle protocol minimal
         # and lets test stubs that don't implement ``.whitener`` fall
         # back to Euclidean.  PCA branch ignores the whitener (it scores
-        # via EVR, not magnitude).
+        # via EVR, not magnitude).  v2.3+: layer_means + dls are
+        # threaded uniformly into both extractors; the centered DLS
+        # check fires when both are present.  Tests / mock stubs that
+        # don't carry layer_means just keep all layers.
         bake_label = "euclidean"
-        extract_kwargs: dict = {"sae": sae_backend, "concept_label": canonical}
+        extract_kwargs: dict = {
+            "sae": sae_backend,
+            "concept_label": canonical,
+            "dls": True,
+            "layer_means": getattr(self._handle, "_layer_means", None),
+        }
         if method == "dim":
             handle_whitener = getattr(self._handle, "whitener", None)
             if handle_whitener is not None:

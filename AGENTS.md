@@ -74,9 +74,19 @@ Runtime `|`/`~` projection at steering time (`_materialize_projections` in `sess
 
 Empirical (gemma-4-e4b-it / `default/angry.calm`, single-seed sweep): Mahalanobis bake redistributes top-share layers from the v2.0 Euclidean `[9-13]` mid-stack to `[14-16, 25-26]`. Cross-architecture spot-check on Qwen3.6-27B concentrates top share at very late layers `[57-61]` with peak/mean=3.57 (vs e4b's 1.64); coherent steering survives at α=+0.6 with surface-form intact, suggesting the late-layer concentration is a real architecture difference rather than metric pathology, but the distinguishing experiment (re-running Qwen with Euclidean bake) hasn't been done yet.
 
+## Discriminative Layer Selection (v2.3)
+
+The `drop_edges=(2,2)` heuristic is gone. Layer selection at extraction time is now data-driven via centered DLS (Selective Steering, Dang & Ngo 2026, Eq. 9): a layer is kept iff `(μ_pos − μ_neutral) · d̂` and `(μ_neg − μ_neutral) · d̂` have opposite signs. Layers where both class means project to the same side of the neutral baseline along `d̂` encode concept *intensity* rather than concept *polarity* — they inflate share without aiding discrimination.
+
+`compute_dls_mask(mu_pos, mu_neg, directions, layer_means)` lives in `saklas/core/vectors.py`; both extractors call it and pass the kept set to `_share_bake_and_warn` (which now takes `keep_set: set[int] | None` instead of `edge_idx`). `layer_means=None` disables centering; `dls=False` skips the mask entirely. When every layer fails the discriminative check the helper warns and falls back to keep-all rather than emptying the profile (degenerate concept on this model).
+
+Empirical incidence on the bundled `default/angry.calm`: gemma-4-e4b-it 11/42 dropped (`[5, 8, 31–34, 37–41]`); Qwen3.6-27B 13/64 dropped (mostly contiguous `[40, 49–60]`, with the documented late-layer concentration at L61–L63 surviving — DLS sharpens the existing peak rather than removing it). Cross-architecture sanity checks pending on smaller / non-emotional concepts.
+
+CLI: `--no-dls` opts out at extraction time; `--legacy` bundles `dls=False` alongside the other v2.0 flags.
+
 ## Backcompat (`--legacy`)
 
-Single-flag preset on `tui`, `serve`, `vector extract`, and `vector compare` that bundles the v2.0 stack: PCA extraction (`--method pca`), additive injection (`--steer-mode additive`), Euclidean cosine (`--metric euclidean`), and Euclidean `~`/`|` projection (`--projection-metric euclidean`). Mutually exclusive with the per-flag controls on the same verb (passing both `--legacy` and `--method dim` errors out at parse time before model load). For `tui`/`serve`, `--legacy` flips `extraction_method="pca"` and `projection_metric="euclidean"` on the session so first-run probe bootstrap *and* runtime projection match the v2.0 stack; for `vector extract`, it flips `--method` only; for `vector compare`, it flips `--metric` only (which now defaults to `mahalanobis`).
+Single-flag preset on `tui`, `serve`, `vector extract`, and `vector compare` that bundles the pre-v2.3 stack: PCA extraction (`--method pca`), additive injection (`--steer-mode additive`), Euclidean cosine (`--metric euclidean`), Euclidean `~`/`|` projection (`--projection-metric euclidean`), and DLS off (`--no-dls`-equivalent — the v2.0 `edge_drop` heuristic is gone, so `--legacy` keeps every layer rather than re-implementing the removed shape). Mutually exclusive with the per-flag controls on the same verb (passing both `--legacy` and `--method dim` errors out at parse time before model load). For `tui`/`serve`, `--legacy` flips `extraction_method="pca"`, `projection_metric="euclidean"`, and `dls=False` on the session so first-run probe bootstrap *and* runtime projection match the v2.0 stack; for `vector extract`, it flips `--method` only; for `vector compare`, it flips `--metric` only (which defaults to `mahalanobis`).
 
 `SaklasSession.from_pretrained` and `__init__` gain `extraction_method: Literal["dim", "pca"] = "dim"`; `bootstrap_probes` accepts `method=` and `whitener=`. Sidecars carry the bake choice in the `bake` field so cross-version diagnostics know which scoring drove the magnitudes on disk.
 

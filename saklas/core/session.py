@@ -366,6 +366,7 @@ class SaklasSession:
         theta_max: float | None = None,
         extraction_method: str = "dim",
         projection_metric: str = "mahalanobis",
+        dls: bool = True,
     ) -> "SaklasSession":
         """Load a HF model + tokenizer and return a fully initialized session.
 
@@ -384,6 +385,13 @@ class SaklasSession:
         LEACE projector against the per-model whitener — provably erases
         linearly-decodable information along ``onto`` from ``base``;
         ``"euclidean"`` is plain Gram-Schmidt (the v2.0/v2.1 behavior).
+
+        ``dls`` toggles the discriminative-layer-selection mask at
+        extraction time (v2.3+).  When ``True`` (default), centered DLS
+        per Dang & Ngo (2026) Eq. 9 drops layers where pos- and
+        neg-class means project to the same side of the neutral
+        baseline along ``d̂``.  Replaces the v2.0–v2.2 ``edge_drop``
+        heuristic (gone in v2.3); ``--legacy`` flips this to ``False``.
         """
         model, tokenizer = load_model(model_id, quantize=quantize, device=device, dtype=dtype)
         return cls(
@@ -395,6 +403,7 @@ class SaklasSession:
             theta_max=theta_max,
             extraction_method=extraction_method,
             projection_metric=projection_metric,
+            dls=dls,
         )
 
     def __init__(
@@ -409,6 +418,7 @@ class SaklasSession:
         theta_max: float | None = None,
         extraction_method: str = "dim",
         projection_metric: str = "mahalanobis",
+        dls: bool = True,
     ):
         self._model = model
         self._tokenizer = tokenizer
@@ -557,6 +567,10 @@ class SaklasSession:
                 f"got {extraction_method!r}"
             )
         self._extraction_method: str = extraction_method
+        # v2.3+: DLS toggle stored on the session so ad-hoc
+        # ``session.extract`` calls (via ``ExtractionPipeline``) inherit
+        # it without re-passing.  ``--legacy`` sets this to False.
+        self._dls: bool = bool(dls)
 
         probe_profiles: dict[str, dict] = {}
         if probe_categories:
@@ -565,6 +579,8 @@ class SaklasSession:
                 probe_categories,
                 method=extraction_method,
                 whitener=self._whitener if extraction_method == "dim" else None,
+                layer_means=self._layer_means,
+                dls=self._dls,
             )
 
         self._monitor = TraitMonitor(probe_profiles, self._layer_means)

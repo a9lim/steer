@@ -98,14 +98,27 @@ def _add_injection_args(p: argparse.ArgumentParser) -> None:
              "Unset = inherit YAML / session default.",
     )
     p.add_argument(
+        "--no-dls", dest="no_dls", action="store_true",
+        help="Disable the discriminative-layer-selection mask at "
+             "extraction time.  v2.3 introduced centered DLS (Dang & "
+             "Ngo 2026, Eq. 9) as the default: layers where pos- and "
+             "neg-class means project to the same side of the neutral "
+             "baseline along ``d̂`` are dropped — they encode concept "
+             "intensity rather than concept polarity.  Pass ``--no-dls`` "
+             "to keep every layer (the v2.0–v2.2 behavior, modulo the "
+             "removed ``edge_drop`` heuristic).  Mutually exclusive "
+             "with ``--legacy`` (which already implies ``--no-dls``).",
+    )
+    p.add_argument(
         "--legacy", action="store_true",
         help="v2.0 backcompat preset for steering: equivalent to "
              "``--steer-mode additive`` plus PCA extraction on first-run "
-             "probe bootstrap and Euclidean ``~`` / ``|`` projection "
-             "(instead of v2.2's DiM + Mahalanobis bake + angular + "
-             "LEACE projection).  Useful for A/B-comparing the v2.0 "
-             "stack on the same model.  Mutually exclusive with "
-             "``--steer-mode`` and ``--projection-metric``.",
+             "probe bootstrap, Euclidean ``~`` / ``|`` projection, and "
+             "DLS off (instead of v2.3's DiM + Mahalanobis bake + "
+             "angular + LEACE projection + DLS).  Useful for "
+             "A/B-comparing the pre-v2.3 stack on the same model.  "
+             "Mutually exclusive with ``--steer-mode``, "
+             "``--projection-metric``, and ``--no-dls``.",
     )
 
 
