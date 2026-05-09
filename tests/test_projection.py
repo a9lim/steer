@@ -122,7 +122,7 @@ class _Stub(SaklasSession):
         self._profiles = dict(profiles)
         self._steering_stack = []
         self._steering_override_stack = []
-        # v2.2 session-level defaults consulted by ``_resolve_*``
+        # v2.1 session-level defaults consulted by ``_resolve_*``
         # helpers when the override LIFO has no entries.
         from saklas.core.hooks import DEFAULT_THETA_MAX as _DTM
         self._injection_mode = "angular"
@@ -240,7 +240,7 @@ class TestSessionProjection:
         assert s._rebuild_calls[-1] == {}
 
 
-# ---------------------------------------- v2.2 metric-default integration ---
+# ---------------------------------------- v2.1 metric-default integration ---
 
 class _MetricStub(_Stub):
     """Variant of ``_Stub`` that lets tests select a metric and stand-in
@@ -266,7 +266,7 @@ class _MetricStub(_Stub):
 
 
 class TestProjectionMetricDefault:
-    """The v2.2 default flips runtime ``~`` / ``|`` to Mahalanobis.
+    """The v2.1 default flips runtime ``~`` / ``|`` to Mahalanobis.
 
     Verifies that ``_materialize_projections`` passes ``self.whitener``
     to ``project_profile`` under the default metric, and ``None``

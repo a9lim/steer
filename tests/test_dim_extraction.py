@@ -91,7 +91,7 @@ class TestDimReturnShape:
     def test_dls_keep_set_aligns_diagnostics_with_profile(
         self, monkeypatch,
     ) -> None:
-        # v2.3: edge-drop replaced by data-driven DLS.  Without
+        # v2.1: edge-drop replaced by data-driven DLS.  Without
         # ``layer_means`` the helper falls back to "keep all layers"
         # silently — diagnostics and profile cover the same set.
         torch.manual_seed(0)

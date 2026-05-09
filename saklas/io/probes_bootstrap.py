@@ -128,7 +128,7 @@ def bootstrap_probes(
     the extractors for the centered-DLS check.  ``None`` disables DLS
     centering — the helper falls back to "keep all layers."
 
-    ``dls`` (default ``True``, v2.3+) enables the discriminative-layer
+    ``dls`` (default ``True``, v2.1+) enables the discriminative-layer
     selection mask.  Pass ``False`` to extract every layer (the path
     used by ``--legacy`` and by tests on small mock models).
     """

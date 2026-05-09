@@ -761,7 +761,7 @@ def extract_contrastive(
     diagnostics machinery — only the per-layer direction computation
     differs.
 
-    **DLS replaces edge-drop in v2.3.**  The `drop_edges` parameter is
+    **DLS replaces edge-drop in v2.1.**  The `drop_edges` parameter is
     gone; the layer mask is now derived from the data itself via
     :func:`compute_dls_mask` (centered Selective-Steering, Dang & Ngo
     2026).  Layers where both pos- and neg-class means project to the
@@ -781,7 +781,7 @@ def extract_contrastive(
         concept_label: Optional human-readable name surfaced in the
             soft-warning text when diagnostics flag a degenerate probe.
             Defaults to a generic label.
-        dls: When ``True`` (default since v2.3), apply the centered
+        dls: When ``True`` (default since v2.1), apply the centered
             DLS mask via :func:`compute_dls_mask`.  When ``False``,
             keep every layer — the path tests use for small mock models
             (DLS on synthetic 4-layer data is degenerate).
@@ -1057,7 +1057,7 @@ def extract_difference_of_means(
     whitener fall back to Euclidean per-layer — the whitener may
     legitimately cover a subset of layers in edge cases.
 
-    **DLS replaces edge-drop in v2.3.**  The ``drop_edges`` parameter
+    **DLS replaces edge-drop in v2.1.**  The ``drop_edges`` parameter
     is gone; layer selection is data-driven via :func:`compute_dls_mask`.
     Pass ``dls=False`` to skip the mask (tests / mock paths).  See
     :func:`extract_contrastive` for the rationale.

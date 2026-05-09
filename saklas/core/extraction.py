@@ -359,7 +359,7 @@ class ExtractionPipeline:
         # handle via getattr — keeps the ModelHandle protocol minimal
         # and lets test stubs that don't implement ``.whitener`` fall
         # back to Euclidean.  PCA branch ignores the whitener (it scores
-        # via EVR, not magnitude).  v2.3+: layer_means + dls are
+        # via EVR, not magnitude).  v2.1+: layer_means + dls are
         # threaded uniformly into both extractors; the centered DLS
         # check fires when both are present.  Tests / mock stubs that
         # don't carry layer_means just keep all layers.

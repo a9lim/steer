@@ -139,7 +139,7 @@ class TestExtractContrastiveReturnsTuple:
     def test_dls_keep_set_aligns_diagnostics_with_profile(
         self, monkeypatch,
     ) -> None:
-        # v2.3: edge-drop is gone.  When DLS runs (centered against
+        # v2.1: edge-drop is gone.  When DLS runs (centered against
         # provided layer_means) the diagnostics dict and profile dict
         # must share the same key set so consumers can index without
         # branching on missing entries.  Since the synthetic _stub_encode

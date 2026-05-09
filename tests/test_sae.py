@@ -426,8 +426,8 @@ def test_sae_lens_backend_canonical_layer_map_warns_on_multiple(monkeypatch, rec
 
 # --- DLS tests (raw PCA path; co-located with the SAE extract tests above
 # because they share the ``_encode_and_capture_all`` mock infrastructure).
-# Replaces the v2.0–v2.2 ``drop_edges`` test family — edge-drop is gone in
-# v2.3, layer selection is now data-driven via :func:`compute_dls_mask`.
+# Replaces the v2.0–v2.1 ``drop_edges`` test family — edge-drop is gone in
+# v2.1, layer selection is now data-driven via :func:`compute_dls_mask`.
 
 
 def test_extract_contrastive_dls_default_keeps_all_when_no_layer_means(monkeypatch):

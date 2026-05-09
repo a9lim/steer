@@ -381,17 +381,17 @@ class SaklasSession:
         i.e. α=1 fully aligns the residual with the concept direction).
         ``projection_metric`` selects the metric used when materializing
         ``~`` / ``|`` projection terms in steering expressions:
-        ``"mahalanobis"`` (default since v2.2) uses the closed-form
+        ``"mahalanobis"`` (default since v2.1) uses the closed-form
         LEACE projector against the per-model whitener — provably erases
         linearly-decodable information along ``onto`` from ``base``;
         ``"euclidean"`` is plain Gram-Schmidt (the v2.0/v2.1 behavior).
 
         ``dls`` toggles the discriminative-layer-selection mask at
-        extraction time (v2.3+).  When ``True`` (default), centered DLS
+        extraction time (v2.1+).  When ``True`` (default), centered DLS
         per Dang & Ngo (2026) Eq. 9 drops layers where pos- and
         neg-class means project to the same side of the neutral
-        baseline along ``d̂``.  Replaces the v2.0–v2.2 ``edge_drop``
-        heuristic (gone in v2.3); ``--legacy`` flips this to ``False``.
+        baseline along ``d̂``.  Replaces the v2.0–v2.1 ``edge_drop``
+        heuristic (gone in v2.1); ``--legacy`` flips this to ``False``.
         """
         model, tokenizer = load_model(model_id, quantize=quantize, device=device, dtype=dtype)
         return cls(
@@ -457,7 +457,7 @@ class SaklasSession:
                 f"got {projection_metric!r}"
             )
         # Default for runtime ``~`` / ``|`` projection.  Mahalanobis is
-        # default since v2.2: per-layer ``project_profile`` calls receive
+        # default since v2.1: per-layer ``project_profile`` calls receive
         # ``self.whitener`` so projection erases linearly-decodable
         # concept information along ``onto`` (closed-form LEACE per
         # Belrose et al. 2023).  ``"euclidean"`` keeps the v2.0/v2.1
@@ -567,7 +567,7 @@ class SaklasSession:
                 f"got {extraction_method!r}"
             )
         self._extraction_method: str = extraction_method
-        # v2.3+: DLS toggle stored on the session so ad-hoc
+        # v2.1+: DLS toggle stored on the session so ad-hoc
         # ``session.extract`` calls (via ``ExtractionPipeline``) inherit
         # it without re-passing.  ``--legacy`` sets this to False.
         self._dls: bool = bool(dls)
@@ -1357,12 +1357,12 @@ class SaklasSession:
         resolution + hook install find the profile via the
         ``name in self._profiles`` fast path.
 
-        Metric selection (v2.2): the active projection metric is
+        Metric selection (v2.1): the active projection metric is
         resolved via :meth:`_resolve_projection_metric`, which composes
         the per-call ``Steering.projection_metric`` override (if set)
         with any outer-scope override on
         ``_steering_override_stack`` and the session-level default.
-        Under ``"mahalanobis"`` (default since v2.2) the call site
+        Under ``"mahalanobis"`` (default since v2.1) the call site
         passes ``self.whitener`` to ``project_profile``, which switches
         ``~`` / ``|`` to the closed-form LEACE projector — provably
         erases linearly-decodable concept information along ``onto``.
@@ -1716,7 +1716,7 @@ class SaklasSession:
         ``__enter__`` pushes the new scope onto
         ``_steering_override_stack``, projection materialization has
         already run and committed derived profiles to ``self._profiles``.
-        Threading the override here keeps the v2.2 default end-to-end
+        Threading the override here keeps the v2.1 default end-to-end
         correct without re-running materialization on every scope flip.
         """
         if override is not None:
@@ -2494,7 +2494,7 @@ class SaklasSession:
                         effective_input_ids = suffix_ids
 
                 start = time.monotonic()
-                # Probe-gate score callback (v2.2): wire only when the
+                # Probe-gate score callback (v2.1): wire only when the
                 # active steering stack carries at least one probe-gated
                 # trigger.  ``_steering_needs_probe_gating`` is a cheap
                 # walk over the flattened head; the closure references

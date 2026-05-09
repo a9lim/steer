@@ -86,9 +86,9 @@ def _make_session(args: argparse.Namespace):
         sys.exit(2)
     # ``--legacy`` also flips the runtime ``~`` / ``|`` projection
     # metric to Euclidean (the v2.0/v2.1 plain Gram-Schmidt behavior),
-    # and disables DLS (v2.3 introduced data-driven layer selection;
+    # and disables DLS (v2.1 introduced data-driven layer selection;
     # the v2.0 stack used the old ``drop_edges=(2,2)`` heuristic which
-    # is gone in v2.3 — under ``--legacy`` we keep every layer rather
+    # is gone in v2.1 — under ``--legacy`` we keep every layer rather
     # than re-implement the removed edge-drop just for backcompat).
     if legacy:
         injection_mode = "additive"
@@ -103,7 +103,7 @@ def _make_session(args: argparse.Namespace):
         extraction_method = "dim"
         projection_metric = getattr(args, "projection_metric", None) or "mahalanobis"
         # ``--no-dls`` opts out of the discriminative-layer mask without
-        # toggling the rest of the v2.3 stack.
+        # toggling the rest of the v2.1 stack.
         dls = not bool(getattr(args, "no_dls", False))
     theta_max = getattr(args, "theta_max", None)
     return SaklasSession.from_pretrained(
@@ -822,7 +822,7 @@ def _run_compare(args: argparse.Namespace) -> None:
 
     # ``--legacy`` is a v2.0-backcompat shorthand for ``--metric euclidean``.
     # Mutually exclusive with an explicit ``--metric``.  Default since
-    # v2.2 is ``"mahalanobis"`` — ``args.metric is None`` means "use the
+    # v2.1 is ``"mahalanobis"`` — ``args.metric is None`` means "use the
     # default" (and ``--legacy`` overrides to euclidean).
     legacy = bool(getattr(args, "legacy", False))
     explicit_metric = vars(args).get("metric") is not None
