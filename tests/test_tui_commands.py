@@ -24,7 +24,13 @@ def _make_app():
     """
     app = object.__new__(SaklasApp)
     session = MagicMock()
-    session._history = []
+    # v2.3 loom: conversation lives in ``session.tree`` (LoomTree).
+    # We install a real LoomTree so the regen/rewind path's
+    # navigate/edit calls work; ``session.history`` is the derived
+    # view the TUI's ``_messages`` property reads.
+    from saklas import LoomTree as _LoomTree
+    session.tree = _LoomTree()
+    session.history = []
     session._profiles = {}
     session._model_info = {"model_id": "mock/mock", "model_type": "mock"}
     session._device = SimpleNamespace(type="cpu")
@@ -46,7 +52,8 @@ def _make_app():
     session.gen_state = saklas.GenState.IDLE
 
     app._session = session
-    app._messages = session._history
+    # ``app._messages`` is now a property derived from ``session.history``
+    # under v2.3 loom; the v2.2 shared-list assignment is no longer needed.
     app._device_str = "cpu"
     app._alphas = {}
     app._enabled = {}
@@ -207,10 +214,14 @@ def test_save_load_roundtrip(tmp_path, monkeypatch):
     # Redirect saklas_home() → tmp_path via env var.
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
     app = _make_app()
-    app._session._history.extend([
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"},
-    ])
+    # v2.3 loom: history is derived from the tree, so seed via tree ops.
+    _uid = app._session.tree.add_user_turn("hi")
+    _aid = app._session.tree.begin_assistant(_uid)
+    app._session.tree.finalize_assistant(_aid, text="hello")
+    # The mock's ``session.history`` shadows the tree-derived view; mirror
+    # the seeded turns into it so ``app._messages`` (which reads
+    # ``session.history``) sees them.
+    app._session.history = app._session.tree.messages_for()
     app._alphas["foo"] = 0.5
     app._session._profiles["foo"] = {0: None}  # so load restores it
     app._enabled["foo"] = True
@@ -229,7 +240,10 @@ def test_save_load_roundtrip(tmp_path, monkeypatch):
     # chat_panel mocks used by _do_clear.
     app2._chat_panel.clear_log = MagicMock()
     app2._session.clear_history = MagicMock(
-        side_effect=lambda: app2._session._history.clear()
+        side_effect=lambda: (
+            app2._session.tree.reset(),
+            setattr(app2._session, "history", []),
+        )
     )
 
     app2._handle_command("/load convtest")

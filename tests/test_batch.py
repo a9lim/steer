@@ -51,7 +51,11 @@ def _stub_generate_core(session, *, capture: list):
     """
     counter = {"n": 0}
 
-    def _fake(input, *, steering=None, sampling=None, stateless=False, raw=False, thinking=None, on_token=None):
+    def _fake(input, *, steering=None, sampling=None, stateless=False, raw=False, thinking=None, on_token=None, **kwargs):
+        # ``kwargs`` swallows additions to ``_generate_core``'s signature
+        # (v2.3 added ``parent_node_id`` and ``recipe_override``) so this
+        # stub doesn't churn every time the core gains a new optional
+        # keyword.
         idx = counter["n"]
         counter["n"] += 1
         capture.append({"input": input, "steering": steering})
@@ -280,18 +284,26 @@ def sweep_client():
     session = _mock_session_for_server()
 
     # Stub generate_sweep to fire on_result synchronously then return.
+    # Accepts the v2.3 phase-5 kwargs (`return_node_ids`, `parent_node_id`)
+    # alongside the legacy shape — server now passes `return_node_ids=True`
+    # so sweep results land sibling-shaped in the loom tree.
     def _fake_sweep(prompt, sweep, *, base_steering=None, sampling=None,
-                   thinking=None, stateless=True, raw=False, on_result=None):
+                   thinking=None, stateless=True, raw=False, on_result=None,
+                   parent_node_id=None, return_node_ids=False, **kwargs):
         results: list = []
+        node_ids: list = []
         idx = 0
         # Simple linearization: walk the first concept's alphas.
         first_name, first_alphas = next(iter(sweep.items()))
         for alpha in first_alphas:
             r = _make_result(f"out_{idx}", applied=f"{alpha} {first_name}")
             results.append(r)
+            node_ids.append(f"NODE_{idx}")
             if on_result is not None:
                 on_result(idx, r, {first_name: alpha})
             idx += 1
+        if return_node_ids:
+            return results, node_ids
         return results
 
     session.generate_sweep = _fake_sweep

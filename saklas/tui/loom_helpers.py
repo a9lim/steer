@@ -1,0 +1,400 @@
+"""Helpers for the loom-screen + tree slash commands.
+
+Kept separate from :mod:`saklas.tui.loom_screen` so the parsers and
+prefix-resolution functions can be unit-tested without spinning up a
+Textual app or importing the screen module.  The slash-command
+dispatchers in :class:`saklas.tui.app.SaklasApp` call into the helpers
+here; the screen module composes them with widget state.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass
+from typing import Iterable
+
+from saklas.core.loom import LoomNode, LoomTree
+
+
+# ---------------------------------------------------------------------------
+# Alpha-list parsing (shared with the webui's sweep drawer)
+# ---------------------------------------------------------------------------
+
+
+class AlphaListError(ValueError):
+    """Raised when ``parse_alpha_list`` can't make sense of its input."""
+
+
+_LINSPACE_RE = re.compile(
+    r"^linspace\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,)]+?)\s*\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_alpha_list(text: str) -> list[float]:
+    """Parse the shared alpha-grid grammar used by `/fan` and the webui sweep.
+
+    Three input shapes (in order of priority):
+
+    - ``linspace(start, stop, n)`` — n evenly-spaced values inclusive of
+      both endpoints (matches numpy's ``linspace``).  Single-point form
+      (n=1) collapses to ``[start]``.
+    - ``start:stop:step`` — step-form, step direction must match the
+      span direction (``start<stop`` requires ``step>0`` and vice versa).
+      Inclusive of stop within ``|step|*1e-9`` tolerance.
+    - Comma-separated literal list (``0.0, 0.3, 0.7``).  Empty entries
+      are skipped; an entirely empty list errors.
+
+    Raises :class:`AlphaListError` for any parse failure so callers can
+    surface a single ``Error: ...`` toast/system message rather than
+    interpreting partial output.
+    """
+
+    text = (text or "").strip()
+    if not text:
+        raise AlphaListError("alpha list is empty")
+
+    m = _LINSPACE_RE.match(text)
+    if m:
+        try:
+            start = float(m.group(1))
+            stop = float(m.group(2))
+        except ValueError:
+            raise AlphaListError("linspace bounds must be numbers")
+        try:
+            n = int(m.group(3))
+        except ValueError:
+            raise AlphaListError("linspace count must be a positive integer")
+        if n < 1:
+            raise AlphaListError("linspace count must be a positive integer")
+        if not math.isfinite(start) or not math.isfinite(stop):
+            raise AlphaListError("linspace bounds must be numbers")
+        if n == 1:
+            return [start]
+        step = (stop - start) / (n - 1)
+        return [start + step * i for i in range(n)]
+
+    if ":" in text and "," not in text:
+        parts = [p.strip() for p in text.split(":")]
+        if len(parts) != 3:
+            raise AlphaListError("range form is start:stop:step (three values)")
+        try:
+            start = float(parts[0])
+            stop = float(parts[1])
+            step = float(parts[2])
+        except ValueError:
+            raise AlphaListError("range values must be numbers")
+        if not all(math.isfinite(v) for v in (start, stop, step)):
+            raise AlphaListError("range values must be numbers")
+        if step == 0:
+            raise AlphaListError("range step must be non-zero")
+        if (stop - start) * step < 0:
+            raise AlphaListError("range step direction disagrees with start→stop")
+        eps = abs(step) * 1e-9
+        out: list[float] = []
+        cur = start
+        ascending = step > 0
+        guard = 0
+        while True:
+            if ascending and cur > stop + eps:
+                break
+            if (not ascending) and cur < stop - eps:
+                break
+            out.append(round(cur, 12))
+            cur += step
+            guard += 1
+            if guard >= 10_000:
+                raise AlphaListError("range produced too many values")
+        if not out:
+            raise AlphaListError("range produced no values")
+        return out
+
+    out: list[float] = []
+    for tok in text.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except ValueError:
+            raise AlphaListError(f"'{tok}' is not a number")
+        if not math.isfinite(v):
+            raise AlphaListError(f"'{tok}' is not a finite number")
+        out.append(v)
+    if not out:
+        raise AlphaListError("no values parsed")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Prefix-based node id resolution (`/nav <prefix>`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PrefixMatch:
+    """Result of :func:`resolve_node_prefix` — either a unique hit or a
+    collision."""
+
+    node_id: str | None
+    candidates: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return self.node_id is not None
+
+    @property
+    def ambiguous(self) -> bool:
+        return len(self.candidates) > 1
+
+    @property
+    def missing(self) -> bool:
+        return not self.candidates
+
+
+def resolve_node_prefix(tree: LoomTree, prefix: str) -> PrefixMatch:
+    """Match ``prefix`` (case-insensitive) against the tree's node ids.
+
+    ULIDs are upper-cased Crockford base32, so we upper-case the user
+    input before scanning.  Returns a :class:`PrefixMatch` with the
+    resolved id (or ``None``) and the list of candidates (so callers can
+    surface "ambiguous: a, b, c" when multiple match).
+    """
+
+    if not prefix:
+        return PrefixMatch(node_id=None, candidates=())
+    needle = prefix.strip().upper()
+    if not needle:
+        return PrefixMatch(node_id=None, candidates=())
+    hits = [nid for nid in tree.nodes if nid.startswith(needle)]
+    if len(hits) == 1:
+        return PrefixMatch(node_id=hits[0], candidates=tuple(hits))
+    return PrefixMatch(node_id=None, candidates=tuple(sorted(hits)))
+
+
+# ---------------------------------------------------------------------------
+# Search helpers (`/` in the loom screen)
+# ---------------------------------------------------------------------------
+
+
+def search_nodes(tree: LoomTree, query: str) -> list[str]:
+    """Return node ids whose text or notes contain ``query`` (case-insensitive).
+
+    Skips the synthetic root.  Used by the loom screen's ``/`` text
+    search and also exposed for `/nav --search` style flows.
+    """
+
+    if not query:
+        return []
+    needle = query.lower()
+    out: list[str] = []
+    for nid, node in tree.nodes.items():
+        if nid == tree.root_id:
+            continue
+        haystack = (node.text or "") + " " + (node.notes or "")
+        if needle in haystack.lower():
+            out.append(nid)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Active path / summary helpers (`/path`)
+# ---------------------------------------------------------------------------
+
+
+def _first_line(text: str, *, max_len: int = 80) -> str:
+    if not text:
+        return ""
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    if len(line) > max_len:
+        return line[: max_len - 1] + "…"
+    return line
+
+
+_ROLE_GLYPH = {
+    "system": "·",
+    "user": ">",
+    "assistant": "<",
+}
+
+
+def format_path_summary(tree: LoomTree) -> str:
+    """One-liner per node in the active path: id-prefix, role glyph, snippet."""
+
+    path = tree.active_path()
+    lines: list[str] = []
+    for node in path:
+        if node.id == tree.root_id:
+            continue
+        glyph = _ROLE_GLYPH.get(node.role, "?")
+        snippet = _first_line(node.text, max_len=80)
+        marker = " *" if node.starred else ""
+        lines.append(f"{node.id[:8]} {glyph}{marker} {snippet}")
+    if not lines:
+        return "(empty path)"
+    return "\n".join(lines)
+
+
+def format_node_detail(tree: LoomTree, node_id: str) -> str:
+    """Detail-pane block for a single node — used by `/path <id>` and the
+    loom screen's right-side panel renderer.
+
+    Phase 5 addition: when the node is an assistant with sibling
+    assistant cousins under the same user-parent, a ``Recipe`` block at
+    the bottom renders the canonical steering expression and the
+    :func:`saklas.core.loom_diff.steering_delta` against each sibling
+    so users see the per-sibling deltas without leaving the loom view.
+    """
+
+    node = tree.get(node_id)
+    lines: list[str] = []
+    lines.append(f"id        : {node.id}")
+    lines.append(f"role      : {node.role}")
+    if node.parent_id is not None:
+        lines.append(f"parent    : {node.parent_id[:8]}")
+    lines.append(f"children  : {len(tree.child_ids(node.id))}")
+    if node.starred:
+        lines.append("starred   : yes")
+    if node.notes:
+        lines.append(f"notes     : {node.notes}")
+    if node.edit_count:
+        lines.append(f"edits     : {node.edit_count}")
+    if node.finish_reason:
+        lines.append(f"finish    : {node.finish_reason}")
+    if node.applied_steering:
+        lines.append(f"steering  : {node.applied_steering}")
+    if node.recipe is not None:
+        recipe = node.recipe
+        if recipe.steering:
+            lines.append(f"recipe.s  : {recipe.steering}")
+        if recipe.seed is not None:
+            lines.append(f"recipe.sd : {recipe.seed}")
+        if recipe.sampling is not None:
+            samp = recipe.sampling
+            t = getattr(samp, "temperature", None)
+            p = getattr(samp, "top_p", None)
+            m = getattr(samp, "max_tokens", None)
+            lines.append(f"recipe.sm : T={t} top_p={p} max={m}")
+        if recipe.thinking is not None:
+            lines.append(f"recipe.th : {recipe.thinking}")
+
+    # ------- Phase 5: per-sibling steering-delta block -----------------
+    if node.role == "assistant" and node.parent_id is not None:
+        sibling_block = _format_sibling_recipe_block(tree, node)
+        if sibling_block:
+            lines.append("")
+            lines.append("--- Recipe ---")
+            lines.extend(sibling_block)
+
+    if node.aggregate_readings:
+        lines.append("readings  :")
+        items = sorted(
+            node.aggregate_readings.items(),
+            key=lambda kv: abs(kv[1]),
+            reverse=True,
+        )
+        for k, v in items[:10]:
+            lines.append(f"  {k:<28} {v:+.4f}")
+        if len(items) > 10:
+            lines.append(f"  … {len(items) - 10} more")
+    lines.append("")
+    lines.append("--- text ---")
+    lines.append(node.text or "(empty)")
+    return "\n".join(lines)
+
+
+def _format_sibling_recipe_block(tree: LoomTree, node: LoomNode) -> list[str]:
+    """Render the canonical steering expression plus per-sibling deltas.
+
+    Walks the active node's user-parent's assistant children, filters to
+    the other assistants, and emits a one-line delta per sibling via
+    :func:`saklas.core.loom_diff.steering_delta`.  Returns an empty list
+    when the node has no assistant cousins (no comparison to make).
+    """
+    from saklas.core.loom_diff import steering_delta
+
+    sib_ids = [
+        cid for cid in tree.child_ids(node.parent_id)
+        if cid != node.id and tree.get(cid).role == "assistant"
+    ]
+    if not sib_ids:
+        return []
+
+    def _expr(n: LoomNode) -> str:
+        if n.recipe is not None and n.recipe.steering is not None:
+            return n.recipe.steering
+        return n.applied_steering or ""
+
+    self_expr = _expr(node)
+    out: list[str] = [
+        f"steering: {self_expr or '(unsteered)'}",
+    ]
+    for idx, sid in enumerate(sib_ids, 1):
+        sib = tree.get(sid)
+        sib_expr = _expr(sib)
+        delta = steering_delta(sib_expr, self_expr)
+        if not delta:
+            delta = "(identical)"
+        out.append(f"  Δ from sibling {idx} ({sid[:8]}): {delta}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Transcript export — phase-4 minimal shape per docs/plans/loom.md
+# ---------------------------------------------------------------------------
+
+
+def build_transcript_payload(
+    tree: LoomTree,
+    *,
+    model_id: str | None,
+    system_prompt: str | None = None,
+    leaf_id: str | None = None,
+) -> dict:
+    """Build the transcript shape phase 4 ships.
+
+    Mirrors the YAML example in ``docs/plans/loom.md``; phase 5 fills in
+    probe content hashes.  Returns a dict (caller writes YAML or JSON).
+    """
+
+    path = tree.path_to(leaf_id) if leaf_id else tree.active_path()
+    turns: list[dict] = []
+    probes_seen: dict[str, str] = {}
+    for node in path:
+        if node.id == tree.root_id:
+            continue
+        if node.role == "system":
+            continue
+        if node.role == "user":
+            turns.append({"role": "user", "text": node.text})
+            continue
+        entry: dict = {"role": "assistant", "text": node.text}
+        if node.recipe is not None:
+            recipe_d = node.recipe.to_dict()
+            entry["recipe"] = recipe_d
+            for probe in (node.recipe.probes or []):
+                probes_seen.setdefault(probe, node.recipe.probe_hashes.get(probe, ""))
+        if node.aggregate_readings:
+            entry["readings"] = dict(node.aggregate_readings)
+        turns.append(entry)
+
+    return {
+        "saklas_transcript": 1,
+        "model_id": model_id or tree.model_id,
+        "system_prompt": system_prompt,
+        "probes": [{"name": k, "sha256": v} for k, v in sorted(probes_seen.items())],
+        "turns": turns,
+    }
+
+
+__all__ = [
+    "AlphaListError",
+    "PrefixMatch",
+    "parse_alpha_list",
+    "resolve_node_prefix",
+    "search_nodes",
+    "format_path_summary",
+    "format_node_detail",
+    "build_transcript_payload",
+]

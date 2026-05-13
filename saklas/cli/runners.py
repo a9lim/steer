@@ -1433,10 +1433,112 @@ def _run_vector(args: argparse.Namespace) -> None:
     runner(args)
 
 
+@_saklas_error_exit
+def _run_transcript(args: argparse.Namespace) -> None:
+    """Dispatch ``saklas transcript <verb>``.
+
+    Phase 5 ships ``run`` only — ``saklas transcript run <path>`` loads
+    the YAML, replays each user turn, and reports readings deltas.
+    """
+    cmd = getattr(args, "transcript_cmd", None)
+    if cmd is None:
+        print("usage: saklas transcript <verb> [...]")
+        print()
+        print("  run  Replay a transcript on the current session")
+        sys.exit(0)
+    if cmd == "run":
+        _run_transcript_run(args)
+        return
+    print(f"unknown transcript verb {cmd!r}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _run_transcript_run(args: argparse.Namespace) -> None:
+    from saklas.core.transcript import (
+        Transcript, TranscriptError,
+    )
+
+    transcript_path = Path(args.path)
+    if not transcript_path.is_file():
+        print(f"transcript run: {transcript_path}: file not found", file=sys.stderr)
+        sys.exit(2)
+    try:
+        transcript = Transcript.load(transcript_path)
+    except TranscriptError as e:
+        print(f"transcript run: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    _load_effective_config(args)
+    if not args.model:
+        if transcript.model_id:
+            args.model = transcript.model_id
+        else:
+            print(
+                "transcript run: model required (pass <model> or include "
+                "`model_id` in the transcript)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    _print_startup(args)
+    session = _make_session(args)
+    _print_model_info(session)
+
+    # Import via ``default`` so the transcript lands as a fresh branch
+    # under the synthetic root; replay walks the imported branch and
+    # reports drift inline.
+    try:
+        leaf_id = transcript.import_into(
+            session, mode="default", strict=args.strict,
+        )
+    except TranscriptError as e:
+        print(f"transcript run: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"transcript: {len(transcript.turns)} turns loaded "
+          f"(leaf: {leaf_id[:8]})")
+    print()
+    for idx, turn in enumerate(transcript.turns):
+        if turn.role != "user":
+            continue
+        print(f"--- replay turn {idx} ---")
+        print(f"user: {turn.text[:80]}")
+        # Look ahead for the assistant turn this user prompt produced.
+        expected = None
+        if idx + 1 < len(transcript.turns) and transcript.turns[idx + 1].role == "assistant":
+            expected = transcript.turns[idx + 1]
+        try:
+            recipe = expected.recipe if expected is not None else None
+            steering = recipe.steering if recipe is not None else None
+            sampling = recipe.sampling if recipe is not None else None
+            result = session.generate(
+                turn.text,
+                steering=steering,
+                sampling=sampling,
+                stateless=True,
+            )
+        except Exception as e:
+            print(f"  replay failed: {e}")
+            continue
+        print(f"assistant: {result.text[:120]}")
+        if expected is not None and expected.readings:
+            actual = {n: r.mean for n, r in result.readings.items()}
+            deltas = []
+            for name, expected_v in expected.readings.items():
+                actual_v = actual.get(name, 0.0)
+                deltas.append((name, actual_v - expected_v, expected_v, actual_v))
+            deltas.sort(key=lambda x: abs(x[1]), reverse=True)
+            print(f"  readings drift (top 5):")
+            for name, d, ev, av in deltas[:5]:
+                print(f"    {name:<32}  Δ {d:+.4f}  (expected {ev:+.4f} → got {av:+.4f})")
+        print()
+
+
 _COMMAND_RUNNERS = {
-    "tui":    _run_tui,
-    "serve":  _run_serve,
-    "pack":   _run_pack,
-    "vector": _run_vector,
-    "config": _run_config,
+    "tui":        _run_tui,
+    "serve":      _run_serve,
+    "pack":       _run_pack,
+    "vector":     _run_vector,
+    "config":     _run_config,
+    "transcript": _run_transcript,
 }

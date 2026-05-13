@@ -15,9 +15,9 @@
   import SamplingStrip from "./panels/SamplingStrip.svelte";
   import SteeringRack from "./panels/SteeringRack.svelte";
   import ProbeRack from "./panels/ProbeRack.svelte";
+  import LoomSidebar from "./panels/loom/LoomSidebar.svelte";
 
   import * as Drawers from "./drawers";
-  import SweepDrawer from "./drawers/SweepDrawer.svelte";
   import PackDrawer from "./drawers/PackDrawer.svelte";
   import MergeDrawer from "./drawers/MergeDrawer.svelte";
   import CloneDrawer from "./drawers/CloneDrawer.svelte";
@@ -30,6 +30,10 @@
     closeDrawer,
     genStatus,
     sendStop,
+    loomTree,
+    loomUiState,
+    loomRegenerateActive,
+    requestLoomModal,
   } from "./lib/stores.svelte";
 
   type BootStatus = "loading" | "ready" | "failed";
@@ -63,7 +67,11 @@
   // Shift-R → regen (handled in Topbar via its button + this accelerator
   // duplicates the regen click).  Cmd/Ctrl-Enter is left for the chat
   // input to handle locally.
-  function onWindowKey(ev: KeyboardEvent) {
+  //
+  // Loom (phase 3): Ctrl/Cmd+R/E/B/N/D fire the corresponding tree op
+  // via the sidebar's modal flow.  Browser Ctrl+B (bold) is suppressed
+  // via ``preventDefault`` per Decision 9.
+  async function onWindowKey(ev: KeyboardEvent) {
     // Escape: stop in-flight gen, then close drawer if any.
     if (ev.key === "Escape") {
       if (genStatus.active) {
@@ -76,6 +84,59 @@
         ev.preventDefault();
         return;
       }
+    }
+
+    if (loomTree.unavailable) return;
+    const mod = ev.ctrlKey || ev.metaKey;
+    if (!mod) return;
+    // Shift+ctrl combos are reserved for the topbar regen button
+    // (Cmd-Shift-R is the existing meaning); the loom shortcuts use
+    // bare Cmd/Ctrl+key.
+    if (ev.shiftKey) return;
+    const k = ev.key.toLowerCase();
+
+    if (k === "r") {
+      ev.preventDefault();
+      // Ctrl+R = regenerate active assistant (N=1, current rack).
+      const active = loomTree.active_node_id;
+      if (!active) return;
+      const node = loomTree.nodes.get(active);
+      if (node?.role === "assistant") {
+        await loomRegenerateActive(1);
+      } else {
+        // Active is a user node — open the modal to let the user pick N
+        // and confirm.
+        requestLoomModal("regenerate", { nodeId: active, n: 1 });
+      }
+      return;
+    }
+    if (k === "e") {
+      ev.preventDefault();
+      const active = loomTree.active_node_id;
+      if (!active) return;
+      const node = loomTree.nodes.get(active);
+      requestLoomModal("edit", { nodeId: active, text: node?.text ?? "" });
+      return;
+    }
+    if (k === "b") {
+      ev.preventDefault();
+      const active = loomTree.active_node_id;
+      if (!active) return;
+      const node = loomTree.nodes.get(active);
+      requestLoomModal("branch", { nodeId: active, text: node?.text ?? "" });
+      return;
+    }
+    if (k === "n") {
+      ev.preventDefault();
+      requestLoomModal("navpicker", { nodeId: loomTree.active_node_id });
+      return;
+    }
+    if (k === "d") {
+      ev.preventDefault();
+      const active = loomTree.active_node_id;
+      if (!active) return;
+      requestLoomModal("delete", { nodeId: active });
+      return;
     }
   }
 </script>
@@ -95,7 +156,13 @@
   <div class="shell" class:loading={bootStatus === "loading"}>
     <Topbar />
 
-    <main class="layout">
+    <main class="layout" class:loom-open={loomUiState.sidebarOpen && !loomTree.unavailable}>
+      {#if loomUiState.sidebarOpen && !loomTree.unavailable}
+        <section class="loom-zone" aria-label="Loom sidebar">
+          <LoomSidebar />
+        </section>
+      {/if}
+
       <section class="chat-zone" aria-label="Chat">
         <Chat />
         <SamplingStrip />
@@ -140,8 +207,6 @@
             <Drawers.Help params={drawerState.params} />
           {:else if drawerState.open === "export"}
             <Drawers.Export params={drawerState.params} />
-          {:else if drawerState.open === "sweep"}
-            <SweepDrawer params={drawerState.params} />
           {:else if drawerState.open === "pack"}
             <PackDrawer params={drawerState.params} />
           {:else if drawerState.open === "merge"}
@@ -154,6 +219,10 @@
             <Drawers.Correlation params={drawerState.params} />
           {:else if drawerState.open === "layer_norms"}
             <Drawers.LayerNorms params={drawerState.params} />
+          {:else if drawerState.open === "node_compare"}
+            <Drawers.NodeCompare params={drawerState.params} />
+          {:else if drawerState.open === "transcript"}
+            <Drawers.Transcript params={drawerState.params} />
           {:else}
             <header class="drawer-header">
               <span class="drawer-title">{drawerState.open}</span>
@@ -206,6 +275,18 @@
      * overflow by ~640px, the body scrolls during the 160ms animation,
      * and the chat/rack content visibly shifts left then snaps back. */
     overflow: hidden;
+  }
+  /* Loom sidebar (phase 3) prepends a 280px column on the left when
+   * ``loomUiState.sidebarOpen`` is true.  Min-width 1280px stays
+   * comfortable: 280 + chat + rack still fits ≥ 1000 across the two
+   * existing zones. */
+  .layout.loom-open {
+    grid-template-columns: 280px 55fr 45fr;
+  }
+  .loom-zone {
+    background: var(--bg-alt);
+    overflow: hidden;
+    min-height: 0;
   }
   .chat-zone,
   .rack-zone {

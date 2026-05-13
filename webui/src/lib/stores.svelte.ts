@@ -20,10 +20,14 @@ import {
   apiVectors,
   apiProbes,
   apiPacks,
+  apiTree,
+  ApiError,
   connectWs,
 } from "./api";
 import type {
   CorrelationData,
+  LoomNodeJSON,
+  LoomTreeJSON,
   SessionInfo,
   SweepEvent,
   VectorInfo,
@@ -451,6 +455,368 @@ export const chatLog: ChatLogState = $state({
   pendingIndex: null,
 });
 
+// ============================================================ loom tree ===
+//
+// Mirrors the server's LoomTree (phase 2 spec).  The slice is the
+// authoritative shape for the loom sidebar; ``chatLog.turns`` is sync'd
+// from the active path via ``syncChatLogFromTree`` whenever ``loomTree``
+// changes (rev-driven).
+//
+// Until the server exposes /tree (a saklas server older than v2.3 will
+// 404 on the bootstrap fetch), ``loomTree.rev`` stays at 0 and the
+// legacy non-loom write paths in ``handleWsMessage`` continue to own
+// ``chatLog.turns``.  Once rev > 0 the sidebar is the truth and
+// ``handleWsMessage`` is a no-op for tree-shape concerns; we still keep
+// the legacy writers for streaming-token append (the token deltas
+// arrive as ``token`` events, not as ``tree_mutated`` deltas).
+
+export interface LoomTreeState {
+  root_id: string | null;
+  active_node_id: string | null;
+  /** Per-node cache.  SvelteMap so ``set``/``delete`` trigger reactivity
+   *  in the sidebar without manual re-renders. */
+  nodes: Map<string, LoomNodeJSON>;
+  /** parent_id → ordered child ids.  Same SvelteMap pattern. */
+  children_of: Map<string, string[]>;
+  /** Monotonic revision cursor.  0 means "no server tree fetched yet"
+   *  — the UI falls back to legacy single-path rendering until > 0. */
+  rev: number;
+  /** Pending in-flight gen target id (when known).  Reflects the
+   *  ``started`` / ``node_created`` event's ``node_id`` field; null
+   *  between gens. */
+  pendingNodeId: string | null;
+  /** Cached active path as an ordered list of node ids.  Recomputed on
+   *  every ``rev`` bump so sidebar / chat sync work in O(depth). */
+  activePath: string[];
+  /** Last seen server-side model id; used to invalidate cache across
+   *  model swaps. */
+  modelId: string | null;
+  /** Set when the server tree fetch fails 404 or otherwise — UI hides
+   *  the loom sidebar toggle when the server doesn't support loom. */
+  unavailable: boolean;
+  /** Last fetch error message; surfaced in the sidebar. */
+  error: string | null;
+}
+
+export const loomTree: LoomTreeState = $state({
+  root_id: null,
+  active_node_id: null,
+  nodes: new SvelteMap(),
+  children_of: new SvelteMap(),
+  rev: 0,
+  pendingNodeId: null,
+  activePath: [],
+  modelId: null,
+  unavailable: false,
+  error: null,
+});
+
+/** Walk from root to ``active_node_id`` and produce the ordered list of
+ *  node ids on the active path.  O(depth + active-children-per-step).
+ *  Returns [] when the tree isn't loaded. */
+function recomputeActivePath(): void {
+  const active = loomTree.active_node_id;
+  if (!active) {
+    loomTree.activePath = [];
+    return;
+  }
+  // Walk parents to the root, reverse for root-first order.
+  const reversed: string[] = [];
+  let cursor: string | null = active;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    reversed.push(cursor);
+    const node = loomTree.nodes.get(cursor);
+    cursor = node?.parent_id ?? null;
+  }
+  loomTree.activePath = reversed.reverse();
+}
+
+/** Project a LoomNodeJSON to a ChatTurn for Chat.svelte consumption.
+ *  Leaves token streams untouched — the WS handler builds those on the
+ *  in-flight turn from per-token events. */
+function nodeToTurn(n: LoomNodeJSON): ChatTurn {
+  return {
+    role: n.role,
+    text: n.text ?? "",
+    appliedSteering: n.applied_steering ?? null,
+    aggregateReadings: n.aggregate_readings ?? undefined,
+    finishReason: n.finish_reason ?? undefined,
+  };
+}
+
+/** Sync ``chatLog.turns`` (and ``chatLog.pendingIndex``) from the tree's
+ *  active path.  Called after every tree mutation when ``rev > 0``.  Skip
+ *  the synthetic system root (parent_id === null + role === "system" +
+ *  empty text) so the chat view doesn't lead with an invisible turn.
+ *
+ *  Preserves any in-flight token stream attached to the pending node by
+ *  re-using the existing ChatTurn object when possible — token deltas
+ *  flowing in via WS keep accumulating on it.  This is the bridge
+ *  between "tree is authoritative" and "live tokens land on an existing
+ *  turn object." */
+function syncChatLogFromTree(): void {
+  if (loomTree.rev <= 0) return;
+  const path = loomTree.activePath;
+  if (path.length === 0) {
+    chatLog.turns = [];
+    chatLog.pendingIndex = null;
+    return;
+  }
+  const out: ChatTurn[] = [];
+  let pendingIdx: number | null = null;
+  for (const nid of path) {
+    const node = loomTree.nodes.get(nid);
+    if (!node) continue;
+    // Skip the synthetic system root — empty text, no parent, role
+    // "system".  It's an engine-side anchor, not a user-facing turn.
+    if (node.parent_id === null && node.role === "system" && !node.text) continue;
+    // Try to keep the existing turn object if it already represents this
+    // node (token-stream preservation for the live target).
+    const prev = chatLog.turns[out.length];
+    let turn: ChatTurn;
+    if (
+      prev &&
+      prev.role === node.role &&
+      // Same text or live-stream-of-text on the active in-flight turn.
+      (prev.text === node.text ||
+        (loomTree.pendingNodeId === nid && prev.role === "assistant"))
+    ) {
+      // Mutate-in-place so the streaming token arrays survive.
+      prev.text = node.text ?? prev.text;
+      prev.appliedSteering = node.applied_steering ?? prev.appliedSteering ?? null;
+      prev.aggregateReadings = node.aggregate_readings ?? prev.aggregateReadings;
+      prev.finishReason = node.finish_reason ?? prev.finishReason;
+      turn = prev;
+    } else {
+      turn = nodeToTurn(node);
+    }
+    if (loomTree.pendingNodeId === nid) pendingIdx = out.length;
+    out.push(turn);
+  }
+  chatLog.turns = out;
+  chatLog.pendingIndex = pendingIdx;
+}
+
+/** Replace the in-memory tree with a freshly fetched server snapshot.
+ *  Drops stale per-node entries; resets activePath; sync chat log.
+ *
+ *  ``snap.nodes`` is a flat list (server's ``LoomTree.to_dict`` shape).
+ *  We pivot to id-keyed for the in-memory cache.  Tolerant of older or
+ *  alternative shapes that pass a record keyed by id — phase-2 server
+ *  is the list shape; v1 migration in this file produces the dict shape
+ *  on disk for legacy snapshots, which is also accepted. */
+function applyTreeSnapshot(snap: LoomTreeJSON): void {
+  loomTree.root_id = snap.root_id;
+  loomTree.active_node_id = snap.active_node_id;
+  loomTree.rev = snap.rev;
+  loomTree.modelId = snap.model_id ?? loomTree.modelId;
+  loomTree.unavailable = false;
+  loomTree.error = null;
+  loomTree.nodes.clear();
+  if (Array.isArray(snap.nodes)) {
+    for (const n of snap.nodes) loomTree.nodes.set(n.id, n);
+  } else if (snap.nodes && typeof snap.nodes === "object") {
+    for (const [id, n] of Object.entries(snap.nodes as Record<string, LoomNodeJSON>)) {
+      loomTree.nodes.set(id, n);
+    }
+  }
+  loomTree.children_of.clear();
+  for (const [pid, ids] of Object.entries(snap.children_of)) {
+    loomTree.children_of.set(pid, [...ids]);
+  }
+  recomputeActivePath();
+  syncChatLogFromTree();
+}
+
+/** Apply a ``tree_mutated`` delta in place.  Returns ``false`` if the
+ *  client missed a rev — caller full-refetches on false.
+ *
+ *  Phase-2 server semantics: ``updated`` carries full LoomNodeJSON
+ *  objects (potentially with an extra ``children`` field that we
+ *  ignore — children_of is rebuilt from the added/removed deltas).
+ *  ``added`` nodes may also be implicit children-list extensions of
+ *  existing parents. */
+function applyTreeDelta(ev: {
+  added?: LoomNodeJSON[];
+  removed?: string[];
+  updated?: LoomNodeJSON[];
+  active_node_id?: string | null;
+  rev: number;
+}): boolean {
+  // First event after bootstrap is the rev=1 mutation; accept rev > 0
+  // when our local rev is 0 (cold start) without claiming a gap.
+  if (loomTree.rev > 0 && ev.rev > loomTree.rev + 1) return false;
+  // ``added``: inject node + extend its parent's children list.  Node
+  // payloads from the server may include a ``children`` field
+  // (_node_json adds it); strip before storing so the cached node
+  // shape stays consistent with the bootstrap fetch.
+  for (const raw of ev.added ?? []) {
+    const { children: _children, ...node } = raw as LoomNodeJSON & {
+      children?: string[];
+    };
+    loomTree.nodes.set(node.id, node);
+    if (node.parent_id !== null) {
+      const siblings = loomTree.children_of.get(node.parent_id) ?? [];
+      if (!siblings.includes(node.id)) {
+        loomTree.children_of.set(node.parent_id, [...siblings, node.id]);
+      }
+    } else {
+      loomTree.root_id = node.id;
+    }
+  }
+  // ``removed``: subtree-drop — caller (server) emits the full list of
+  // dropped descendants so we don't need to walk locally.  Defensive
+  // dedupe against missing entries.
+  for (const id of ev.removed ?? []) {
+    const node = loomTree.nodes.get(id);
+    loomTree.nodes.delete(id);
+    loomTree.children_of.delete(id);
+    if (node?.parent_id) {
+      const sibs = loomTree.children_of.get(node.parent_id);
+      if (sibs) {
+        loomTree.children_of.set(node.parent_id, sibs.filter((s) => s !== id));
+      }
+    }
+  }
+  // ``updated``: full node replacement.  Same children-strip as added.
+  for (const raw of ev.updated ?? []) {
+    const { children: _children, ...node } = raw as LoomNodeJSON & {
+      children?: string[];
+    };
+    loomTree.nodes.set(node.id, node);
+  }
+  if (ev.active_node_id !== undefined && ev.active_node_id !== null) {
+    loomTree.active_node_id = ev.active_node_id;
+  }
+  loomTree.rev = ev.rev;
+  // Phase 5: applied_steering strings can shift after edit/regen, so
+  // bust the edge-label cache wholesale on any mutation.  Cheap — the
+  // sidebar refetches lazily on first re-render.
+  invalidateEdgeLabels();
+  recomputeActivePath();
+  syncChatLogFromTree();
+  return true;
+}
+
+/** Bootstrap fetch of the tree.  Tolerates a 404 — older servers don't
+ *  ship loom; the UI falls back to legacy linear-path rendering. */
+export async function refreshLoomTree(): Promise<void> {
+  try {
+    const snap = await apiTree.get();
+    applyTreeSnapshot(snap);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      // Server pre-loom — disable the sidebar quietly.
+      loomTree.unavailable = true;
+      loomTree.rev = 0;
+      return;
+    }
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Right-click ops + keyboard shortcuts route through these helpers.
+ *  Each one fires the REST mutation and lets the server-emitted
+ *  ``tree_mutated`` event sync the local store — no optimistic update
+ *  (keeps the local copy in lockstep with server rev). */
+export async function loomNavigate(node_id: string): Promise<void> {
+  try {
+    await apiTree.navigate(node_id);
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+export async function loomEdit(node_id: string, text: string): Promise<void> {
+  try {
+    await apiTree.edit(node_id, text);
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+export async function loomBranch(
+  node_id: string,
+  text: string,
+): Promise<string | null> {
+  try {
+    const r = await apiTree.branch(node_id, text);
+    return r.node_id;
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+    return null;
+  }
+}
+
+export async function loomDelete(node_id: string): Promise<void> {
+  try {
+    await apiTree.delete(node_id);
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+export async function loomStar(node_id: string, on: boolean): Promise<void> {
+  try {
+    await apiTree.star(node_id, on);
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+export async function loomNote(node_id: string, text: string): Promise<void> {
+  try {
+    await apiTree.note(node_id, text);
+  } catch (e) {
+    loomTree.error = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Regenerate the active assistant: send a fresh ``generate`` request
+ *  whose ``parent_node_id`` is the user-parent of the active assistant.
+ *  N=1 by default.  Recipe is implicit (current rack) unless
+ *  ``opts.recipe_override`` is set, in which case the engine applies
+ *  the recipe-override modifier on top of the parent's recipe. */
+export async function loomRegenerateActive(
+  n: number = 1,
+  opts: { recipe_override?: string | null } = {},
+): Promise<void> {
+  if (loomTree.rev <= 0) return;
+  const activeId = loomTree.active_node_id;
+  if (!activeId) return;
+  const node = loomTree.nodes.get(activeId);
+  if (!node || node.role !== "assistant") return;
+  const parentId = node.parent_id;
+  if (!parentId) return;
+  // The user turn (parent) carries the prompt text we need to replay.
+  const parent = loomTree.nodes.get(parentId);
+  if (!parent || parent.role !== "user") return;
+  await sendGenerate(parent.text, {
+    parent_node_id: parentId,
+    n,
+    recipe_override: opts.recipe_override ?? undefined,
+  });
+}
+
+/** Regenerate under a specific user node (the "fan out" entry point —
+ *  for siblings of an arbitrary user turn).  Mirrors the engine's
+ *  ``generate(parent_node_id=user_id)`` semantics. */
+export async function loomRegenerateFromUser(
+  userNodeId: string,
+  opts: { n?: number; recipe_override?: string | null } = {},
+): Promise<void> {
+  if (loomTree.rev <= 0) return;
+  const user = loomTree.nodes.get(userNodeId);
+  if (!user || user.role !== "user") return;
+  await sendGenerate(user.text, {
+    parent_node_id: userNodeId,
+    n: opts.n ?? 1,
+    recipe_override: opts.recipe_override ?? undefined,
+  });
+}
+
 // ============================================================ input history ===
 
 /** Cap on the recall ring.  Same order of magnitude as readline's
@@ -849,6 +1215,30 @@ function _currentWriteTurn(): ChatTurn | null {
  * behavior via ``onWsMessage``. */
 function handleWsMessage(msg: WSServerMessage): void {
   switch (msg.type) {
+    case "tree_mutated": {
+      // Apply the delta; on rev gap, full re-fetch.
+      const ok = applyTreeDelta(msg);
+      if (!ok) void refreshLoomTree();
+      return;
+    }
+    case "node_created": {
+      // Pre-allocate the node so n-way regen render slots exist before
+      // token events tagged with this node_id arrive.  The full node
+      // body lands via a subsequent ``tree_mutated`` (added) event.
+      if (!loomTree.nodes.has(msg.node_id)) {
+        loomTree.nodes.set(msg.node_id, {
+          id: msg.node_id,
+          parent_id: msg.parent_id,
+          role: msg.role,
+          text: "",
+        });
+        const sibs = loomTree.children_of.get(msg.parent_id) ?? [];
+        if (!sibs.includes(msg.node_id)) {
+          loomTree.children_of.set(msg.parent_id, [...sibs, msg.node_id]);
+        }
+      }
+      return;
+    }
     case "started": {
       genStatus.active = true;
       genStatus.tokensSoFar = 0;
@@ -858,6 +1248,13 @@ function handleWsMessage(msg: WSServerMessage): void {
       genStatus.finishReason = null;
       liveTokenStream.responseTokens = [];
       liveTokenStream.thinkingTokens = [];
+      // Loom: record the target node so tree-driven sync attaches the
+      // streaming turn to the right active-path entry, and so the chat
+      // panel's "streaming" highlight fires on the right turn.
+      if (msg.node_id) {
+        loomTree.pendingNodeId = msg.node_id;
+        syncChatLogFromTree();
+      }
       if (abState.processingAb && abState.pendingTurnIdx !== null) {
         // A/B shadow run: attach a fresh assistant abPair to the steered
         // turn that just finished.  Don't append a new top-level turn —
@@ -874,9 +1271,23 @@ function handleWsMessage(msg: WSServerMessage): void {
         // pendingIndex points at the steered turn so the streaming
         // pulse on Chat.svelte still highlights "this turn is live".
         chatLog.pendingIndex = abState.pendingTurnIdx;
+      } else if (loomTree.rev > 0 && msg.node_id) {
+        // Loom path: the assistant node is already created server-side
+        // (we got a ``tree_mutated`` add event before ``started``).  The
+        // active-path sync seeds an empty turn for it; ensure the turn
+        // has token arrays ready so the ``token`` handler can append.
+        syncChatLogFromTree();
+        const pidx = chatLog.pendingIndex;
+        if (pidx !== null) {
+          const turn = chatLog.turns[pidx];
+          if (turn) {
+            turn.tokens = turn.tokens ?? [];
+            turn.thinkingTokens = turn.thinkingTokens ?? [];
+          }
+        }
       } else {
-        // Normal run: append a fresh assistant turn so streamed tokens
-        // have a home.
+        // Normal (pre-loom) run: append a fresh assistant turn so
+        // streamed tokens have a home.
         chatLog.turns = [
           ...chatLog.turns,
           { role: "assistant", text: "", tokens: [], thinkingTokens: [] },
@@ -981,6 +1392,15 @@ function handleWsMessage(msg: WSServerMessage): void {
       const wasShadow = abState.processingAb;
       const steeredIdx = chatLog.pendingIndex;
       chatLog.pendingIndex = null;
+      // Loom: drop the pending node-id pointer; the server-emitted
+      // ``tree_mutated`` (finalize) event has already merged the
+      // finalised text + finish_reason into the node.
+      if (loomTree.pendingNodeId) {
+        loomTree.pendingNodeId = null;
+        // Re-sync so the "streaming" decoration on the just-finished
+        // turn switches off.
+        if (loomTree.rev > 0) syncChatLogFromTree();
+      }
 
       if (wasShadow) {
         // Shadow gen done — clear the A/B routing flags.  Do NOT touch
@@ -1000,16 +1420,42 @@ function handleWsMessage(msg: WSServerMessage): void {
       void refreshCorrelation();
       applyPendingActions();
 
-      // If A/B is on and this was the steered run that just finished,
-      // dispatch the unsteered shadow generate.  The shadow now builds
-      // its prompt from chatLog directly (full message-list playback)
-      // rather than replaying a single input string — that's what makes
-      // mid-conversation A/B comparison work.
+      // Phase 5: auto-regen replaces the A/B shadow path.  When the
+      // auto-regen toggle is on, fire one regen with the configured
+      // override (mode-string or partial recipe).  The engine drops
+      // the result as a sibling under the same user-parent so the
+      // pinned-comparison pane picks it up automatically.  Legacy A/B
+      // shadow (when ``abState.enabled``) is preserved as a parallel
+      // fallback for surfaces that haven't migrated yet — both paths
+      // are gated independently so a user can have either or both.
       if (
+        autoRegenState.enabled &&
+        loomTree.rev > 0 &&
+        loomTree.active_node_id
+      ) {
+        const override = currentRecipeOverride();
+        if (override !== null) {
+          // Pin the new sibling so the chat's right column shows it.
+          // We pin after the regen lands; ``done`` from the regen will
+          // set ``loomTree.active_node_id`` to the new sibling.
+          const activeBefore = loomTree.active_node_id;
+          void (async () => {
+            await loomRegenerateActive(1, { recipe_override: override });
+            // The engine moves the active node to the new sibling.
+            if (
+              loomTree.active_node_id &&
+              loomTree.active_node_id !== activeBefore
+            ) {
+              pinNodeForComparison(loomTree.active_node_id);
+            }
+          })();
+        }
+      } else if (
         abState.enabled &&
         steeredIdx !== null &&
         chatLog.turns[steeredIdx]?.role === "assistant"
       ) {
+        // Legacy A/B path — unchanged so today's users see no regression.
         void _sendShadowGenerate(steeredIdx);
       }
       return;
@@ -1037,6 +1483,10 @@ function handleWsMessage(msg: WSServerMessage): void {
         ];
       }
       chatLog.pendingIndex = null;
+      if (loomTree.pendingNodeId) {
+        loomTree.pendingNodeId = null;
+        if (loomTree.rev > 0) syncChatLogFromTree();
+      }
       abState.processingAb = false;
       abState.pendingTurnIdx = null;
       // Apply any pending actions even on error so the UI doesn't get
@@ -1051,7 +1501,7 @@ function handleWsMessage(msg: WSServerMessage): void {
  * from the rack live, layers the SamplingConfig overrides when one-shot
  * mode is on, and routes everything through the singleton connection. */
 export async function sendGenerate(
-  input: string,
+  input: string | unknown,
   opts: {
     stateless?: boolean;
     raw?: boolean;
@@ -1059,6 +1509,14 @@ export async function sendGenerate(
      * ``""`` for unsteered (A/B mode); ``null``/``undefined`` to use the
      * rack. */
     steering?: string | null;
+    /** Loom: attach the result as a child of this node.  ``null`` /
+     *  absent = active node. */
+    parent_node_id?: string | null;
+    /** Loom: n-way regen.  Default 1. */
+    n?: number;
+    /** Loom phase 5: recipe-override modifier — mode string or partial
+     *  recipe expression. */
+    recipe_override?: string | null;
   } = {},
 ): Promise<void> {
   const sock = await ensureWebSocket();
@@ -1077,8 +1535,13 @@ export async function sendGenerate(
   // their target before the first token lands.
   genStatus.maxTokens = sampling?.max_tokens ?? samplingState.max_tokens;
   // Push the user turn so the UI has something to render before the WS
-  // started event lands.
-  chatLog.turns = [...chatLog.turns, { role: "user", text: input }];
+  // started event lands.  Skip the optimistic push when the server owns
+  // the tree (it will emit ``tree_mutated`` with the added user node
+  // and we'll sync from there) or when ``input`` is a messages list
+  // (A/B shadow path — no fresh user turn to display).
+  if (loomTree.rev <= 0 && typeof input === "string") {
+    chatLog.turns = [...chatLog.turns, { role: "user", text: input }];
+  }
   // Remember the input verbatim so the A/B path can replay it as the
   // shadow gen.  Only meaningful when ``abState.enabled``; otherwise it's
   // dead weight that's free to keep up to date.
@@ -1094,6 +1557,15 @@ export async function sendGenerate(
     thinking: samplingState.thinking ?? false,
     stateless: opts.stateless ?? false,
     raw: opts.raw ?? false,
+    // Loom fields ride only when caller explicitly set them (server
+    // ignores unknown fields, but the spec keeps them optional).
+    ...(opts.parent_node_id !== undefined
+      ? { parent_node_id: opts.parent_node_id }
+      : {}),
+    ...(opts.n !== undefined ? { n: opts.n } : {}),
+    ...(opts.recipe_override !== undefined
+      ? { recipe_override: opts.recipe_override }
+      : {}),
   };
   const send = () => sock.send(JSON.stringify(payload));
   if (sock.readyState === WebSocket.OPEN) send();
@@ -1318,30 +1790,58 @@ async function _sendShadowGenerate(steeredIdx: number): Promise<void> {
 
 // =================================================== persistence ========
 //
-// Chat log + highlight selection are persisted to localStorage so a page
-// reload doesn't wipe the conversation.  Server-side history (in
-// ``session.history``) is the authoritative state for generation
-// context, but there's no GET endpoint to retrieve it as turn objects —
-// the local serialized log is what we render.  Scoping the storage key
-// by ``model_id`` keeps a model swap from leaking turns across runs.
+// v2 (loom):
+//   localStorage is a *cache* of the server's loom tree.  On bootstrap we
+//   fetch from the server and reconcile (server wins) — this retires the
+//   v1 "server-restart guard" hack that dropped the local snapshot when
+//   server-side history was empty.  The server tree is now the only
+//   authority; localStorage is for first-paint while the fetch is in
+//   flight.
+//
+// v1 → v2 migration:
+//   The v1 snapshot stored a flat ChatTurn[].  On load we hydrate it as
+//   a single-branch tree (root → user_1 → assistant_1 → user_2 → ...)
+//   so the sidebar renders immediately even before the server tree
+//   fetch returns.  When the server tree lands (rev > 0) it overwrites
+//   the hydrated shape — no data loss either way.
 //
 // We persist on a debounced effect rather than synchronously per
 // mutation so token-streaming gens don't write hundreds of times per
 // turn — once per ~250 ms is enough to survive an unplanned reload.
 
-const PERSIST_VERSION = 1;
+const PERSIST_VERSION = 2;
 const PERSIST_KEY_PREFIX = "saklas.chat.v" + PERSIST_VERSION + ".";
+/** Legacy v1 key prefix — used for the migration read on load. */
+const PERSIST_KEY_PREFIX_V1 = "saklas.chat.v1.";
 
 function persistKey(): string | null {
   const id = sessionState.info?.model_id;
   return id ? PERSIST_KEY_PREFIX + id : null;
 }
 
-interface PersistedSnapshot {
-  version: number;
+function persistKeyV1(): string | null {
+  const id = sessionState.info?.model_id;
+  return id ? PERSIST_KEY_PREFIX_V1 + id : null;
+}
+
+interface PersistedSnapshotV1 {
+  version: 1;
   model_id: string;
   saved_at: number;
   turns: ChatTurn[];
+  highlight: {
+    target: string | null;
+    compareTarget: string | null;
+    compareTwo: boolean;
+  };
+}
+
+interface PersistedSnapshotV2 {
+  version: 2;
+  model_id: string;
+  saved_at: number;
+  /** Cached loom tree.  ``null`` until the first server fetch lands. */
+  tree: LoomTreeJSON | null;
   highlight: {
     target: string | null;
     compareTarget: string | null;
@@ -1366,41 +1866,129 @@ function safeLocalStorageSet(key: string, value: string): void {
   }
 }
 
-function loadPersistedChat(): void {
-  const key = persistKey();
-  if (!key) return;
-  const raw = safeLocalStorageGet(key);
-  if (!raw) return;
+function safeLocalStorageRemove(key: string): void {
   try {
-    const parsed = JSON.parse(raw) as PersistedSnapshot;
-    if (parsed.version !== PERSIST_VERSION) return;
-    if (parsed.model_id !== sessionState.info?.model_id) return;
-    // Server-restart guard: if the server's history is empty but the
-    // local snapshot has user turns, the server was restarted while
-    // the page was closed.  Replaying the visual log would lie about
-    // generation context (server-side history is gone, next gen would
-    // see no prior turns).  Drop the local snapshot to match reality.
-    const serverHistory = sessionState.info?.history_length ?? 0;
-    const hasUserTurns =
-      Array.isArray(parsed.turns) &&
-      parsed.turns.some((t) => t?.role === "user");
-    if (serverHistory === 0 && hasUserTurns) {
-      try { globalThis.localStorage?.removeItem(key); } catch { /* ignore */ }
-      return;
+    globalThis.localStorage?.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** ULID-like throwaway id for synthetic migration nodes.  We don't need
+ *  Crockford-base32 + monotonicity here — the server's tree fetch will
+ *  overwrite this shape immediately, so unique-per-call is enough. */
+function _localId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+/** Hydrate a v1 linear chat log as a single-branch loom tree.  No data
+ *  loss — every user/assistant turn becomes a node with a synthetic id,
+ *  parent-chained root-down.  Sets ``rev`` to 0 because the snapshot
+ *  isn't authoritative; the server fetch will overwrite. */
+function hydrateV1ChatAsLinearTree(turns: ChatTurn[]): void {
+  loomTree.nodes.clear();
+  loomTree.children_of.clear();
+  const rootId = _localId("root");
+  loomTree.nodes.set(rootId, {
+    id: rootId,
+    parent_id: null,
+    role: "system",
+    text: "",
+  });
+  loomTree.root_id = rootId;
+  let parent = rootId;
+  for (const t of turns) {
+    if (!t || (t.role !== "user" && t.role !== "assistant" && t.role !== "system")) continue;
+    const id = _localId(t.role);
+    loomTree.nodes.set(id, {
+      id,
+      parent_id: parent,
+      role: t.role,
+      text: t.text ?? "",
+      finish_reason: t.finishReason ?? null,
+      applied_steering: t.appliedSteering ?? null,
+      aggregate_readings: t.aggregateReadings,
+    });
+    const sibs = loomTree.children_of.get(parent) ?? [];
+    loomTree.children_of.set(parent, [...sibs, id]);
+    parent = id;
+  }
+  loomTree.active_node_id = parent;
+  // Local hydration is rev 0 — server fetch will bump it.
+  loomTree.rev = 0;
+  recomputeActivePath();
+}
+
+function loadPersistedChat(): void {
+  const v2key = persistKey();
+  const v1key = persistKeyV1();
+  if (!v2key) return;
+  // Try v2 first; fall back to v1 migration.
+  let parsed: PersistedSnapshotV2 | null = null;
+  const v2raw = safeLocalStorageGet(v2key);
+  if (v2raw) {
+    try {
+      const tmp = JSON.parse(v2raw) as PersistedSnapshotV2;
+      if (tmp.version === 2 && tmp.model_id === sessionState.info?.model_id) {
+        parsed = tmp;
+      }
+    } catch {
+      /* corrupt — fall through to v1 migration */
     }
-    if (Array.isArray(parsed.turns)) {
-      // Sanitize: drop any pendingIndex spillage; in-flight turns from
-      // the previous session can't be resumed.
-      chatLog.turns = parsed.turns.filter(
-        (t) => t && typeof t === "object" && typeof (t as ChatTurn).role === "string",
-      );
-      chatLog.pendingIndex = null;
+  }
+  if (parsed) {
+    if (parsed.tree) {
+      // First-paint cache: hydrate without overwriting future server
+      // fetches.  ``rev`` is preserved from cache, but ``refreshLoomTree``
+      // is the authoritative source — its result overwrites.
+      applyTreeSnapshot(parsed.tree);
+      // Snapshot may have been from an in-flight gen; clear pendingNodeId
+      // so a stale "streaming" indicator doesn't ghost the UI.
+      loomTree.pendingNodeId = null;
     }
     if (parsed.highlight) {
       highlightState.target = parsed.highlight.target ?? null;
       highlightState.compareTarget = parsed.highlight.compareTarget ?? null;
       highlightState.compareTwo = !!parsed.highlight.compareTwo;
     }
+    return;
+  }
+  if (!v1key) return;
+  const v1raw = safeLocalStorageGet(v1key);
+  if (!v1raw) return;
+  try {
+    const v1 = JSON.parse(v1raw) as PersistedSnapshotV1;
+    if (v1.version !== 1) return;
+    if (v1.model_id !== sessionState.info?.model_id) return;
+    // Hydrate the linear log as a single-branch tree.  Don't drop the
+    // snapshot on server-empty-history any more — the server will
+    // either accept the tree on next mutation or fetch its own and
+    // overwrite ours.
+    if (Array.isArray(v1.turns)) {
+      hydrateV1ChatAsLinearTree(
+        v1.turns.filter(
+          (t) =>
+            t && typeof t === "object" && typeof (t as ChatTurn).role === "string",
+        ),
+      );
+      // Also seed chatLog.turns directly so Chat.svelte has content on
+      // first paint even before applyTreeSnapshot rewrites — the
+      // hydrate above leaves rev at 0, so syncChatLogFromTree is a
+      // no-op.
+      chatLog.turns = v1.turns.filter(
+        (t) => t && typeof t === "object" && typeof (t as ChatTurn).role === "string",
+      );
+      chatLog.pendingIndex = null;
+    }
+    if (v1.highlight) {
+      highlightState.target = v1.highlight.target ?? null;
+      highlightState.compareTarget = v1.highlight.compareTarget ?? null;
+      highlightState.compareTwo = !!v1.highlight.compareTwo;
+    }
+    // Drop the v1 key once we've migrated — next persist writes v2.
+    safeLocalStorageRemove(v1key);
   } catch {
     // Corrupt blob — drop it on the floor.
   }
@@ -1413,11 +2001,31 @@ function schedulePersist(): void {
     _persistTimer = null;
     const key = persistKey();
     if (!key) return;
-    const snapshot: PersistedSnapshot = {
-      version: PERSIST_VERSION,
+    // Serialise the loom tree from the SvelteMap-backed slice.  Use
+    // the server's ``to_dict`` list shape so a future reload (or any
+    // server that consumes this cache) is consistent with the
+    // authoritative wire format.
+    let tree: LoomTreeJSON | null = null;
+    if (loomTree.rev > 0 && loomTree.root_id && loomTree.active_node_id) {
+      const nodes: LoomNodeJSON[] = [];
+      for (const [, n] of loomTree.nodes) nodes.push(n);
+      const children_of: Record<string, string[]> = {};
+      for (const [pid, ids] of loomTree.children_of)
+        children_of[pid] = [...ids];
+      tree = {
+        root_id: loomTree.root_id,
+        active_node_id: loomTree.active_node_id,
+        rev: loomTree.rev,
+        nodes,
+        children_of,
+        model_id: loomTree.modelId ?? sessionState.info?.model_id,
+      };
+    }
+    const snapshot: PersistedSnapshotV2 = {
+      version: 2,
       model_id: sessionState.info!.model_id,
       saved_at: Date.now(),
-      turns: chatLog.turns,
+      tree,
       highlight: {
         target: highlightState.target,
         compareTarget: highlightState.compareTarget,
@@ -1444,6 +2052,9 @@ function attachPersistence(): void {
         void t.tokens?.length;
         void t.thinkingTokens?.length;
       }
+      // Loom tree changes drive the v2 persisted shape; touch rev so
+      // every mutation queues a save.
+      void loomTree.rev;
       void highlightState.target;
       void highlightState.compareTarget;
       void highlightState.compareTwo;
@@ -1461,6 +2072,260 @@ function attachPersistence(): void {
 
 let _persistArmed = false;
 
+// =================================================== loom UI state ========
+
+/** Sidebar-modal kind, also pokeable from App.svelte via the global
+ *  Ctrl+R/E/B/N/D shortcuts.  ``null`` = no modal. */
+export type LoomModalKind =
+  | null
+  | "regenerate"
+  | "edit"
+  | "branch"
+  | "delete"
+  | "note"
+  | "navpicker"
+  | "search";
+
+export interface LoomUiState {
+  sidebarOpen: boolean;
+  /** Request flag: when the App's Ctrl+R/etc handlers want to open a
+   *  modal inside the sidebar, they bump this counter and the sidebar
+   *  reacts.  Counter lets the same modal be re-requested back-to-back
+   *  (e.g. user closes regen modal then hits Ctrl+R again). */
+  modalRequest: {
+    seq: number;
+    kind: LoomModalKind;
+    nodeId: string | null;
+    text: string;
+    n: number;
+  };
+}
+
+/** Visibility toggle for the LoomSidebar — wired to a Topbar button.
+ *  Persisted in-memory only; collapsed-by-default keeps the first-paint
+ *  shape stable for users who don't care about loom. */
+export const loomUiState: LoomUiState = $state({
+  sidebarOpen: false,
+  modalRequest: { seq: 0, kind: null, nodeId: null, text: "", n: 1 },
+});
+
+// ============================================================ phase 5 ====
+//
+// Phase-5 loom flourishes — steering-delta edge labels (lazy cache),
+// filter grammar (server-side), branch pinning to the comparison pane,
+// auto-regen recipe-override modifier.  All in-memory only; not
+// persisted across reloads (the engine recomputes from primitives).
+
+/** Lazy cache of steering-delta labels for `parent_id|child_id` edges.
+ *  The sidebar fetches on first render; SvelteMap so individual entries
+ *  trigger reactivity in the edge components. */
+export const edgeLabelCache: Map<string, string> = $state(new SvelteMap());
+
+/** In-flight fetch dedupe — keys we've already kicked off a request
+ *  for.  Cleared after the response lands so retries are possible
+ *  when the rev changes. */
+const _edgeLabelInFlight: Set<string> = new SvelteSet();
+
+function _edgeKey(parentId: string, childId: string): string {
+  return `${parentId}|${childId}`;
+}
+
+/** Fetch (and cache) the steering-delta label for an edge.  Returns
+ *  immediately when the entry is already cached.  Bumps reactivity
+ *  when the label arrives so all consumers re-render. */
+export function fetchEdgeLabel(parentId: string, childId: string): void {
+  if (loomTree.unavailable) return;
+  const key = _edgeKey(parentId, childId);
+  if (edgeLabelCache.has(key)) return;
+  if (_edgeLabelInFlight.has(key)) return;
+  _edgeLabelInFlight.add(key);
+  apiTree
+    .edgeLabel(parentId, childId)
+    .then((r) => {
+      edgeLabelCache.set(key, r.label);
+    })
+    .catch(() => {
+      // Server pre-phase-5 or transient failure — cache an empty
+      // string so we don't retry every render.
+      edgeLabelCache.set(key, "");
+    })
+    .finally(() => {
+      _edgeLabelInFlight.delete(key);
+    });
+}
+
+/** Bust the cache when the tree mutates — the server's
+ *  ``applied_steering`` strings can shift, especially after
+ *  ``edit``/``regen``.  Wired into ``applyTreeDelta``. */
+function invalidateEdgeLabels(): void {
+  edgeLabelCache.clear();
+  _edgeLabelInFlight.clear();
+}
+
+// ----------------------------------------------------- filter --------
+
+export interface FilterState {
+  /** User-entered expression string.  Empty = filter off. */
+  expr: string;
+  /** Server-resolved matching ids.  When ``expr`` is empty this is
+   *  ``null`` — the UI then renders every node at full opacity. */
+  matchingIds: Set<string> | null;
+  /** Last parse / fetch error to surface in the input. */
+  error: string | null;
+  /** Pending state for the spinner. */
+  loading: boolean;
+}
+
+export const filterState: FilterState = $state({
+  expr: "",
+  matchingIds: null,
+  error: null,
+  loading: false,
+});
+
+export async function applyTreeFilter(expr: string): Promise<void> {
+  filterState.expr = expr;
+  const trimmed = expr.trim();
+  if (!trimmed) {
+    filterState.matchingIds = null;
+    filterState.error = null;
+    filterState.loading = false;
+    return;
+  }
+  filterState.loading = true;
+  filterState.error = null;
+  try {
+    const r = await apiTree.filter(trimmed);
+    filterState.matchingIds = new Set(r.matching_node_ids);
+  } catch (e) {
+    if (e instanceof ApiError) {
+      filterState.error =
+        e.body && typeof e.body === "object" && "detail" in (e.body as object)
+          ? String((e.body as { detail: unknown }).detail)
+          : e.message;
+    } else {
+      filterState.error = e instanceof Error ? e.message : String(e);
+    }
+    // Leave previous matches in place so the UI doesn't flicker; the
+    // error message surfaces the parse failure.
+  } finally {
+    filterState.loading = false;
+  }
+}
+
+export function clearTreeFilter(): void {
+  filterState.expr = "";
+  filterState.matchingIds = null;
+  filterState.error = null;
+  filterState.loading = false;
+}
+
+// ------------------------------------------- branch pinning ----------
+
+/** Pinned-sibling state for the right-column comparison pane.  A node
+ *  id (or ``null`` to default to A/B-style shadow).  Set via the
+ *  context menu's "Pin to comparison" action. */
+export const pinnedComparison: { nodeId: string | null } = $state({
+  nodeId: null,
+});
+
+export function pinNodeForComparison(nodeId: string | null): void {
+  pinnedComparison.nodeId = nodeId;
+}
+
+export function unpinComparison(): void {
+  pinnedComparison.nodeId = null;
+}
+
+// ------------------------------- node multi-select for diff ---------
+
+/** Multi-select for the cross-branch diff drawer.  Right-click on an
+ *  assistant node toggles its membership; "Compare selected" opens the
+ *  drawer with these ids.  Clears on drawer close or successful diff. */
+export const nodeSelection: { ids: string[] } = $state({ ids: [] });
+
+export function toggleNodeSelection(nodeId: string): void {
+  const idx = nodeSelection.ids.indexOf(nodeId);
+  if (idx === -1) nodeSelection.ids = [...nodeSelection.ids, nodeId];
+  else nodeSelection.ids = nodeSelection.ids.filter((id) => id !== nodeId);
+}
+
+export function clearNodeSelection(): void {
+  nodeSelection.ids = [];
+}
+
+// ----------------------------------- auto-regen recipe-override -----
+
+/** Built-in auto-regen modes from the engine. */
+export type AutoRegenMode =
+  | "unsteered"
+  | "inverted"
+  | "reseed"
+  | "cool"
+  | "hot"
+  | "custom";
+
+export interface AutoRegenState {
+  /** Master toggle (replaces the old A/B toggle one-for-one).  Default
+   *  off — the previous A/B behaviour resumed by toggling on with mode
+   *  ``"unsteered"``. */
+  enabled: boolean;
+  mode: AutoRegenMode;
+  /** Custom-mode body — a partial-recipe expression (e.g. ``"seed=42,
+   *  temperature=1.5"``).  Ignored when ``mode != "custom"``. */
+  custom: string;
+}
+
+export const autoRegenState: AutoRegenState = $state({
+  enabled: false,
+  mode: "unsteered",
+  custom: "",
+});
+
+export function toggleAutoRegen(): void {
+  autoRegenState.enabled = !autoRegenState.enabled;
+}
+
+export function setAutoRegenMode(mode: AutoRegenMode): void {
+  autoRegenState.mode = mode;
+}
+
+export function setAutoRegenCustom(text: string): void {
+  autoRegenState.custom = text;
+}
+
+/** Render the configured recipe-override the engine consumes.  Returns
+ *  ``null`` when auto-regen is off — callers shouldn't dispatch a
+ *  shadow regen in that case. */
+export function currentRecipeOverride(): string | null {
+  if (!autoRegenState.enabled) return null;
+  if (autoRegenState.mode === "custom") {
+    const v = autoRegenState.custom.trim();
+    return v || null;
+  }
+  return autoRegenState.mode;
+}
+
+export function toggleLoomSidebar(): void {
+  loomUiState.sidebarOpen = !loomUiState.sidebarOpen;
+}
+
+/** Bump the modalRequest signal so the LoomSidebar opens the named
+ *  modal with the given seed values.  Auto-opens the sidebar. */
+export function requestLoomModal(
+  kind: LoomModalKind,
+  opts: { nodeId?: string | null; text?: string; n?: number } = {},
+): void {
+  loomUiState.sidebarOpen = true;
+  loomUiState.modalRequest = {
+    seq: loomUiState.modalRequest.seq + 1,
+    kind,
+    nodeId: opts.nodeId ?? loomTree.active_node_id,
+    text: opts.text ?? "",
+    n: opts.n ?? 1,
+  };
+}
+
 // ============================================================ misc ======
 
 /** Bootstrap the dashboard — call once on App mount.  Resolves only once
@@ -1471,6 +2336,8 @@ export async function bootstrap(): Promise<void> {
   // (it's scoped by model_id), so we serialize that step.  The other
   // refreshes parallelize as before.
   await refreshSession();
+  // First-paint: load persisted (v2 cache or v1 migration) before
+  // attaching the persist effect so we don't immediately overwrite.
   loadPersistedChat();
   attachPersistence();
   await Promise.allSettled([
@@ -1478,5 +2345,8 @@ export async function bootstrap(): Promise<void> {
     refreshProbeList(),
     refreshCorrelation(),
     refreshPacks(),
+    // Server tree wins — fetch and reconcile.  404 is a quiet no-op
+    // (server pre-loom); other failures surface via loomTree.error.
+    refreshLoomTree(),
   ]);
 }

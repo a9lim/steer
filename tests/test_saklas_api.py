@@ -306,7 +306,8 @@ class TestWebSocket:
     def _attach_generate(self, session, tokens):
         """Install a fake ``session.generate`` that drives ``on_token``."""
         def _gen(input, *, steering=None, sampling=None, stateless=False,
-                 raw=False, thinking=None, on_token=None):
+                 raw=False, thinking=None, on_token=None,
+                 parent_node_id=None, n=1):
             for i, tok in enumerate(tokens):
                 on_token(tok, False, 1000 + i, None, None)
                 time.sleep(0.001)

@@ -17,13 +17,17 @@
   import { onMount, untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import {
+    autoRegenState,
     chatLog,
     highlightState,
+    loomTree,
+    pinnedComparison,
     setHighlightTarget,
     setCompareTarget,
     toggleCompareTwo,
     abState,
     toggleAb,
+    unpinComparison,
     probeRack,
     sendGenerate,
     sendStop,
@@ -173,6 +177,49 @@
    * if no ab pair exists we still want to render two columns when the
    * mode is on, so ``abVisible`` is just the toggle. */
   const abEnabled = $derived(abState.enabled);
+
+  /** Phase-5: the right column renders either the pinned sibling's
+   *  subtree path or — when pinning is off — the legacy A/B shadow.
+   *  Auto-regen overwrites the pin with each new auto-generated
+   *  sibling, so the same pane shows whichever sibling is "the other
+   *  one" at this moment. */
+  const pinnedActive = $derived(
+    pinnedComparison.nodeId !== null &&
+    loomTree.nodes.has(pinnedComparison.nodeId),
+  );
+
+  /** Render the conversation up to (and including) the pinned node by
+   *  walking parent pointers from the pinned id back to root.  Skips
+   *  the synthetic root.  Used by the right column when pinned. */
+  const pinnedPath = $derived.by<ChatTurn[]>(() => {
+    if (!pinnedActive || !pinnedComparison.nodeId) return [];
+    const out: ChatTurn[] = [];
+    let cursor: string | null = pinnedComparison.nodeId;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const node = loomTree.nodes.get(cursor);
+      if (!node) break;
+      // Skip the synthetic root.
+      if (!(node.parent_id === null && node.role === "system" && !node.text)) {
+        out.push({
+          role: node.role,
+          text: node.text ?? "",
+          appliedSteering: node.applied_steering ?? null,
+          aggregateReadings: node.aggregate_readings ?? undefined,
+          finishReason: node.finish_reason ?? undefined,
+        });
+      }
+      cursor = node.parent_id;
+    }
+    return out.reverse();
+  });
+
+  /** The right column is visible when EITHER auto-regen is on, a node
+   *  is pinned, or legacy A/B is on. */
+  const twoColumns = $derived(
+    pinnedActive || autoRegenState.enabled || abEnabled,
+  );
 
   // ----------------------------------------------------------- per-turn UI --
 
@@ -407,17 +454,17 @@
 
   <div
     class="log"
-    class:ab={abEnabled}
+    class:ab={twoColumns}
     bind:this={logRef}
     onscroll={onScroll}
     role="log"
     aria-live="polite"
   >
-    {#if abEnabled}
-      <!-- A/B split: two columns of the same conversation, primary on
-           left, unsteered shadow on right.  When ``abPair`` is unset on
-           an assistant turn the right column shows a placeholder so the
-           grid stays aligned. -->
+    {#if twoColumns}
+      <!-- Two-column split.  Right column is the *pinned* sibling's
+           subtree path when pinning is on, the auto-regen output's
+           path when auto-regen is on (auto-regen pins on done), or the
+           legacy A/B shadow when only A/B is on. -->
       <div class="ab-grid">
         <div class="ab-col ab-primary">
           {#each chatLog.turns as turn, turnIdx (turnIdx)}
@@ -425,18 +472,34 @@
           {/each}
         </div>
         <div class="ab-col ab-shadow">
-          {#each chatLog.turns as turn, turnIdx (turnIdx)}
-            {#if turn.role === "user" || turn.role === "system"}
-              {@render bubble(turn, turnIdx, false)}
-            {:else if turn.abPair}
-              {@render bubble(turn.abPair, turnIdx, true)}
-            {:else}
-              <div class="msg assistant placeholder" aria-hidden="true">
-                <span class="role">assistant (unsteered)</span>
-                <span class="placeholder-text">— pending —</span>
-              </div>
-            {/if}
-          {/each}
+          {#if pinnedActive}
+            <header class="pin-header">
+              <span class="pin-tag">pinned</span>
+              <code class="pin-id">{pinnedComparison.nodeId?.slice(0, 12)}</code>
+              <button
+                type="button"
+                class="pin-unpin"
+                onclick={unpinComparison}
+                title="Unpin"
+              >unpin</button>
+            </header>
+            {#each pinnedPath as turn, idx (idx)}
+              {@render bubble(turn, idx, true)}
+            {/each}
+          {:else}
+            {#each chatLog.turns as turn, turnIdx (turnIdx)}
+              {#if turn.role === "user" || turn.role === "system"}
+                {@render bubble(turn, turnIdx, false)}
+              {:else if turn.abPair}
+                {@render bubble(turn.abPair, turnIdx, true)}
+              {:else}
+                <div class="msg assistant placeholder" aria-hidden="true">
+                  <span class="role">assistant (alt)</span>
+                  <span class="placeholder-text">— pending —</span>
+                </div>
+              {/if}
+            {/each}
+          {/if}
         </div>
       </div>
     {:else}
@@ -660,6 +723,40 @@
     flex-direction: column;
     gap: 0.7em;
     min-width: 0;
+  }
+  .pin-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em 0.5em;
+    background: rgba(167, 139, 250, 0.10);
+    border: 1px solid var(--accent-purple);
+    border-radius: 3px;
+    color: var(--accent-purple);
+    font-size: var(--font-size-tiny);
+    margin-bottom: 0.4em;
+  }
+  .pin-tag {
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+  }
+  .pin-id {
+    color: var(--accent-yellow);
+    flex: 1 1 auto;
+  }
+  .pin-unpin {
+    background: transparent;
+    color: var(--fg-dim);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.4em;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-tiny);
+    cursor: pointer;
+  }
+  .pin-unpin:hover {
+    color: var(--accent-red);
+    border-color: var(--accent-red);
   }
   .ab-col.ab-shadow .msg.assistant {
     border-left-color: var(--accent-purple);

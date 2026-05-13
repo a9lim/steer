@@ -454,6 +454,66 @@ def _build_config_parser(parser: argparse.ArgumentParser) -> None:
     validate.add_argument("file", help="Path to YAML config file")
 
 
+# --- transcript subtree --------------------------------------------------
+
+def _build_transcript_parser(parser: argparse.ArgumentParser) -> None:
+    """``saklas transcript`` — replay / inspect saved tree paths.
+
+    Phase 5 ships ``run`` only; future verbs (``ls``, ``diff``) compose
+    on top of the same schema.
+    """
+    sub = parser.add_subparsers(dest="transcript_cmd", required=False, metavar="VERB")
+
+    run = sub.add_parser(
+        "run",
+        help="Replay a transcript on the current session and report readings",
+        description=(
+            "Load a YAML transcript, replay each user turn with the recorded "
+            "recipe, and report per-turn readings against the recorded ones."
+        ),
+    )
+    run.add_argument("path", help="Path to a saklas_transcript YAML file")
+    # Override the model arg shape so transcript replay can fall back to
+    # the embedded ``model_id`` header (the common case) instead of
+    # forcing the user to repeat it on the command line.  When the
+    # transcript also lacks ``model_id`` the runner fails with a clear
+    # message; that's caught early so we don't load a model just to
+    # complain about it after.
+    run.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="HuggingFace model ID or local path (defaults to transcript's `model_id`)",
+    )
+    run.add_argument(
+        "-q", "--quantize",
+        choices=["4bit", "8bit"],
+        default=None,
+        help="Quantization mode (default: bf16/fp16)",
+    )
+    run.add_argument(
+        "-d", "--device",
+        default="auto",
+        help="Device: auto (detect), cuda, mps, or cpu (default: auto)",
+    )
+    run.add_argument(
+        "-p", "--probes",
+        nargs="*",
+        default=None,
+        help="Probe categories (default: all)",
+    )
+    run.add_argument(
+        "--max-tokens", type=int, default=256,
+        help="Default max generation tokens per replay turn",
+    )
+    _add_injection_args(run)
+    _add_config_args(run)
+    # ``--strict`` reuses the ``-s/--strict`` flag added by
+    # ``_add_config_args`` — same name, but here it gates "refuse on
+    # probe drift" instead of "fail hard on missing vectors".  Both
+    # interpretations share the spirit of the flag.
+
+
 def _build_root_parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="saklas",
@@ -501,5 +561,12 @@ def _build_root_parser() -> argparse.ArgumentParser:
         description="Inspect/validate config",
     )
     _build_config_parser(cfg)
+
+    transcript = sub.add_parser(
+        "transcript",
+        help="Replay / inspect saved tree paths (v2.3 loom)",
+        description="Replay / inspect saved tree paths",
+    )
+    _build_transcript_parser(transcript)
 
     return root

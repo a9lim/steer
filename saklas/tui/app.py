@@ -136,6 +136,11 @@ class SaklasApp(App):
         Binding("ctrl+t", "toggle_thinking", "Think", show=False),
         Binding("ctrl+s", "cycle_sort", "Sort", show=False),
         Binding("ctrl+y", "toggle_highlight", "Highlight", show=False),
+        Binding("ctrl+l", "open_loom", "Loom", show=False),
+        Binding("ctrl+e", "edit_active", "Edit", show=False),
+        Binding("ctrl+b", "branch_active", "Branch", show=False),
+        Binding("ctrl+n", "nav_picker", "Nav", show=False),
+        Binding("ctrl+d", "delete_subtree", "Del", show=False),
         Binding("[", "temp_down", show=False),
         Binding("]", "temp_up", show=False),
         Binding("{", "top_p_down", show=False),
@@ -149,7 +154,13 @@ class SaklasApp(App):
     ):
         super().__init__(ansi_color=True, **kwargs)
         self._session = session
-        self._messages = session._history
+        # ``_messages`` was a direct reference to ``session._history`` in
+        # v2.2 — a shared mutable list.  Under v2.3 the conversation lives
+        # in :class:`~saklas.core.loom.LoomTree`; ``session.history`` is a
+        # derived view.  We expose the same shape (``list[dict]``) as a
+        # property; the four pop-sites that mutated it in v2.2 now route
+        # through :meth:`_rewind_active_assistant` so the tree stays
+        # consistent with the visible state.
         self._device_str = str(session._device)
 
         # Local steering state — alphas and enabled flags per vector.
@@ -193,6 +204,18 @@ class SaklasApp(App):
         # walk per gen.
         self._row_for_widget: dict[int, _TurnRow] = {}
         self._pending_action: tuple | None = None  # ("regenerate",) or ("submit", text)
+        # Phase-4 loom: stashed prune expression + auto-regen mode.  Phase 5
+        # consumes them; phase 4 only carries the strings so users can set
+        # them up before phase 5 evaluator lands.
+        self._loom_prune_expr: str | None = None
+        self._loom_auto_regen_mode: str = "unsteered"
+        # Phase 5: auto-regen on/off — when on, every primary
+        # ``_generate_core`` completion fires a sibling regen with the
+        # configured override.  Default-off; ``Ctrl+A`` toggles.  The
+        # existing ``_ab_mode`` flag stays as the visible two-column
+        # layout (per plan decision 13: A/B becomes the default mode of
+        # the more general auto-regen modifier).
+        self._loom_auto_regen_on: bool = False
         # UI-side gen flag.  Tracks the *TUI's* gen lifecycle, which differs
         # slightly from the session's: the TUI counts a gen as "still going"
         # until the ``("done",)`` sentinel lands on the local ``_ui_token_queue``
@@ -226,6 +249,38 @@ class SaklasApp(App):
             cat.capitalize(): probes_list
             for cat, probes_list in defaults.items()
         }
+
+    @property
+    def _messages(self) -> list[dict[str, str]]:
+        """Compat shim — derived view over the loom tree's active path.
+
+        v2.2 had ``self._messages = session._history`` as a shared list
+        reference; v2.3's tree-backed history returns a fresh list per
+        access.  Reads that took ``[-1]`` or truthiness checks work
+        unchanged; the four pop-sites in regen/rewind paths now route
+        through :meth:`_rewind_active_assistant` instead of mutating
+        this property's return.
+        """
+        return self._session.history
+
+    def _rewind_active_assistant(self) -> bool:
+        """Move the loom tree's active pointer up one assistant turn.
+
+        Returns ``True`` when the active node was an assistant and was
+        rewound; ``False`` when there's nothing to rewind.  Non-
+        destructive — the rewound assistant stays in the tree as a now-
+        dead branch, navigable via the loom sidebar / screen.  Replaces
+        v2.2's ``self._messages.pop()`` of a trailing assistant turn at
+        regen / rewind sites.
+        """
+        tree = self._session.tree
+        active = tree.nodes.get(tree.active_node_id)
+        if active is None or active.role != "assistant":
+            return False
+        if active.parent_id is None:
+            return False
+        tree.navigate(active.parent_id)
+        return True
 
     def _active_alphas(self) -> dict[str, float]:
         """Build alphas dict for generation from enabled vectors."""
@@ -477,10 +532,27 @@ class SaklasApp(App):
             "  /temp, /top-p, /max         — sampling defaults\n"
             "  /model                      — model + session info\n"
             "  /exit, /help\n"
+            "Loom:\n"
+            "  /tree                       — open loom screen (Ctrl+L)\n"
+            "  /regen [N] [mode]           — N siblings (Ctrl+R)\n"
+            "  /edit                       — in-place edit active (Ctrl+E)\n"
+            "  /branch                     — sibling w/ text (Ctrl+B)\n"
+            "  /nav <id-prefix>            — navigate by ulid (Ctrl+N)\n"
+            "  /del                        — drop subtree (Ctrl+D)\n"
+            "  /star, /note <text>         — decoration\n"
+            "  /path                       — active path summary\n"
+            "  /fan <vec> <alphas>         — canonical sweep (siblings)\n"
+            "  /prune <filter-expr>        — dim non-matching nodes\n"
+            "  /auto-regen [on|off|mode]   — sibling regen modifier (Ctrl+A toggles)\n"
+            "  /diff <id1> <id2> [--full]  — cross-branch text + readings diff\n"
+            "  /diff --siblings            — diff active user-parent's kids\n"
+            "  /transcript export <path>   — save active path\n"
+            "  /transcript load <path> [--here|--merge] [--strict]\n"
             "Keys: Tab focus · ←/→ alpha (±0.01) · Shift+←/→ ±0.1\n"
             "↑/↓ nav (panels) · ↑/↓ in chat input recalls history\n"
             "Enter toggle · Backspace remove · Ctrl+T think · Ctrl+R regen\n"
-            "Ctrl+A A/B · Ctrl+S sort · Ctrl+Y highlight\n"
+            "Ctrl+A A/B · Ctrl+S sort · Ctrl+Y highlight · Ctrl+L loom\n"
+            "Ctrl+E edit · Ctrl+B branch · Ctrl+N nav · Ctrl+D del\n"
             "[ ] temp · { } top-p · Esc stop · Ctrl+Q quit"
         )
 
@@ -899,10 +971,13 @@ class SaklasApp(App):
         # owns history; _handle_command / action_regenerate pop the last
         # assistant turn + user turn before calling us with that text.
         if user_text is None:
-            # Regenerate: take the last user message off history and
-            # re-send it as input (session will re-append).
-            if self._messages and self._messages[-1]["role"] == "user":
-                user_text = self._messages.pop()["content"]
+            # Regenerate: read the last user message from history and
+            # re-send it as input.  Under v2.3 loom, ``add_user_turn``
+            # dedups against the existing user-child so no explicit pop
+            # is needed; just read the text.
+            hist = self._messages
+            if hist and hist[-1]["role"] == "user":
+                user_text = hist[-1]["content"]
             else:
                 self._ui_gen_active = False
                 self._chat_panel.add_system_message("Nothing to regenerate.")
@@ -1013,20 +1088,32 @@ class SaklasApp(App):
                     self._ab_shadow_active = False
                     self._ab_shadow_row = None
 
-                # Steered done: if AB mode is on and we have a row to
-                # backfill, fire a shadow gen and DON'T drain pending —
-                # let the shadow's own ``done`` handle that, so a
-                # mid-flight pending action waits until the AB pair is
-                # complete.
+                # Steered done: if AB mode is on and the configured
+                # auto-regen mode is ``unsteered`` (the default that
+                # matches today's A/B behavior), fire a shadow gen and
+                # DON'T drain pending — let the shadow's own ``done``
+                # handle that, so a mid-flight pending action waits
+                # until the AB pair is complete.
+                #
+                # For any other auto-regen mode (inverted / reseed /
+                # cool / hot / custom), fire ``regen_with_modifier``
+                # instead — it lands as a sibling under the user-parent.
                 elif (
                     self._ab_mode
                     and widget is not None
                     and self._pending_action is None
+                    and self._loom_auto_regen_mode == "unsteered"
                 ):
                     row = self._row_for_widget.get(id(widget))
                     if row is not None:
                         self._start_shadow_generation(row)
                         break
+                elif (
+                    self._loom_auto_regen_on
+                    and self._loom_auto_regen_mode != "unsteered"
+                    and self._pending_action is None
+                ):
+                    self._fire_auto_regen()
 
                 pending = self._pending_action
                 if pending is not None:
@@ -1775,8 +1862,7 @@ class SaklasApp(App):
         chat = self._chat_panel
         try:
             if kind == "regenerate":
-                if self._messages and self._messages[-1]["role"] == "assistant":
-                    self._messages.pop()
+                self._rewind_active_assistant()
                 chat.rewind_last_assistant()
                 self._start_generation()
             elif kind == "submit":
@@ -1784,8 +1870,7 @@ class SaklasApp(App):
             elif kind == "clear":
                 self._do_clear()
             elif kind == "rewind":
-                if self._messages and self._messages[-1]["role"] == "assistant":
-                    self._messages.pop()
+                self._rewind_active_assistant()
                 chat.rewind_last_assistant()
                 self._do_rewind()
             elif kind == "steer":
@@ -1794,6 +1879,23 @@ class SaklasApp(App):
                 self._handle_probe(pending[1])
             elif kind == "extract":
                 self._handle_extract_only(pending[1])
+            elif kind == "regen_n":
+                # N-way regen after an interrupting gen completes; phase
+                # 1's engine serializes via ``generate(n=N)``.  Phase 5
+                # tuple is ``("regen_n", n, mode_or_None)``; the legacy
+                # 2-tuple stays accepted for any in-flight stash from
+                # before the bump.
+                n = pending[1]
+                mode = pending[2] if len(pending) > 2 else None
+                if mode is not None:
+                    self._run_regen_modifier_worker(n, mode)
+                else:
+                    self._run_regen_n_worker(n)
+            elif kind == "fan":
+                # ``("fan", vector, alphas, prompt)`` — same shape we
+                # stashed in ``_dispatch_loom_fan_alphas``.
+                _, vector, alphas, prompt = pending
+                self._run_fan_worker(vector, alphas, prompt)
             elif kind == "quit":
                 self.exit()
         except KeyboardInterrupt:
@@ -1843,8 +1945,9 @@ class SaklasApp(App):
             self._pending_action = ("regenerate",)
             self._session.stop()
             return
-        if self._messages[-1]["role"] == "assistant":
-            self._messages.pop()
+        # Loom: move active up so the next gen creates a sibling under
+        # the user-parent rather than a child of the old assistant.
+        self._rewind_active_assistant()
         self._start_generation()
 
     def action_ab_compare(self) -> None:
@@ -1857,6 +1960,14 @@ class SaklasApp(App):
         matching the webui's "play the conversation back to the unsteered
         agent" affordance.
 
+        Phase 5 (per plan decision 13): the same toggle also flips
+        :attr:`_loom_auto_regen_on`.  Auto-regen mode defaults to
+        ``unsteered`` so existing A/B users see no behavior change; the
+        ``unsteered`` mode is served by the existing shadow-gen path
+        (no need to fire a redundant ``regen_with_modifier`` worker).
+        Other modes (``inverted`` / ``reseed`` / ``cool`` / ``hot`` /
+        ``custom``) get the post-gen hook in ``_poll_generation``.
+
         Toggling off doesn't kill an in-flight shadow gen — the data is
         kept and stays harmless when the column is hidden.  Toggling back
         on re-reveals it without re-running.
@@ -1864,9 +1975,11 @@ class SaklasApp(App):
         chat = self._chat_panel
         was_off = not self._ab_mode
         self._ab_mode = not self._ab_mode
+        self._loom_auto_regen_on = self._ab_mode
         chat.set_ab_mode(self._ab_mode)
         chat.add_system_message(
-            f"A/B mode {'on' if self._ab_mode else 'off'}."
+            f"A/B mode {'on' if self._ab_mode else 'off'} "
+            f"(auto-regen mode={self._loom_auto_regen_mode})"
         )
         if not self._ab_mode or not was_off:
             return
@@ -1985,3 +2098,916 @@ class SaklasApp(App):
 
     def action_cycle_sort(self) -> None:
         self._trait_panel.cycle_sort()
+
+    # ----------------------------------------------------------------
+    # Phase 4 — loom slash commands + bindings
+    # ----------------------------------------------------------------
+
+    def action_open_loom(self) -> None:
+        """Ctrl+L — open the loom screen."""
+        self._handle_tree("")
+
+    def _handle_tree(self, _arg: str) -> None:
+        """`/tree` — push the LoomScreen onto the Textual screen stack.
+
+        Esc on the loom screen pops back to the chat screen.  Mutations
+        from the loom screen flow into ``session.tree`` directly; the
+        chat screen's `_messages` property (a derived view) picks them
+        up on the next render.
+        """
+
+        from saklas.tui.loom_screen import LoomScreen
+
+        try:
+            self.push_screen(LoomScreen(self))
+        except Exception as e:
+            self._chat_panel.add_system_message(f"/tree failed: {e}")
+
+    def _handle_nav(self, arg: str) -> None:
+        """`/nav <id-prefix>` — navigate active node by ulid prefix.
+
+        Matches any case-insensitive prefix of an existing node id;
+        ambiguous prefixes report the candidates.
+        """
+
+        from saklas.tui.loom_helpers import resolve_node_prefix
+
+        chat = self._chat_panel
+        prefix = arg.strip()
+        if not prefix:
+            chat.add_system_message("Usage: /nav <id-prefix>")
+            return
+        match = resolve_node_prefix(self._session.tree, prefix)
+        if match.missing:
+            chat.add_system_message(f"no node matches '{prefix}'")
+            return
+        if match.ambiguous:
+            cands = ", ".join(c[:12] for c in match.candidates[:8])
+            chat.add_system_message(f"ambiguous '{prefix}': {cands}")
+            return
+        try:
+            self._session.tree.navigate(match.node_id)
+        except Exception as e:
+            chat.add_system_message(f"navigate failed: {e}")
+            return
+        chat.add_system_message(f"navigated to {match.node_id[:8]}")
+
+    def action_nav_picker(self) -> None:
+        """Ctrl+N — phase 4: same as `/tree` so users can pick visually."""
+        self._handle_tree("")
+
+    def _handle_edit(self, arg: str) -> None:
+        """`/edit <text...>` — in-place edit of the active node.
+
+        Phase-4 inline form: full replacement text comes on the same
+        line.  The richer loom-screen overlay (which pre-fills the
+        buffer with current text) lands via the `e` binding inside
+        the loom screen.
+        """
+
+        from saklas.core.loom import (
+            LoomTreeError, MutationDuringGenerationError,
+            InvalidNodeOperationError, UnknownNodeError,
+        )
+
+        chat = self._chat_panel
+        if not arg.strip():
+            chat.add_system_message("Usage: /edit <text...>")
+            return
+        target = self._session.tree.active_node_id
+        if target == self._session.tree.root_id:
+            chat.add_system_message("/edit: active node is the root.")
+            return
+        try:
+            self._session.tree.edit(target, arg)
+        except (UnknownNodeError, MutationDuringGenerationError,
+                InvalidNodeOperationError, LoomTreeError) as e:
+            chat.add_system_message(f"/edit failed: {e}")
+            return
+        chat.add_system_message(f"edited {target[:8]}")
+
+    def action_edit_active(self) -> None:
+        """Ctrl+E — open the loom screen so the user can edit visually.
+
+        The inline `/edit <text>` form is for one-line replacements;
+        the loom screen's `e` binding gives the in-place buffer the
+        plan describes.
+        """
+        self._handle_tree("")
+
+    def _handle_branch(self, arg: str) -> None:
+        """`/branch [text]` — sibling of the active node with the given text.
+
+        Empty text is the "branch from blank" UI flavor; otherwise the
+        text becomes the new sibling's content.  Inherits the active
+        node's role unless the active node is the root (rejected).
+        """
+
+        from saklas.core.loom import (
+            LoomTreeError, MutationDuringGenerationError,
+            InvalidNodeOperationError, UnknownNodeError,
+        )
+
+        chat = self._chat_panel
+        text = arg or ""
+        target = self._session.tree.active_node_id
+        if target == self._session.tree.root_id:
+            chat.add_system_message("/branch: active node is the root.")
+            return
+        try:
+            new_id = self._session.tree.branch(target, text)
+        except (UnknownNodeError, MutationDuringGenerationError,
+                InvalidNodeOperationError, LoomTreeError) as e:
+            chat.add_system_message(f"/branch failed: {e}")
+            return
+        chat.add_system_message(f"branched {target[:8]} → {new_id[:8]}")
+
+    def action_branch_active(self) -> None:
+        """Ctrl+B — open the loom screen for visual branching."""
+        self._handle_tree("")
+
+    def _handle_del(self, arg: str) -> None:
+        """`/del [yes]` — delete the active subtree.
+
+        Requires explicit ``yes`` confirmation by default to avoid
+        accidental wipes; ``Ctrl+D`` from the chat screen uses this
+        path too.
+        """
+
+        from saklas.core.loom import (
+            LoomTreeError, MutationDuringGenerationError,
+            InvalidNodeOperationError, UnknownNodeError,
+        )
+
+        chat = self._chat_panel
+        confirm = (arg or "").strip().lower()
+        if confirm != "yes":
+            chat.add_system_message(
+                "/del: type '/del yes' to delete the active subtree."
+            )
+            return
+        target = self._session.tree.active_node_id
+        # We can't delete the active node itself; navigate up first if so.
+        try:
+            tree = self._session.tree
+            node = tree.get(target)
+            if node.parent_id is None or node.parent_id == tree.root_id:
+                chat.add_system_message("/del: nothing to delete (at root).")
+                return
+            # Move active to parent so the delete is well-defined.
+            tree.navigate(node.parent_id)
+            removed = tree.delete_subtree(target)
+        except (UnknownNodeError, MutationDuringGenerationError,
+                InvalidNodeOperationError, LoomTreeError) as e:
+            chat.add_system_message(f"/del failed: {e}")
+            return
+        chat.add_system_message(f"deleted {removed} node(s).")
+
+    def action_delete_subtree(self) -> None:
+        """Ctrl+D — delete the active subtree (with confirm hint)."""
+        self._handle_del("yes")
+
+    def _handle_star(self, _arg: str) -> None:
+        chat = self._chat_panel
+        target = self._session.tree.active_node_id
+        try:
+            node = self._session.tree.get(target)
+            self._session.tree.star(target, on=not node.starred)
+        except Exception as e:
+            chat.add_system_message(f"/star failed: {e}")
+            return
+        chat.add_system_message(
+            f"{'starred' if not node.starred else 'unstarred'} {target[:8]}"
+        )
+
+    def _handle_note(self, arg: str) -> None:
+        chat = self._chat_panel
+        target = self._session.tree.active_node_id
+        try:
+            self._session.tree.annotate(target, arg or "")
+        except Exception as e:
+            chat.add_system_message(f"/note failed: {e}")
+            return
+        chat.add_system_message(f"noted {target[:8]}")
+
+    def _handle_path(self, _arg: str) -> None:
+        from saklas.tui.loom_helpers import format_path_summary
+        self._chat_panel.add_system_message(
+            format_path_summary(self._session.tree)
+        )
+
+    def _handle_fan(self, arg: str) -> None:
+        """`/fan <vector> <alphas>` — N-way regen with per-sibling alpha override.
+
+        Phase-4 shape: keep it minimal — token-split on the first
+        whitespace, treat everything after as the alpha grid.  The
+        webui sweep-drawer grammar (linspace / range / comma list) is
+        shared via :func:`parse_alpha_list`.
+
+        The sweep deprecation (phase 5) repoints the existing
+        `/sweep`-style table into loom siblings; phase 4 just stands
+        the canonical primitive up.
+        """
+
+        chat = self._chat_panel
+        raw = arg.strip()
+        if not raw:
+            chat.add_system_message("Usage: /fan <vector> <alphas>")
+            return
+        parts = raw.split(None, 1)
+        if len(parts) < 2:
+            chat.add_system_message("Usage: /fan <vector> <alphas>")
+            return
+        vector, alphas_str = parts[0], parts[1]
+        from saklas.tui.loom_helpers import parse_alpha_list, AlphaListError
+        try:
+            alphas = parse_alpha_list(alphas_str)
+        except AlphaListError as e:
+            chat.add_system_message(f"/fan alpha grid error: {e}")
+            return
+        if not alphas:
+            chat.add_system_message("/fan: alpha grid is empty.")
+            return
+        self._dispatch_loom_fan_alphas(vector, alphas)
+
+    def _dispatch_loom_fan(self, raw: str) -> None:
+        """Called from the loom-screen overlay's fan-out form."""
+        self._handle_fan(raw)
+
+    def _handle_sweep_deprecated(self, arg: str) -> None:
+        """`/sweep` — deprecated alias for `/fan` (phase 5).
+
+        Sweep-as-table is gone; the canonical primitive is fan-out,
+        which lands every alpha as a sibling under one shared user-turn
+        anchor.  We accept the old verb so users mid-migration aren't
+        stranded; the banner makes the rename visible.
+        """
+        self._chat_panel.add_system_message(
+            "/sweep is deprecated — use /fan instead."
+        )
+        self._handle_fan(arg)
+
+    def _dispatch_loom_fan_alphas(self, vector: str, alphas: list[float]) -> None:
+        """Kick off the fan-out generation.
+
+        Phase 4 routes through ``session.generate(input, n=len(alphas),
+        parent_node_id=...)`` per the plan — keeping the structural
+        scaffold while the per-sibling alpha override (recipe_override
+        plumbing) lands in phase 5.  When a generation is already in
+        flight we stash the request as a pending action so it fires
+        after the current worker resolves.
+        """
+
+        chat = self._chat_panel
+        prompt = self._last_prompt
+        # We need a prompt to regen from; if there isn't one yet, lift
+        # it off the active path.
+        if not prompt:
+            hist = self._messages
+            if hist and hist[-1]["role"] == "user":
+                prompt = hist[-1]["content"]
+        if not prompt:
+            chat.add_system_message("/fan: no prior prompt to fan out from.")
+            return
+
+        # Stash structural info on _pending_action so the worker can pick
+        # it up if a gen is in flight.
+        if self._session.is_generating or self._ui_gen_active:
+            self._pending_action = ("fan", vector, alphas, prompt)
+            self._session.stop()
+            return
+        self._run_fan_worker(vector, alphas, prompt)
+
+    def _run_fan_worker(
+        self, vector: str, alphas: list[float], prompt: str,
+    ) -> None:
+        """Actually kick the engine.
+
+        Phase 5: routes through :meth:`SaklasSession.generate_sweep` with
+        ``return_node_ids=True`` so every sibling lands under one shared
+        user-turn anchor in the loom tree.  The legacy per-α
+        ``session.generate`` loop is gone — sweep is the canonical
+        sibling-shaped primitive.
+        """
+
+        chat = self._chat_panel
+        chat.add_system_message(
+            f"/fan {vector} × {len(alphas)} (α: "
+            f"{', '.join(f'{a:+.2f}' for a in alphas[:6])}"
+            f"{'…' if len(alphas) > 6 else ''})"
+        )
+
+        from saklas import SamplingConfig
+
+        def _worker() -> None:
+            try:
+                tree = self._session.tree
+                # Anchor under the active node's user-parent (so the
+                # sweep's auto-spawned user turn lands as a sibling of
+                # the existing user turn rather than nested under the
+                # previous assistant).
+                anchor_id = tree.active_node_id
+                anchor = tree.nodes.get(anchor_id)
+                if anchor is not None and anchor.role == "assistant" and anchor.parent_id is not None:
+                    parent_for_sweep = anchor.parent_id
+                    # If the active path's current user turn already
+                    # holds the prompt we're sweeping, anchor under
+                    # *that* user turn so generate_sweep's dedup folds
+                    # the new sweep into the existing user node.
+                    user_node = tree.nodes.get(anchor.parent_id)
+                    if user_node is not None and user_node.role == "user":
+                        parent_for_sweep = user_node.parent_id
+                else:
+                    parent_for_sweep = anchor_id
+
+                sampling = SamplingConfig(
+                    temperature=self._session.config.temperature,
+                    top_p=self._session.config.top_p,
+                    max_tokens=self._session.config.max_new_tokens,
+                    seed=self._default_seed,
+                )
+                results, node_ids = self._session.generate_sweep(
+                    prompt,
+                    {vector: [float(a) for a in alphas]},
+                    sampling=sampling,
+                    stateless=False,
+                    parent_node_id=parent_for_sweep,
+                    return_node_ids=True,
+                )
+                kept = [nid for nid in node_ids if nid]
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/fan {vector}: {len(kept)} siblings landed "
+                    f"({', '.join(nid[:8] for nid in kept[:6])}"
+                    f"{'…' if len(kept) > 6 else ''})",
+                )
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/fan error: {msg}",
+                )
+
+        self.run_worker(_worker, thread=True)
+
+    def _dispatch_loom_regen(self, n: int, *, mode: str | None = None) -> None:
+        """`/regen N [mode]`: serialize an N-way regen with optional mode.
+
+        Phase 1's engine already serializes via ``session.generate(...,
+        n=N)``; phase 5 routes the optional ``mode`` argument through
+        ``session.regen_with_modifier``.  When a gen is already running
+        we defer through ``_pending_action`` like every other
+        interrupting slash command.
+        """
+
+        chat = self._chat_panel
+        if self._session.is_generating or self._ui_gen_active:
+            self._pending_action = ("regen_n", n, mode)
+            self._session.stop()
+            return
+        if mode is not None:
+            self._run_regen_modifier_worker(n, mode)
+            return
+        self._run_regen_n_worker(n)
+
+    def _run_regen_modifier_worker(self, n: int, mode: str) -> None:
+        """Worker for `/regen N <mode>` — routes through ``regen_with_modifier``."""
+        chat = self._chat_panel
+        tree = self._session.tree
+        active = tree.nodes.get(tree.active_node_id)
+        if active is None:
+            chat.add_system_message("/regen: no active node to regen from.")
+            return
+        if active.role == "assistant":
+            user_parent_id = active.parent_id
+        elif active.role == "user":
+            user_parent_id = active.id
+        else:
+            chat.add_system_message("/regen: active node is not part of a turn.")
+            return
+        if user_parent_id is None:
+            chat.add_system_message("/regen: no user-parent to anchor regen under.")
+            return
+
+        def _worker() -> None:
+            try:
+                self._session.regen_with_modifier(
+                    user_parent_id, mode, n=n,
+                )
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/regen {mode} error: {msg}",
+                )
+            finally:
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/regen × {n} ({mode}): done.",
+                )
+
+        self.run_worker(_worker, thread=True)
+
+    def _run_regen_n_worker(self, n: int) -> None:
+        chat = self._chat_panel
+        # Read prompt off the active path.
+        hist = self._messages
+        prompt = None
+        if hist and hist[-1]["role"] == "user":
+            prompt = hist[-1]["content"]
+        elif hist:
+            # Walk back to the last user turn.
+            for msg in reversed(hist):
+                if msg["role"] == "user":
+                    prompt = msg["content"]
+                    break
+        if not prompt:
+            chat.add_system_message("/regen: no user turn to regenerate.")
+            return
+
+        # Move active to the user-parent so siblings attach correctly.
+        self._rewind_active_assistant()
+
+        from saklas import SamplingConfig
+
+        def _worker() -> None:
+            try:
+                sampling = SamplingConfig(
+                    temperature=self._session.config.temperature,
+                    top_p=self._session.config.top_p,
+                    max_tokens=self._session.config.max_new_tokens,
+                    seed=self._default_seed,
+                )
+                steering = (
+                    None if not self._active_alphas()
+                    else __import__("saklas").Steering(
+                        alphas=dict(self._active_alphas()),
+                        thinking=self._thinking,
+                    )
+                )
+                self._session.generate(
+                    prompt,
+                    steering=steering,
+                    sampling=sampling,
+                    stateless=False,
+                    n=n,
+                )
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/regen error: {msg}",
+                )
+            finally:
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"/regen × {n}: done.",
+                )
+
+        self.run_worker(_worker, thread=True)
+
+    def _handle_prune(self, arg: str) -> None:
+        """`/prune <filter-expr>` — set the loom-screen filter highlight.
+
+        The grammar is :func:`saklas.core.tree_filter.parse_filter`
+        (``agg:`` / ``any:`` / ``last:`` prefix on per-node probe
+        aggregates; clauses combined with ``,`` are AND).  Empty arg
+        clears.  Validation happens through ``parse_filter`` so users
+        get a single ``FilterParseError`` message before the loom
+        screen tries to apply the filter.
+        """
+        from saklas.core.tree_filter import parse_filter, FilterParseError
+
+        chat = self._chat_panel
+        expr = arg.strip()
+        if not expr:
+            self._loom_prune_expr = None
+            chat.add_system_message("/prune cleared.")
+            return
+        try:
+            parse_filter(expr)
+        except FilterParseError as e:
+            chat.add_system_message(f"/prune parse error: {e}")
+            return
+        self._loom_prune_expr = expr
+        try:
+            matching = self._session.tree.filter_by_expr(expr)
+        except FilterParseError as e:
+            chat.add_system_message(f"/prune evaluation error: {e}")
+            return
+        chat.add_system_message(
+            f"/prune active: {expr}  ({len(matching)} node(s) match)"
+        )
+
+    _AUTO_REGEN_MODES = ("unsteered", "inverted", "reseed", "cool", "hot")
+
+    def _handle_auto_regen(self, arg: str) -> None:
+        """`/auto-regen [on|off|<mode>]` — configure the regen modifier.
+
+        Phase 5 wiring: ``on`` / ``off`` toggle whether every primary
+        gen fires a sibling auto-regen; ``<mode>`` (``unsteered`` /
+        ``inverted`` / ``reseed`` / ``cool`` / ``hot``, or ``custom:
+        <partial recipe>``) sets the override.  Bare ``/auto-regen``
+        reports the current state.  ``Ctrl+A`` toggles on/off via
+        :meth:`action_ab_compare` (the keymap meaning is preserved per
+        plan decision 13).
+        """
+
+        chat = self._chat_panel
+        arg = arg.strip()
+        if not arg:
+            state = "on" if self._loom_auto_regen_on else "off"
+            chat.add_system_message(
+                f"auto-regen: {state}, mode={self._loom_auto_regen_mode}"
+            )
+            return
+        low = arg.lower()
+        if low == "on":
+            self._loom_auto_regen_on = True
+            chat.add_system_message(
+                f"auto-regen on (mode={self._loom_auto_regen_mode})"
+            )
+            return
+        if low == "off":
+            self._loom_auto_regen_on = False
+            chat.add_system_message("auto-regen off")
+            return
+        # Validate built-in modes; ``custom: ...`` accepts a partial
+        # recipe expression and rides through ``regen_with_modifier``
+        # under the str-mode dispatch (engine raises ValueError on
+        # unknown built-ins, so we surface that path directly).
+        if low not in self._AUTO_REGEN_MODES and not low.startswith("custom:"):
+            chat.add_system_message(
+                "/auto-regen: unknown mode. Valid: "
+                + ", ".join(self._AUTO_REGEN_MODES)
+                + " or 'custom: <partial recipe>'"
+            )
+            return
+        self._loom_auto_regen_mode = arg
+        chat.add_system_message(
+            f"auto-regen mode set to: {arg}"
+            + (" (auto-regen is currently off — /auto-regen on to enable)"
+               if not self._loom_auto_regen_on else "")
+        )
+
+    def _fire_auto_regen(self) -> None:
+        """Post-gen hook: fire a sibling regen under the configured mode.
+
+        Called from ``_poll_generation`` once a steered ``done`` lands
+        with auto-regen on.  Routes through
+        :meth:`SaklasSession.regen_with_modifier`; the resulting sibling
+        lands under the user-parent of the active assistant.  Surfacing
+        is a one-line system message linking the new sibling — the A/B
+        side-by-side column is owned by ``_ab_mode`` and renders only
+        when both flags align (the legacy "unsteered shadow" path).
+        """
+        if not self._loom_auto_regen_on:
+            return
+        tree = self._session.tree
+        active = tree.nodes.get(tree.active_node_id)
+        if active is None or active.role != "assistant":
+            return
+        user_parent_id = active.parent_id
+        if user_parent_id is None:
+            return
+        mode = self._loom_auto_regen_mode
+
+        def _worker() -> None:
+            try:
+                self._session.regen_with_modifier(user_parent_id, mode, n=1)
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+                self.call_from_thread(
+                    self._chat_panel.add_system_message,
+                    f"auto-regen ({mode}) error: {msg}",
+                )
+                return
+            new_id = self._session.tree.active_node_id
+            self.call_from_thread(
+                self._chat_panel.add_system_message,
+                f"auto-regen ({mode}) → sibling {new_id[:8]}",
+            )
+
+        self.run_worker(_worker, thread=True)
+
+    def _handle_transcript(self, arg: str) -> None:
+        """`/transcript export <path>` / `/transcript load <path> [flags]`.
+
+        Phase 5 wires the load side: parses ``--here`` / ``--merge`` /
+        ``--strict`` (which compose), routes through
+        :meth:`saklas.core.transcript.Transcript.import_into`, and
+        navigates the active node to the imported leaf.  Guard warnings
+        (model mismatch, system-prompt drift, missing probes, probe-
+        content drift) print to chat with a clear sigil; under
+        ``--strict`` probe drift raises :class:`TranscriptProbeDriftError`
+        which we catch and report.
+        """
+
+        import json
+        from pathlib import Path
+        from saklas.tui.loom_helpers import build_transcript_payload
+
+        chat = self._chat_panel
+        parts = arg.split(maxsplit=1)
+        if not parts:
+            chat.add_system_message(
+                "Usage: /transcript export <path>  |  "
+                "/transcript load <path> [--here|--merge] [--strict]"
+            )
+            return
+        verb = parts[0].lower()
+
+        if verb == "export":
+            if len(parts) < 2:
+                chat.add_system_message("Usage: /transcript export <path>")
+                return
+            path = Path(parts[1].strip()).expanduser()
+            try:
+                payload = build_transcript_payload(
+                    self._session.tree,
+                    model_id=self._session._model_info.get("model_id"),
+                    system_prompt=self._session.config.system_prompt,
+                )
+                # Phase 4 emits JSON (universal); phase 5 swaps to YAML
+                # to match the spec example once a yaml dep is in.
+                path.write_text(json.dumps(payload, indent=2))
+                chat.add_system_message(
+                    f"transcript export → {path} ({len(payload['turns'])} turns)"
+                )
+            except Exception as e:
+                chat.add_system_message(f"/transcript export failed: {e}")
+            return
+
+        if verb == "load":
+            if len(parts) < 2:
+                chat.add_system_message(
+                    "Usage: /transcript load <path> [--here|--merge] [--strict]"
+                )
+                return
+            self._handle_transcript_load(parts[1])
+            return
+
+        chat.add_system_message(
+            "Usage: /transcript export <path>  |  "
+            "/transcript load <path> [--here|--merge] [--strict]"
+        )
+
+    def _handle_transcript_load(self, raw: str) -> None:
+        """Parse and execute `/transcript load <path> [flags]`."""
+        import warnings as _warnings
+        from pathlib import Path
+        from saklas.core.transcript import (
+            Transcript, TranscriptError, TranscriptModelMismatch,
+            TranscriptProbeDriftError,
+        )
+
+        chat = self._chat_panel
+        try:
+            tokens = shlex.split(raw)
+        except ValueError as e:
+            chat.add_system_message(f"/transcript load parse error: {e}")
+            return
+        flags = {t for t in tokens if t.startswith("--")}
+        non_flags = [t for t in tokens if not t.startswith("--")]
+        if len(non_flags) != 1:
+            chat.add_system_message(
+                "Usage: /transcript load <path> [--here|--merge] [--strict]"
+            )
+            return
+        path_str = non_flags[0]
+        path = Path(path_str).expanduser()
+        if not path.is_file():
+            chat.add_system_message(f"/transcript load: not a file: {path}")
+            return
+
+        mode_flags = flags & {"--here", "--merge"}
+        if len(mode_flags) > 1:
+            chat.add_system_message(
+                "/transcript load: pass at most one of --here / --merge"
+            )
+            return
+        mode = "default"
+        if "--here" in flags:
+            mode = "here"
+        elif "--merge" in flags:
+            mode = "merge"
+        strict = "--strict" in flags
+
+        try:
+            transcript = Transcript.load(path)
+        except TranscriptError as e:
+            chat.add_system_message(f"/transcript load: {e}")
+            return
+        except Exception as e:
+            chat.add_system_message(f"/transcript load: failed to read: {e}")
+            return
+
+        # Capture guard warnings inline so the chat shows them instead of
+        # only the stderr ``UserWarning`` stream.
+        try:
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                leaf_id = transcript.import_into(
+                    self._session, mode=mode, strict=strict,
+                )
+        except TranscriptModelMismatch as e:
+            chat.add_system_message(f"/transcript load: model mismatch — {e}")
+            return
+        except TranscriptProbeDriftError as e:
+            chat.add_system_message(f"/transcript load: probe drift (--strict) — {e}")
+            return
+        except TranscriptError as e:
+            chat.add_system_message(f"/transcript load: {e}")
+            return
+        except Exception as e:
+            chat.add_system_message(f"/transcript load: import failed: {e}")
+            return
+
+        for w in caught:
+            chat.add_system_message(f"⚠ transcript guard: {w.message}")
+
+        # Navigate active to the imported leaf so the chat panel
+        # re-renders along the new path.
+        try:
+            self._session.tree.navigate(leaf_id)
+        except Exception:
+            pass
+        chat.add_system_message(
+            f"/transcript load ({mode}): {len(transcript.turns)} turns "
+            f"imported → leaf {leaf_id[:8]}"
+        )
+
+    def _handle_diff(self, arg: str) -> None:
+        """`/diff <id1> <id2> [--full]` / `/diff --siblings` (phase 5).
+
+        Resolves each id by ulid prefix via :func:`resolve_node_prefix`,
+        calls :meth:`SaklasSession.diff_nodes`, and prints a compact
+        unified text-diff plus the top-5 reading deltas (signed-colored
+        via Rich markup).  ``--full`` extends the readings table to
+        every entry; ``--siblings`` walks the active user-parent's
+        assistant children and prints a pairwise matrix.
+        """
+        from saklas.tui.loom_helpers import resolve_node_prefix
+
+        chat = self._chat_panel
+        tokens = shlex.split(arg) if arg else []
+        if not tokens:
+            chat.add_system_message(
+                "Usage: /diff <id1> <id2> [--full]  |  /diff --siblings"
+            )
+            return
+
+        full = "--full" in tokens
+        ids = [t for t in tokens if not t.startswith("--")]
+
+        if "--siblings" in tokens:
+            self._handle_diff_siblings(full=full)
+            return
+
+        if len(ids) != 2:
+            chat.add_system_message(
+                "Usage: /diff <id1> <id2> [--full]  |  /diff --siblings"
+            )
+            return
+
+        m1 = resolve_node_prefix(self._session.tree, ids[0])
+        m2 = resolve_node_prefix(self._session.tree, ids[1])
+        for label, m, raw in (("id1", m1, ids[0]), ("id2", m2, ids[1])):
+            if m.missing:
+                chat.add_system_message(f"/diff: {label}: no node matches '{raw}'")
+                return
+            if m.ambiguous:
+                cands = ", ".join(c[:12] for c in m.candidates[:8])
+                chat.add_system_message(
+                    f"/diff: {label}: ambiguous '{raw}': {cands}"
+                )
+                return
+
+        try:
+            diff = self._session.diff_nodes(m1.node_id, m2.node_id)
+        except Exception as e:
+            chat.add_system_message(f"/diff failed: {e}")
+            return
+
+        chat.add_system_message(self._render_node_diff(diff, full=full))
+
+    def _render_node_diff(self, diff, *, full: bool) -> str:
+        """Format a :class:`NodeDiff` for the chat panel.
+
+        Unified-diff prose (cheap on terminal width) plus top-5 readings
+        deltas, signed-colored via Rich markup.  ``full=True`` extends
+        the readings table to every entry.
+        """
+        a8 = diff.a_id[:8]
+        b8 = diff.b_id[:8]
+        lines: list[str] = []
+        lines.append(f"=== diff: {a8} vs {b8} ===")
+        if diff.parent_id is not None:
+            lines.append(f"  shared parent: {diff.parent_id[:8]}")
+        else:
+            lines.append("  (no shared parent — cross-branch comparison)")
+
+        lines.append("")
+        lines.append("--- text (unified, word-level) ---")
+        if not diff.text:
+            lines.append("(no text)")
+        else:
+            for span in diff.text:
+                if span.state == "equal":
+                    lines.append(f"  {span.text}")
+                elif span.state == "delete":
+                    lines.append(f"[red]- {span.text}[/red]")
+                else:  # insert
+                    lines.append(f"[green]+ {span.text}[/green]")
+
+        lines.append("")
+        cap = None if full else 5
+        cap_label = "" if full else f"top {min(5, len(diff.readings))} of "
+        lines.append(
+            f"--- readings Δ (b - a, {cap_label}{len(diff.readings)}) ---"
+        )
+        if not diff.readings:
+            lines.append("(no readings)")
+        else:
+            for r in diff.readings[: (cap if cap is not None else len(diff.readings))]:
+                color = "green" if r.delta > 0 else ("red" if r.delta < 0 else "dim")
+                lines.append(
+                    f"  [{color}]{r.delta:+.4f}[/{color}]  "
+                    f"{r.name:<28}  ({r.a_value:+.3f} → {r.b_value:+.3f})"
+                )
+        return "\n".join(lines)
+
+    def _handle_diff_siblings(self, *, full: bool) -> None:
+        """`/diff --siblings` — diff every assistant sibling of the active
+        user-parent.
+
+        Two siblings → one pairwise diff (same as `/diff a b`).  Three or
+        more → a small per-pair top-1 reading-delta matrix.
+        """
+        chat = self._chat_panel
+        tree = self._session.tree
+        # Find the active node's user-parent.
+        active = tree.nodes.get(tree.active_node_id)
+        if active is None:
+            chat.add_system_message("/diff --siblings: no active node.")
+            return
+        user_parent_id: str | None = None
+        if active.role == "user":
+            user_parent_id = active.id
+        elif active.role == "assistant" and active.parent_id is not None:
+            user_parent_id = active.parent_id
+        if user_parent_id is None:
+            chat.add_system_message(
+                "/diff --siblings: active node has no user-parent to "
+                "compare children under."
+            )
+            return
+
+        sibs = [
+            cid for cid in tree.child_ids(user_parent_id)
+            if tree.get(cid).role == "assistant"
+        ]
+        if len(sibs) < 2:
+            chat.add_system_message(
+                "/diff --siblings: need ≥2 assistant siblings under the "
+                "active user-parent (have "
+                f"{len(sibs)})."
+            )
+            return
+
+        if len(sibs) == 2:
+            try:
+                diff = self._session.diff_nodes(sibs[0], sibs[1])
+            except Exception as e:
+                chat.add_system_message(f"/diff --siblings failed: {e}")
+                return
+            chat.add_system_message(self._render_node_diff(diff, full=full))
+            return
+
+        # ≥3 siblings: print a top-1 pairwise matrix.  Avoids dumping
+        # full diffs N²-style; users follow up with `/diff a b` for the
+        # full text + readings on any pair that looks interesting.
+        lines: list[str] = [
+            f"=== sibling matrix ({len(sibs)} children of {user_parent_id[:8]}) ===",
+            "  pair                top Δ reading",
+        ]
+        for i in range(len(sibs)):
+            for j in range(i + 1, len(sibs)):
+                a_id, b_id = sibs[i], sibs[j]
+                try:
+                    diff = self._session.diff_nodes(a_id, b_id)
+                except Exception as e:
+                    lines.append(f"  {a_id[:8]} ↔ {b_id[:8]}  (error: {e})")
+                    continue
+                if diff.readings:
+                    top = diff.readings[0]
+                    color = "green" if top.delta > 0 else ("red" if top.delta < 0 else "dim")
+                    lines.append(
+                        f"  {a_id[:8]} ↔ {b_id[:8]}   "
+                        f"[{color}]{top.delta:+.4f}[/{color}]  {top.name}"
+                    )
+                else:
+                    lines.append(
+                        f"  {a_id[:8]} ↔ {b_id[:8]}   (no readings)"
+                    )
+        chat.add_system_message("\n".join(lines))

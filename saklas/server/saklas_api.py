@@ -30,7 +30,7 @@ import json
 import time
 import uuid
 from dataclasses import replace as _replace
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from saklas.core.errors import SaklasError
 from saklas.core.generation import supports_thinking
 from saklas.io.probes_bootstrap import load_defaults
+from saklas.core.loom import LoomMutated
 from saklas.core.profile import Profile
 from saklas.core.results import GenerationResult
 from saklas.core.sampling import SamplingConfig
@@ -109,6 +110,71 @@ class WSGenerateMessage(BaseModel):
     thinking: bool | None = None
     stateless: bool = True
     raw: bool = False
+    # Loom (v2.3): attach the generated assistant node under a specific
+    # tree node, and fan out ``n`` siblings on the same user-parent.
+    # ``parent_node_id=None`` falls through to the active node; ``n=1``
+    # preserves the v2.2 single-stream protocol.
+    parent_node_id: str | None = None
+    n: int = 1
+    # Loom phase 5: optional recipe-override modifier.  Either a built-in
+    # mode string (``"unsteered"``/``"inverted"``/``"reseed"``/``"cool"``/
+    # ``"hot"``) or a free-form partial recipe expression (``"seed=42,
+    # temperature=1.5"``).  Resolved through ``session.regen_with_modifier``
+    # when set; ignored when None.
+    recipe_override: Any = None
+
+
+# --- Loom tree request bodies (phase 2) --------------------------------
+
+class TreeNavigateRequest(BaseModel):
+    node_id: str
+
+
+class TreeEditRequest(BaseModel):
+    node_id: str
+    text: str
+
+
+class TreeBranchRequest(BaseModel):
+    node_id: str
+    text: str = ""
+    role: str | None = None
+
+
+class TreeStarRequest(BaseModel):
+    node_id: str
+    on: bool = True
+
+
+class TreeNoteRequest(BaseModel):
+    node_id: str
+    text: str
+
+
+class TreeTranscriptRequest(BaseModel):
+    node_id: str | None = None
+
+
+class TreeTranscriptLoadRequest(BaseModel):
+    """Body for ``POST /saklas/v1/sessions/{id}/tree/transcript/load`` (phase 5).
+
+    ``yaml`` is the full transcript YAML produced by the export route.
+    ``mode`` chooses the attach point: ``"default"`` attaches as a fresh
+    branch off root, ``"here"`` attaches at the active node, ``"merge"``
+    walks for the deepest user-turn match and attaches the divergent
+    tail there.  ``strict`` refuses the load on any probe-hash drift.
+    """
+
+    yaml: str
+    mode: str = "default"
+    strict: bool = False
+
+
+class TreeDiffRequest(BaseModel):
+    """Body for ``POST /saklas/v1/sessions/{id}/tree/diff`` (phase 5)."""
+
+    a_id: str
+    b_id: str
 
 
 class InstallPackRequest(BaseModel):
@@ -352,6 +418,163 @@ def _result_to_json(result: GenerationResult | None) -> dict[str, Any]:
     }
 
 
+def _tree_to_json(session: SaklasSession) -> dict[str, Any]:
+    """Serialize the session's loom tree to JSON.
+
+    Thin wrapper over :meth:`LoomTree.to_dict` — ``include_tokens=False``
+    so the wire payload stays small (per-node token blobs are persisted
+    side-by-side, not embedded in the tree document).
+    """
+    return session.tree.to_dict(include_tokens=False)
+
+
+def _active_path_json(session: SaklasSession) -> dict[str, Any]:
+    """Active path as a chat-message list paired with node ids.
+
+    Returns ``{"active_node_id", "rev", "messages": [...], "node_ids": [...]}``
+    where ``messages`` is the v2 chat-message shape (skipping the synthetic
+    root) and ``node_ids`` is the parallel list of loom-tree node ids in
+    the same order. Surfaces that need both the chat-render and the
+    tree-navigation can read them off one fetch.
+    """
+    tree = session.tree
+    path = tree.active_path()
+    messages: list[dict[str, str]] = []
+    node_ids: list[str] = []
+    for node in path:
+        if node.id == tree.root_id:
+            continue
+        messages.append({"role": node.role, "content": node.text})
+        node_ids.append(node.id)
+    return {
+        "active_node_id": tree.active_node_id,
+        "rev": tree.rev,
+        "messages": messages,
+        "node_ids": node_ids,
+    }
+
+
+def _node_json(session: SaklasSession, node_id: str) -> dict[str, Any]:
+    """Serialize a single node to JSON, including its child-id list.
+
+    The child-id list isn't on ``LoomNode`` itself (the tree owns the
+    structure map), but surfaces routinely want it alongside the node
+    payload — so we attach it here.
+    """
+    node = session.tree.get(node_id)
+    out = node.to_dict(include_tokens=False)
+    out["children"] = list(session.tree.children_of.get(node_id, []))
+    return out
+
+
+def _transcript_yaml(session: SaklasSession, leaf_id: str | None) -> str:
+    """Render the path ending at ``leaf_id`` (or active) as transcript YAML.
+
+    Schema follows the example in ``docs/plans/loom.md`` phase 5 (probe
+    sha256 stubbed empty for phase 2):
+
+        saklas_transcript: 1
+        model_id: <id>
+        system_prompt: <text>
+        probes:
+          - name: <probe>
+            sha256: ""
+        turns:
+          - role: user
+            text: ...
+          - role: assistant
+            text: ...
+            recipe: {...}
+            readings: {...}
+    """
+    tree = session.tree
+    target = leaf_id if leaf_id is not None else tree.active_node_id
+    path = tree.path_to(target)
+
+    system_prompt = ""
+    cfg_sys = getattr(session.config, "system_prompt", None)
+    if cfg_sys:
+        system_prompt = str(cfg_sys)
+
+    monitor = getattr(session, "_monitor", None)
+    probe_names: list[str] = []
+    if monitor is not None:
+        try:
+            probe_names = sorted(monitor.probe_names)
+        except Exception:
+            probe_names = []
+
+    lines: list[str] = []
+    lines.append("saklas_transcript: 1")
+    lines.append(f"model_id: {_yaml_scalar(session.model_id)}")
+    lines.append(f"system_prompt: {_yaml_scalar(system_prompt)}")
+    lines.append("probes:")
+    if not probe_names:
+        lines.append("  []")
+    else:
+        for name in probe_names:
+            lines.append(f"  - name: {_yaml_scalar(name)}")
+            # Phase 2 stub — phase 5 fills with hash of baked tensor bytes.
+            lines.append("    sha256: \"\"")
+    lines.append("turns:")
+    any_turn = False
+    for node in path:
+        if node.id == tree.root_id:
+            continue
+        any_turn = True
+        lines.append(f"  - role: {node.role}")
+        lines.append(f"    text: {_yaml_scalar(node.text)}")
+        if node.recipe is not None:
+            recipe_dict = node.recipe.to_dict()
+            lines.append("    recipe:")
+            for k, v in recipe_dict.items():
+                lines.append(f"      {k}: {_yaml_inline(v)}")
+        if node.aggregate_readings:
+            lines.append("    readings:")
+            for k, v in sorted(node.aggregate_readings.items()):
+                lines.append(f"      {k}: {float(v):.6f}")
+    if not any_turn:
+        lines.append("  []")
+    return "\n".join(lines) + "\n"
+
+
+def _yaml_scalar(value: Any) -> str:
+    """Render a single scalar for the transcript-YAML emitter.
+
+    Strings are double-quoted with escapes so multi-line / unicode / null
+    bodies round-trip cleanly through any YAML 1.2 loader. Non-strings
+    fall through to :func:`_yaml_inline`.
+    """
+    if isinstance(value, str):
+        escaped = (
+            value.replace("\\", "\\\\")
+                 .replace("\"", "\\\"")
+                 .replace("\n", "\\n")
+                 .replace("\r", "\\r")
+                 .replace("\t", "\\t")
+        )
+        return f"\"{escaped}\""
+    return _yaml_inline(value)
+
+
+def _yaml_inline(value: Any) -> str:
+    """JSON-flavored inline rendering for nested recipe scalars.
+
+    JSON is a strict subset of YAML 1.2, so emitting nested dicts /
+    lists / numbers / null via :func:`json.dumps` is valid YAML and
+    sidesteps writing a full YAML emitter.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        return _yaml_scalar(value)
+    return json.dumps(value)
+
+
 def _per_token_probes(session: SaklasSession, n_tokens: int) -> list[dict[str, Any]]:
     scores = session.last_per_token_scores
     if not scores:
@@ -543,6 +766,355 @@ def register_saklas_routes(app: FastAPI) -> None:
             raise HTTPException(400, "History is empty")
         session.rewind()
         return JSONResponse(status_code=204, content=None)
+
+    # ----- loom tree (v2.3 phase 2) --------------------------------------
+
+    @app.get("/saklas/v1/sessions/{session_id}/tree")
+    def get_tree(session_id: str):
+        """Full tree as JSON.
+
+        Same shape :meth:`LoomTree.to_dict` produces. Surfaces hydrate
+        their state from this on bootstrap and reconcile via the WS
+        ``tree_mutated`` delta stream after.
+        """
+        _resolve_session_id(session, session_id)
+        return _tree_to_json(session)
+
+    @app.get("/saklas/v1/sessions/{session_id}/tree/active")
+    def get_tree_active(session_id: str):
+        """Active path: chat messages + parallel node-id list.
+
+        Cheaper than the full tree for surfaces that only need the
+        currently-rendered conversation. The node-id list is parallel to
+        ``messages`` so a click on message ``i`` maps to ``node_ids[i]``.
+        """
+        _resolve_session_id(session, session_id)
+        return _active_path_json(session)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/navigate")
+    async def tree_navigate(session_id: str, req: TreeNavigateRequest):
+        """Re-point the active node.
+
+        Free relative to in-flight generation (per the concurrency
+        invariant in the plan): the gen continues attached to its
+        original target, the user simply sees a different active path.
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            session.tree.navigate(req.node_id)
+        return _active_path_json(session)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/edit")
+    async def tree_edit(session_id: str, req: TreeEditRequest):
+        """In-place text replacement.
+
+        409 when the node is in the reservation of an in-flight
+        generation (mapped via ``SaklasError.user_message``); 404 on
+        unknown id; 400 on root-edit or other invalid ops.
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            session.tree.edit(req.node_id, req.text)
+        return _node_json(session, req.node_id)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/branch")
+    async def tree_branch(session_id: str, req: TreeBranchRequest):
+        """Always-sibling — create a new node next to ``node_id``.
+
+        Allowed during in-flight generation; the new sibling sits on the
+        same user-parent as the gen target without disturbing it.
+        Returns ``{node_id, node, active_path}`` so the caller can place
+        the new node and (if it became active) re-render the chat
+        without a follow-up fetch.
+        """
+        _resolve_session_id(session, session_id)
+        # Cast role through the Literal-narrowing layer the tree owns.
+        role_arg = req.role  # type: ignore[assignment]
+        async with session.lock:
+            new_id = session.tree.branch(
+                req.node_id, req.text, role=role_arg,
+            )
+        return {
+            "node_id": new_id,
+            "node": _node_json(session, new_id),
+            "active_path": _active_path_json(session),
+        }
+
+    @app.delete("/saklas/v1/sessions/{session_id}/tree/{node_id}")
+    async def tree_delete(session_id: str, node_id: str):
+        """Subtree delete.
+
+        400 for ancestor-of-active or root delete; 409 when the subtree
+        intersects an in-flight generation's reservation; 404 on unknown
+        id. Returns ``{removed: <count>}``.
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            removed = session.tree.delete_subtree(node_id)
+        return {"removed": removed}
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/star")
+    async def tree_star(session_id: str, req: TreeStarRequest):
+        """Toggle a node's ``starred`` flag.
+
+        Decoration-only; never raises a concurrency conflict.
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            session.tree.star(req.node_id, req.on)
+        return _node_json(session, req.node_id)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/note")
+    async def tree_note(session_id: str, req: TreeNoteRequest):
+        """Set a node's free-text ``notes`` annotation.
+
+        Decoration-only; never raises a concurrency conflict.
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            session.tree.annotate(req.node_id, req.text)
+        return _node_json(session, req.node_id)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/reset", status_code=204)
+    async def tree_reset(session_id: str):
+        """Drop the entire tree and rebuild a fresh root.
+
+        Equivalent to ``session.clear_history()``; 409 when a generation
+        is in flight (per the concurrency invariant — ``reset`` cannot
+        race the gen path because the gen path owns the streaming target
+        in the tree itself).
+        """
+        _resolve_session_id(session, session_id)
+        async with session.lock:
+            session.clear_history()
+        return JSONResponse(status_code=204, content=None)
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/transcript")
+    def tree_transcript(session_id: str, req: TreeTranscriptRequest):
+        """Render the path ending at ``node_id`` (or active) as transcript YAML.
+
+        Phase 5 producer: uses :meth:`Transcript.from_path` so probe
+        sha256 hashes are real and the YAML round-trips through
+        :meth:`Transcript.from_yaml` cleanly.  Returns
+        ``{"yaml": "<text>", "node_id": "<leaf-of-rendered-path>"}``.
+        """
+        from saklas.core.transcript import Transcript
+
+        _resolve_session_id(session, session_id)
+        leaf = req.node_id if req.node_id is not None else session.tree.active_node_id
+        # Validate the id before touching the renderer so the 404 lands
+        # cleanly through the existing ``SaklasError`` handler.
+        session.tree.get(leaf)
+        transcript = Transcript.from_path(leaf, session)
+        return {"yaml": transcript.to_yaml(), "node_id": leaf}
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/transcript/load")
+    async def tree_transcript_load(
+        session_id: str, req: TreeTranscriptLoadRequest,
+    ):
+        """Import a transcript YAML into the live session tree (phase 5).
+
+        Wraps :meth:`Transcript.from_yaml` + :meth:`Transcript.import_into`.
+        Modes are ``"default"`` / ``"here"`` / ``"merge"``; ``strict``
+        refuses on probe-hash drift.  Returns
+        ``{"leaf_id": "<id>", "rev": <int>, "guards": [...]}``.
+
+        Guards (model mismatch, system-prompt mismatch, probe drift) are
+        also stamped on the imported branch's root node as ``notes`` so
+        the surfaces can show a banner there.  Returning them in the body
+        too saves the client one fetch.
+        """
+        from saklas.core.transcript import (
+            Transcript,
+            TranscriptError,
+            TranscriptFormatError,
+        )
+
+        _resolve_session_id(session, session_id)
+        mode = req.mode or "default"
+        if mode not in ("default", "here", "merge"):
+            raise HTTPException(
+                400, f"unknown import mode {mode!r}; valid: default, here, merge",
+            )
+        try:
+            transcript = Transcript.from_yaml(req.yaml)
+        except TranscriptFormatError as e:
+            raise HTTPException(400, f"invalid transcript: {e}")
+        import warnings
+
+        captured: list[str] = []
+
+        def _on_warning(
+            message,
+            category,
+            filename,
+            lineno,
+            file=None,
+            line=None,
+        ):
+            captured.append(str(message))
+
+        async with session.lock:
+            with warnings.catch_warnings():
+                warnings.showwarning = _on_warning  # type: ignore[assignment]
+                try:
+                    leaf_id = await asyncio.to_thread(
+                        transcript.import_into,
+                        session,
+                        mode=mode,
+                        strict=req.strict,
+                    )
+                except TranscriptError as e:
+                    raise HTTPException(400, str(e))
+        return {
+            "leaf_id": leaf_id,
+            "rev": session.tree.rev,
+            "guards": captured,
+        }
+
+    @app.get("/saklas/v1/sessions/{session_id}/tree/edge_label")
+    def tree_edge_label(session_id: str, parent_id: str, child_id: str):
+        """Steering-delta label for the parent → child edge (phase 5).
+
+        Returns ``{"label": "<text>"}`` — empty string when the two
+        recipes are identical.  Both nodes must exist; the label is
+        computed from the canonical ``applied_steering`` strings on the
+        parent's and child's recipes (parent's may be ``None`` when it's
+        a user turn, in which case the delta is "from-nothing").
+        """
+        from saklas.core.loom_diff import steering_delta
+
+        _resolve_session_id(session, session_id)
+        parent = session.tree.get(parent_id)
+        child = session.tree.get(child_id)
+        parent_expr = parent.applied_steering
+        if parent_expr is None and parent.recipe is not None:
+            parent_expr = parent.recipe.steering
+        child_expr = child.applied_steering
+        if child_expr is None and child.recipe is not None:
+            child_expr = child.recipe.steering
+        return {"label": steering_delta(parent_expr, child_expr)}
+
+    @app.get("/saklas/v1/sessions/{session_id}/tree/filter")
+    def tree_filter(session_id: str, expr: str = ""):
+        """Apply a filter-grammar expression and return matching node ids.
+
+        Grammar in :mod:`saklas.core.tree_filter` — comma-AND'd
+        ``agg:|any:|last:<probe> <op> <threshold>`` clauses.  Empty
+        ``expr`` returns every node id (clears the filter).  Bad
+        expressions land as 400 via :class:`FilterParseError`.
+        """
+        from saklas.core.tree_filter import FilterParseError
+
+        _resolve_session_id(session, session_id)
+        text = (expr or "").strip()
+        if not text:
+            return {"expr": "", "matching_node_ids": []}
+        try:
+            matches = session.tree.filter_by_expr(text)
+        except FilterParseError as e:
+            raise HTTPException(400, str(e))
+        return {"expr": text, "matching_node_ids": sorted(matches)}
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/diff")
+    def tree_diff(session_id: str, req: TreeDiffRequest):
+        """Cross-branch diff between two assistant nodes (phase 5).
+
+        Returns a JSON view of :class:`NodeDiff` (text spans + readings
+        deltas) augmented with the parent-recipe steering delta and any
+        per-token deltas available from the session's
+        ``last_per_token_scores`` — the per-token table is only present
+        for the most-recently-generated assistant so callers shouldn't
+        rely on it.
+        """
+        from saklas.core.loom_diff import per_token_diff, steering_delta
+
+        _resolve_session_id(session, session_id)
+        diff = session.diff_nodes(req.a_id, req.b_id)
+        a_node = session.tree.get(req.a_id)
+        b_node = session.tree.get(req.b_id)
+
+        # Steering-delta against the shared parent's expression — only
+        # meaningful for sibling diffs (parent_id present).
+        parent_expr: str | None = None
+        if diff.parent_id is not None:
+            parent = session.tree.nodes.get(diff.parent_id)
+            if parent is not None:
+                parent_expr = parent.applied_steering
+                if parent_expr is None and parent.recipe is not None:
+                    parent_expr = parent.recipe.steering
+
+        a_expr = a_node.applied_steering or (
+            a_node.recipe.steering if a_node.recipe else None
+        )
+        b_expr = b_node.applied_steering or (
+            b_node.recipe.steering if b_node.recipe else None
+        )
+
+        # Per-token diff: only when both nodes carry token sequences.
+        # Tokens may be absent on serialized-only nodes (loaded transcripts).
+        a_tok_strs: list[str] = []
+        if a_node.tokens:
+            a_tok_strs = [t.get("text", "") for t in a_node.tokens]
+        b_tok_strs: list[str] = []
+        if b_node.tokens:
+            b_tok_strs = [t.get("text", "") for t in b_node.tokens]
+        per_token_spans: list[dict[str, Any]] = []
+        if a_tok_strs and b_tok_strs:
+            spans = per_token_diff(a_tok_strs, b_tok_strs)
+            for sp in spans:
+                per_token_spans.append({
+                    "a_index": sp.a_index,
+                    "b_index": sp.b_index,
+                    "a_text": sp.a_text,
+                    "b_text": sp.b_text,
+                    "aligned": sp.aligned,
+                    "reading_deltas": [
+                        {
+                            "name": rd.name,
+                            "delta": round(float(rd.delta), 6),
+                            "a_value": round(float(rd.a_value), 6),
+                            "b_value": round(float(rd.b_value), 6),
+                        }
+                        for rd in sp.reading_deltas
+                    ],
+                })
+
+        return {
+            "a_id": diff.a_id,
+            "b_id": diff.b_id,
+            "parent_id": diff.parent_id,
+            "a_text": a_node.text,
+            "b_text": b_node.text,
+            "a_applied_steering": a_expr,
+            "b_applied_steering": b_expr,
+            "parent_applied_steering": parent_expr,
+            "steering_delta": steering_delta(a_expr, b_expr),
+            "parent_to_a_delta": (
+                steering_delta(parent_expr, a_expr)
+                if parent_expr is not None or a_expr is not None
+                else ""
+            ),
+            "parent_to_b_delta": (
+                steering_delta(parent_expr, b_expr)
+                if parent_expr is not None or b_expr is not None
+                else ""
+            ),
+            "text": [
+                {"state": sp.state, "text": sp.text}
+                for sp in diff.text
+            ],
+            "readings": [
+                {
+                    "name": rd.name,
+                    "delta": round(float(rd.delta), 6),
+                    "a_value": round(float(rd.a_value), 6),
+                    "b_value": round(float(rd.b_value), 6),
+                }
+                for rd in diff.readings
+            ],
+            "per_token": per_token_spans,
+        }
 
     # ----- vectors -------------------------------------------------------
 
@@ -1027,18 +1599,36 @@ def register_saklas_routes(app: FastAPI) -> None:
                 pass
 
         def _worker() -> None:
+            # Phase 5: ask the engine for the resulting sibling node ids
+            # so the sweep lands in the loom tree as siblings under a
+            # shared user-parent.  ``return_node_ids=True`` is a no-op
+            # when ``stateless=True`` (the engine doesn't mutate the tree
+            # under stateless).  We force ``stateless=False`` so the
+            # sweep populates the tree; the user's request flag now
+            # gates the legacy *table* path which is deprecated — sweep
+            # results live in the tree from v2.3 onward.
             try:
-                session.generate_sweep(
+                outcome = session.generate_sweep(
                     req.prompt,
                     req.sweep,
                     base_steering=req.base_steering,
                     sampling=sampling_cfg,
                     thinking=req.thinking,
-                    stateless=req.stateless,
+                    stateless=False,
                     raw=req.raw,
                     on_result=_emit_result,
+                    return_node_ids=True,
                 )
-                loop.call_soon_threadsafe(result_queue.put_nowait, (DONE, None))
+                # ``outcome`` is a (results, node_ids) tuple under
+                # ``return_node_ids=True``; surface the node ids on the
+                # ``done`` frame so the client can highlight the new
+                # siblings (sweep-deprecation per phase 5).
+                node_ids: list[str | None] = []
+                if isinstance(outcome, tuple) and len(outcome) == 2:
+                    node_ids = list(outcome[1])
+                loop.call_soon_threadsafe(
+                    result_queue.put_nowait, (DONE, node_ids),
+                )
             except Exception as exc:
                 loop.call_soon_threadsafe(result_queue.put_nowait, (ERROR, exc))
 
@@ -1083,8 +1673,9 @@ def register_saklas_routes(app: FastAPI) -> None:
                         if tag is DONE:
                             elapsed = time.monotonic() - start
                             tps = (total_tokens / elapsed) if elapsed > 0 else 0.0
+                            sibling_ids = payload if isinstance(payload, list) else []
                             yield (
-                                f"data: {json.dumps({'type': 'done', 'sweep_id': sweep_id, 'summary': {'completed': completed, 'total': total, 'total_tokens': total_tokens, 'tok_per_sec': round(tps, 2), 'elapsed': round(elapsed, 3)}})}"
+                                f"data: {json.dumps({'type': 'done', 'sweep_id': sweep_id, 'node_ids': sibling_ids, 'summary': {'completed': completed, 'total': total, 'total_tokens': total_tokens, 'tok_per_sec': round(tps, 2), 'elapsed': round(elapsed, 3)}})}"
                                 "\n\n"
                             )
                             break
@@ -1248,6 +1839,103 @@ def register_saklas_routes(app: FastAPI) -> None:
 
         reader_task = asyncio.create_task(_reader())
 
+        # Loom: subscribe to ``LoomMutated`` for the connection's
+        # lifetime and forward as ``tree_mutated`` frames.  Also tag
+        # ``begin_assistant`` events into ``node_created`` so the client
+        # can pre-allocate render slots before token frames arrive.  Held
+        # in a queue + forwarder task so the EventBus callback (which
+        # runs on the gen thread) never touches the WS directly.
+        loop = asyncio.get_running_loop()
+        tree_event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # ``websocket.send_json`` is not safe for concurrent callers —
+        # starlette serializes per-call but two tasks can interleave
+        # bytes on the wire and corrupt the frame sequence.  This lock
+        # is the single send-side serializer the connection uses; both
+        # the generate-handler and the tree-forwarder acquire it before
+        # every send.
+        ws_send_lock = asyncio.Lock()
+
+        async def _send_json(payload: Any) -> None:
+            async with ws_send_lock:
+                await websocket.send_json(payload)
+
+        def _on_loom_event(event: object) -> None:
+            if not isinstance(event, LoomMutated):
+                return
+            try:
+                tree = session.tree
+                added_nodes = [
+                    _node_json(session, nid)
+                    for nid in event.added
+                    if tree.has(nid)
+                ]
+            except Exception:
+                added_nodes = []
+            mutated_payload: dict[str, Any] = {
+                "type": "tree_mutated",
+                "op": event.op,
+                "rev": event.rev,
+                "added": added_nodes,
+                "removed": list(event.removed),
+                "updated": [
+                    _node_json(session, nid)
+                    for nid in event.updated
+                    if session.tree.has(nid)
+                ],
+                "active_node_id": event.active_node_id,
+            }
+            try:
+                loop.call_soon_threadsafe(
+                    tree_event_queue.put_nowait, mutated_payload,
+                )
+            except Exception:
+                pass
+            # ``begin_assistant`` and ``branch`` both materialize a new
+            # node — surface a separate ``node_created`` event with the
+            # parent + role so the client can allocate a render slot
+            # without waiting for the assistant text to start streaming.
+            if event.op in ("begin_assistant", "branch", "add_user"):
+                for nid in event.added:
+                    try:
+                        node = session.tree.get(nid)
+                    except Exception:
+                        continue
+                    node_payload = {
+                        "type": "node_created",
+                        "node_id": nid,
+                        "parent_id": node.parent_id,
+                        "role": node.role,
+                        "rev": event.rev,
+                    }
+                    try:
+                        loop.call_soon_threadsafe(
+                            tree_event_queue.put_nowait, node_payload,
+                        )
+                    except Exception:
+                        pass
+
+        loom_unsub = session.events.subscribe(_on_loom_event)
+
+        async def _tree_forwarder():
+            """Forward tree-mutated / node-created events as WS frames.
+
+            Runs as a dedicated task for the connection's lifetime so
+            tree mutations from any source (this WS, a REST route on a
+            different connection, the gen loop) reach the client without
+            interleaving with the per-turn token loop.
+            """
+            try:
+                while True:
+                    payload = await tree_event_queue.get()
+                    try:
+                        await _send_json(payload)
+                    except Exception:
+                        return
+            except asyncio.CancelledError:
+                return
+
+        forwarder_task = asyncio.create_task(_tree_forwarder())
+
         try:
             while True:
                 msg = await incoming.get()
@@ -1261,7 +1949,7 @@ def register_saklas_routes(app: FastAPI) -> None:
                     try:
                         parsed = WSGenerateMessage(**msg)
                     except Exception as e:
-                        await websocket.send_json({
+                        await _send_json({
                             "type": "error",
                             "message": f"invalid generate message: {e}",
                             "code": "ValidationError",
@@ -1269,13 +1957,13 @@ def register_saklas_routes(app: FastAPI) -> None:
                         continue
                     await _ws_handle_generate(
                         websocket, session, parsed,
-                        app.state.default_steering, incoming,
+                        app.state.default_steering, incoming, _send_json,
                     )
                 elif mtype == "stop":
                     # Idle-state stop: nothing in flight.
                     continue
                 else:
-                    await websocket.send_json({
+                    await _send_json({
                         "type": "error",
                         "message": f"unknown message type: {mtype!r}",
                         "code": "UnknownMessageType",
@@ -1289,7 +1977,7 @@ def register_saklas_routes(app: FastAPI) -> None:
             return
         except Exception as e:
             try:
-                await websocket.send_json({
+                await _send_json({
                     "type": "error",
                     "message": str(e),
                     "code": type(e).__name__,
@@ -1300,6 +1988,18 @@ def register_saklas_routes(app: FastAPI) -> None:
                 except Exception:
                     pass
         finally:
+            # Drop the loom subscription before tearing down the reader
+            # so the EventBus stops dispatching into a queue nobody
+            # reads.
+            try:
+                loom_unsub()
+            except Exception:
+                pass
+            forwarder_task.cancel()
+            try:
+                await forwarder_task
+            except (asyncio.CancelledError, Exception):
+                pass
             # Reader holds the only ``receive_json()`` call on the WS.
             # Cancel + await so the cancellation propagates fully before
             # the connection tears down.
@@ -1316,30 +2016,41 @@ async def _ws_handle_generate(
     msg: WSGenerateMessage,
     default_steering: "Steering | None",
     incoming: asyncio.Queue[Any],
+    send_json: Callable[[Any], Awaitable[None]],
 ) -> None:
     """Run one generate turn and stream token/done/error events.
 
-    Concurrency design: the synchronous ``session.generate`` is run in a
-    worker thread via ``asyncio.to_thread``.  Its ``on_token`` callback
-    is invoked on the worker thread; it bridges into the asyncio loop by
-    calling ``loop.call_soon_threadsafe(queue.put_nowait, event)``.  The
-    main coroutine races two tasks: one pulls ``TokenEvent``s from a
-    local queue and forwards them as ``{type: "token", ...}`` frames;
-    the other pulls client frames from the shared ``incoming`` queue
+    Concurrency design: the synchronous ``session.generate_stream`` is
+    driven from a worker thread via ``asyncio.to_thread``.  Its
+    ``on_token`` callback is invoked on the worker thread; it bridges
+    into the asyncio loop by calling
+    ``loop.call_soon_threadsafe(queue.put_nowait, event)``.  The main
+    coroutine races two tasks: one pulls ``TokenEvent``s from a local
+    queue and forwards them as ``{type: "token", ...}`` frames; the
+    other pulls client frames from the shared ``incoming`` queue
     (populated by the connection's single reader task) so an in-flight
     ``{type: "stop"}`` can call ``session.stop()`` without blocking on
     the token loop.
 
     ``asyncio.wait(..., FIRST_COMPLETED)`` is used in a loop: whenever
-    the incoming task returns a stop frame we signal the session and keep
-    draining tokens until the worker joins; whenever the queue delivers
-    a sentinel we finish.  The WS stays open across generate turns — a
-    client can submit ``{type: "generate", ...}`` again after ``done``,
-    and the perpetual reader keeps feeding the shared queue between
-    turns so we never have two ``receive_json()`` calls in flight.
+    the incoming task returns a stop frame we signal the session and
+    keep draining tokens until the worker joins; whenever the queue
+    delivers a sentinel we finish.  The WS stays open across generate
+    turns — a client can submit ``{type: "generate", ...}`` again after
+    ``done``, and the perpetual reader keeps feeding the shared queue
+    between turns so we never have two ``receive_json()`` calls in
+    flight.
+
+    **Loom (v2.3)**: ``parent_node_id`` attaches the assistant node
+    under a specific tree node; ``n>1`` fans out N siblings serially
+    (per decision 7 in the plan — N-way gen is serial in v1).  Each
+    sibling produces its own ``started`` / token-stream / ``done``
+    triplet, all tagged with the assistant node id.  ``tree_mutated``
+    and ``node_created`` events ride the connection-level subscription
+    in ``session_stream``; this handler only emits the per-sibling
+    ``started`` / ``token`` / ``done`` frames.
     """
     loop = asyncio.get_running_loop()
-    generation_id = uuid.uuid4().hex[:12]
 
     sampling = _build_sampling(msg.sampling)
     try:
@@ -1355,7 +2066,7 @@ async def _ws_handle_generate(
         # shouldn't kill the connection — send the error frame and let
         # the client try again on the same WS.
         status, message = e.user_message()
-        await websocket.send_json({
+        await send_json({
             "type": "error",
             "message": message,
             "code": type(e).__name__,
@@ -1363,153 +2074,268 @@ async def _ws_handle_generate(
         })
         return
 
-    token_queue: asyncio.Queue[Any] = asyncio.Queue()
-    _SENTINEL = object()
+    n = msg.n if msg.n and msg.n > 0 else 1
+    if n < 1:
+        await send_json({
+            "type": "error",
+            "message": f"n must be >= 1, got {n}",
+            "code": "ValueError",
+            "status": 400,
+        })
+        return
 
-    def _on_token(
-        text: str,
-        is_thinking: bool,
-        tid: int | None,
-        lp: float | None,
-        top: list[tuple[str, float]] | None,
-        perplexity: float | None = None,
-    ) -> None:
-        event: dict[str, Any] = {
-            "type": "token",
-            "text": text,
-            "thinking": bool(is_thinking),
-            "token_id": int(tid) if tid is not None else None,
-        }
-        # Per-layer × per-probe heatmap data for the inspector panel.
-        # Computed inline only when probes are loaded (covers the cost
-        # of N matmul + N CPU syncs against the latest captured hidden
-        # state).  Falls through silently when no capture exists yet
-        # (e.g. extremely short generations where the hook never fires).
-        try:
-            monitor = session._monitor
-            if monitor.probe_names:
-                latest_hidden = {
-                    layer_idx: bucket[-1]
-                    for layer_idx, bucket in session._capture._per_layer.items()
-                    if bucket
-                }
-                if latest_hidden:
-                    per_layer = monitor.score_single_token_per_layer(latest_hidden)
-                    if per_layer:
-                        event["per_layer_scores"] = {
-                            str(layer): {p: round(float(v), 6) for p, v in metrics.items()}
-                            for layer, metrics in per_layer.items()
-                        }
-        except Exception:
-            # Inspector data is best-effort — never let a failure here
-            # break the streaming token path.
-            pass
-        loop.call_soon_threadsafe(token_queue.put_nowait, event)
+    parent_node_id = msg.parent_node_id
 
-    result_holder: list[GenerationResult] = []
-    error_holder: list[BaseException] = []
+    # Per-sibling seed schedule: when n>1, derive deterministic per-
+    # sibling seeds from the request seed (or fresh entropy).  Single
+    # streams (n=1) use the user's seed verbatim.
+    from saklas.core.loom import derive_seed_schedule
+    base_seed = sampling.seed if sampling is not None else None
+    seeds: list[int | None]
+    if n == 1:
+        seeds = [base_seed]
+    else:
+        seeds = list(derive_seed_schedule(base_seed, n))  # type: ignore[arg-type]
 
-    def _worker():
-        try:
-            result = session.generate(
-                msg.input,
-                steering=steering,
-                sampling=sampling,
-                stateless=msg.stateless,
-                raw=msg.raw,
-                thinking=msg.thinking,
-                on_token=_on_token,
-            )
-            result_holder.append(result)
-        except BaseException as e:
-            error_holder.append(e)
-        finally:
-            loop.call_soon_threadsafe(token_queue.put_nowait, _SENTINEL)
-
-    # Acquire the session lock for the full generation lifetime so
+    # Acquire the session lock for the full N-way batch lifetime so
     # concurrent WS clients serialize FIFO instead of overlapping.
+    # ``session.generate_stream`` itself uses the threading ``_gen_lock``
+    # to gate the actual generation, but the async-level lock is what
+    # queues HTTP/WS endpoints fairly.
     async with session.lock:
-        await websocket.send_json({"type": "started", "generation_id": generation_id})
+        for sibling_idx, seed_i in enumerate(seeds):
+            generation_id = uuid.uuid4().hex[:12]
 
-        worker_task = asyncio.create_task(asyncio.to_thread(_worker))
+            # Per-sibling sampling override carrying the derived seed.
+            if n == 1 and seed_i is None:
+                per_sibling_sampling = sampling
+            else:
+                from dataclasses import replace as _dc_replace
+                base_sc = sampling if sampling is not None else SamplingConfig()
+                per_sibling_sampling = _dc_replace(base_sc, seed=seed_i)
 
-        # Race two queue reads — token frames from the worker and client
-        # frames from the connection's perpetual reader.  Neither side
-        # ever calls ``websocket.receive_json()`` directly, so the
-        # underlying ``recv_in_progress`` flag is owned by the reader
-        # task alone for the connection's lifetime.
-        done = False
-        try:
-            while not done:
-                token_get = asyncio.create_task(token_queue.get())
-                client_get = asyncio.create_task(incoming.get())
-                finished, _pending = await asyncio.wait(
-                    {token_get, client_get}, return_when=asyncio.FIRST_COMPLETED,
-                )
-                if client_get in finished:
-                    incoming_msg = client_get.result()
-                    # ``_DISCONNECT`` / reader-error sentinels: signal
-                    # the worker to wind down; let the outer loop
-                    # propagate the disconnect on the next iteration.
-                    if isinstance(incoming_msg, dict):
-                        if incoming_msg.get("type") == "stop":
-                            try:
-                                session.stop()
-                            except Exception:
-                                pass
-                        elif "_reader_error" in incoming_msg:
-                            try:
-                                session.stop()
-                            except Exception:
-                                pass
-                            # Re-enqueue so the outer dispatch loop
-                            # surfaces the error after we wind down.
-                            await incoming.put(incoming_msg)
-                        else:
-                            # Out-of-band frame during a generation —
-                            # re-enqueue so the outer loop sees it after
-                            # this turn finishes.  Most likely an early
-                            # ``{type: "generate"}`` from a client that
-                            # didn't wait for ``done``.
-                            await incoming.put(incoming_msg)
-                    else:
-                        # Disconnect sentinel from the reader.
-                        try:
-                            session.stop()
-                        except Exception:
-                            pass
-                        await incoming.put(incoming_msg)
-                else:
-                    client_get.cancel()
-                if token_get in finished:
-                    item = token_get.result()
-                    if item is _SENTINEL:
-                        done = True
-                    else:
-                        await websocket.send_json(item)
-                else:
-                    token_get.cancel()
-        finally:
-            # Drain any residual events the worker pushed between sentinel
-            # and join — should be none because the sentinel is last, but
-            # cheap insurance.
-            await worker_task
+            token_queue: asyncio.Queue[Any] = asyncio.Queue()
+            _SENTINEL = object()
+            # The tree assigns the assistant node id at ``begin_assistant``
+            # time inside ``_generate_core``; we don't know it before the
+            # gen starts.  The on_token callback reads the live active
+            # node off the tree (which is set to the streaming assistant
+            # node for the lifetime of the gen).
+            current_node_holder: list[str | None] = [None]
 
-        if error_holder and not result_holder:
-            exc = error_holder[0]
-            await websocket.send_json({
-                "type": "error",
-                "message": str(exc),
-                "code": type(exc).__name__,
+            def _on_token(
+                text: str,
+                is_thinking: bool,
+                tid: int | None,
+                lp: float | None,
+                top: list[tuple[str, float]] | None,
+                perplexity: float | None = None,
+                _node_holder: list[str | None] = current_node_holder,
+            ) -> None:
+                # Resolve the streaming assistant node id once per token;
+                # cheap (one attribute read) and avoids racing the tree
+                # mutation that adds the assistant node before the first
+                # token fires.
+                node_id = _node_holder[0]
+                if node_id is None:
+                    try:
+                        candidate = session.tree.active_node_id
+                        # Defensive coerce: tests may pass a Mock-shaped
+                        # ``session`` whose ``tree.active_node_id`` is
+                        # not a string.  Treat anything non-string as
+                        # "no node" so the JSON encoder doesn't choke.
+                        if isinstance(candidate, str):
+                            node_id = candidate
+                            _node_holder[0] = candidate
+                    except Exception:
+                        node_id = None
+                event: dict[str, Any] = {
+                    "type": "token",
+                    "text": text,
+                    "thinking": bool(is_thinking),
+                    "token_id": int(tid) if tid is not None else None,
+                    "node_id": node_id,
+                }
+                # Per-layer × per-probe heatmap data for the inspector
+                # panel.  Computed inline only when probes are loaded
+                # (covers the cost of N matmul + N CPU syncs against the
+                # latest captured hidden state).  Falls through silently
+                # when no capture exists yet (e.g. extremely short
+                # generations where the hook never fires).
+                try:
+                    monitor = session._monitor
+                    if monitor.probe_names:
+                        latest_hidden = {
+                            layer_idx: bucket[-1]
+                            for layer_idx, bucket in session._capture._per_layer.items()
+                            if bucket
+                        }
+                        if latest_hidden:
+                            per_layer = monitor.score_single_token_per_layer(latest_hidden)
+                            if per_layer:
+                                event["per_layer_scores"] = {
+                                    str(layer): {p: round(float(v), 6) for p, v in metrics.items()}
+                                    for layer, metrics in per_layer.items()
+                                }
+                except Exception:
+                    # Inspector data is best-effort — never let a failure
+                    # here break the streaming token path.
+                    pass
+                loop.call_soon_threadsafe(token_queue.put_nowait, event)
+
+            result_holder: list[GenerationResult] = []
+            error_holder: list[BaseException] = []
+
+            # Recipe-override (phase 5): accept either a mode string or a
+            # partial-recipe expression.  We pass it through ``generate``
+            # so the engine resolves the overlay against the parent's
+            # recipe; ``session.regen_with_modifier`` is the matching
+            # higher-level wrapper but the WS path already has the
+            # required context.
+            recipe_override = msg.recipe_override
+
+            def _worker(
+                _sampling=per_sibling_sampling,
+                _on_token=_on_token,
+                _result_holder=result_holder,
+                _error_holder=error_holder,
+                _token_queue=token_queue,
+                _sentinel=_SENTINEL,
+                _recipe_override=recipe_override,
+            ):
+                try:
+                    gen_kwargs: dict[str, Any] = dict(
+                        steering=steering,
+                        sampling=_sampling,
+                        stateless=msg.stateless,
+                        raw=msg.raw,
+                        thinking=msg.thinking,
+                        on_token=_on_token,
+                        parent_node_id=parent_node_id,
+                    )
+                    if _recipe_override is not None:
+                        gen_kwargs["recipe_override"] = _recipe_override
+                    result = session.generate(msg.input, **gen_kwargs)
+                    _result_holder.append(result)
+                except BaseException as e:
+                    _error_holder.append(e)
+                finally:
+                    loop.call_soon_threadsafe(_token_queue.put_nowait, _sentinel)
+
+            await send_json({
+                "type": "started",
+                "generation_id": generation_id,
+                # ``node_id`` is filled in lazily by the first token
+                # event (the assistant node is created inside
+                # ``_generate_core``); ``started`` includes the request-
+                # level context the client needs to allocate state.
+                "node_id": None,
+                "sibling_index": sibling_idx,
+                "sibling_count": n,
             })
-            return
 
-        result = result_holder[0] if result_holder else None
-        result_json = _result_to_json(result)
-        if result is not None:
-            result_json["per_token_probes"] = _per_token_probes(
-                session, getattr(result, "token_count", 0) or 0,
-            )
-        else:
-            result_json["per_token_probes"] = []
-        await websocket.send_json({"type": "done", "result": result_json})
+            worker_task = asyncio.create_task(asyncio.to_thread(_worker))
+
+            # Race two queue reads — token frames from the worker and
+            # client frames from the connection's perpetual reader.
+            # Neither side ever calls ``websocket.receive_json()``
+            # directly, so the underlying ``recv_in_progress`` flag is
+            # owned by the reader task alone for the connection's
+            # lifetime.
+            done = False
+            stop_signaled = False
+            try:
+                while not done:
+                    token_get = asyncio.create_task(token_queue.get())
+                    client_get = asyncio.create_task(incoming.get())
+                    finished, _pending = await asyncio.wait(
+                        {token_get, client_get}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if client_get in finished:
+                        incoming_msg = client_get.result()
+                        # ``_DISCONNECT`` / reader-error sentinels:
+                        # signal the worker to wind down; let the outer
+                        # loop propagate the disconnect on the next
+                        # iteration.
+                        if isinstance(incoming_msg, dict):
+                            if incoming_msg.get("type") == "stop":
+                                try:
+                                    session.stop()
+                                except Exception:
+                                    pass
+                                stop_signaled = True
+                            elif "_reader_error" in incoming_msg:
+                                try:
+                                    session.stop()
+                                except Exception:
+                                    pass
+                                stop_signaled = True
+                                # Re-enqueue so the outer dispatch loop
+                                # surfaces the error after we wind down.
+                                await incoming.put(incoming_msg)
+                            else:
+                                # Out-of-band frame during a generation —
+                                # re-enqueue so the outer loop sees it
+                                # after this turn finishes.  Most likely
+                                # an early ``{type: "generate"}`` from a
+                                # client that didn't wait for ``done``.
+                                await incoming.put(incoming_msg)
+                        else:
+                            # Disconnect sentinel from the reader.
+                            try:
+                                session.stop()
+                            except Exception:
+                                pass
+                            stop_signaled = True
+                            await incoming.put(incoming_msg)
+                    else:
+                        client_get.cancel()
+                    if token_get in finished:
+                        item = token_get.result()
+                        if item is _SENTINEL:
+                            done = True
+                        else:
+                            await send_json(item)
+                    else:
+                        token_get.cancel()
+            finally:
+                # Drain any residual events the worker pushed between
+                # sentinel and join — should be none because the
+                # sentinel is last, but cheap insurance.
+                await worker_task
+
+            if error_holder and not result_holder:
+                exc = error_holder[0]
+                await send_json({
+                    "type": "error",
+                    "message": str(exc),
+                    "code": type(exc).__name__,
+                    "node_id": current_node_holder[0],
+                    "sibling_index": sibling_idx,
+                })
+                # On error inside a sibling, abort the remaining fan-out
+                # rather than continuing with stale state.
+                return
+
+            result = result_holder[0] if result_holder else None
+            result_json = _result_to_json(result)
+            if result is not None:
+                result_json["per_token_probes"] = _per_token_probes(
+                    session, getattr(result, "token_count", 0) or 0,
+                )
+            else:
+                result_json["per_token_probes"] = []
+            await send_json({
+                "type": "done",
+                "result": result_json,
+                "node_id": current_node_holder[0],
+                "sibling_index": sibling_idx,
+                "sibling_count": n,
+            })
+
+            # Mid-batch stop honors the plan's decision (#7 / phase 1
+            # spec): "stop_requested cancels the currently-streaming
+            # sibling. Remaining queued siblings are skipped, not
+            # started."
+            if stop_signaled:
+                break

@@ -12,11 +12,15 @@ import type {
   CorrelationData,
   ExtractRequest,
   ExtractResponse,
+  FilterMatchesJSON,
   InstallPackRequest,
   InstallPackResponse,
   LoadVectorRequest,
+  LoomNodeJSON,
+  LoomTreeJSON,
   MergeVectorRequest,
   MergeVectorResponse,
+  NodeDiffJSON,
   PackListResponse,
   PackSearchResponse,
   ProbeDefaultsResponse,
@@ -27,6 +31,7 @@ import type {
   SweepEvent,
   SweepRequest,
   TraitsEvent,
+  TranscriptLoadResponseJSON,
   VectorDiagnosticsResponse,
   VectorInfo,
   VectorListResponse,
@@ -43,11 +48,15 @@ export type {
   CorrelationData,
   ExtractRequest,
   ExtractResponse,
+  FilterMatchesJSON,
   InstallPackRequest,
   InstallPackResponse,
   LoadVectorRequest,
+  LoomNodeJSON,
+  LoomTreeJSON,
   MergeVectorRequest,
   MergeVectorResponse,
+  NodeDiffJSON,
   PackListResponse,
   PackSearchResponse,
   ProbeDefaultsResponse,
@@ -58,6 +67,7 @@ export type {
   SweepEvent,
   SweepRequest,
   TraitsEvent,
+  TranscriptLoadResponseJSON,
   VectorDiagnosticsResponse,
   VectorInfo,
   VectorListResponse,
@@ -448,6 +458,148 @@ export async function apiCloneStream(
   if (!final) throw new Error("clone: stream ended without done event");
   return final;
 }
+
+// ============================================================== tree ==
+//
+// Loom tree REST surface (v2.3, phase 2).  All routes 404 on servers
+// that don't yet ship the loom layer — callers should catch ApiError
+// with status 404 and fall back to non-loom behaviour.
+
+export const apiTree = {
+  /** Full tree dump.  Cheap enough to fetch on every reconcile. */
+  get(id: string = SESSION): Promise<LoomTreeJSON> {
+    return request(`${SESSION_BASE(id)}/tree`);
+  },
+  /** Just the active path — what the chat panel needs to render the
+   *  conversation linearly.  Less data than the full tree.  Server
+   *  shape: ``{active_node_id, rev, messages, node_ids}`` (parallel
+   *  arrays). */
+  active(id: string = SESSION): Promise<{
+    active_node_id: string;
+    rev: number;
+    messages: { role: string; content: string }[];
+    node_ids: string[];
+  }> {
+    return request(`${SESSION_BASE(id)}/tree/active`);
+  },
+  navigate(
+    node_id: string,
+    id: string = SESSION,
+  ): Promise<{
+    active_node_id: string;
+    rev: number;
+    messages: { role: string; content: string }[];
+    node_ids: string[];
+  }> {
+    return request(`${SESSION_BASE(id)}/tree/navigate`, jsonBody({ node_id }));
+  },
+  edit(
+    node_id: string,
+    text: string,
+    id: string = SESSION,
+  ): Promise<LoomNodeJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/edit`,
+      jsonBody({ node_id, text }),
+    );
+  },
+  branch(
+    node_id: string,
+    text: string,
+    id: string = SESSION,
+  ): Promise<{ node_id: string; rev: number }> {
+    return request(
+      `${SESSION_BASE(id)}/tree/branch`,
+      jsonBody({ node_id, text }),
+    );
+  },
+  delete(
+    node_id: string,
+    id: string = SESSION,
+  ): Promise<{ removed: string[]; rev: number }> {
+    return request<{ removed: string[]; rev: number }>(
+      `${SESSION_BASE(id)}/tree/${encodeURIComponent(node_id)}`,
+      { method: "DELETE" },
+    );
+  },
+  star(
+    node_id: string,
+    on: boolean,
+    id: string = SESSION,
+  ): Promise<LoomNodeJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/star`,
+      jsonBody({ node_id, on }),
+    );
+  },
+  note(
+    node_id: string,
+    text: string,
+    id: string = SESSION,
+  ): Promise<LoomNodeJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/note`,
+      jsonBody({ node_id, text }),
+    );
+  },
+  /** Steering-delta label for the parent→child edge (phase 5).
+   *  Empty string when the two recipes are identical. */
+  edgeLabel(
+    parent_id: string,
+    child_id: string,
+    id: string = SESSION,
+  ): Promise<{ label: string }> {
+    const q = new URLSearchParams({ parent_id, child_id });
+    return request(`${SESSION_BASE(id)}/tree/edge_label?${q.toString()}`);
+  },
+  /** Apply a filter-grammar expression server-side and get the
+   *  matching node id list back.  Empty ``expr`` returns []. */
+  filter(
+    expr: string,
+    id: string = SESSION,
+  ): Promise<FilterMatchesJSON> {
+    const q = new URLSearchParams({ expr });
+    return request(`${SESSION_BASE(id)}/tree/filter?${q.toString()}`);
+  },
+  /** Cross-branch diff between two assistant nodes (phase 5).  Returns
+   *  the engine's :class:`NodeDiff` plus per-token spans + steering
+   *  delta labels. */
+  diff(
+    a_id: string,
+    b_id: string,
+    id: string = SESSION,
+  ): Promise<NodeDiffJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/diff`,
+      jsonBody({ a_id, b_id }),
+    );
+  },
+  /** Export the path ending at ``node_id`` (or the active node when
+   *  ``null``) as transcript YAML. */
+  transcriptExport(
+    node_id: string | null,
+    id: string = SESSION,
+  ): Promise<{ yaml: string; node_id: string }> {
+    return request(
+      `${SESSION_BASE(id)}/tree/transcript`,
+      jsonBody({ node_id }),
+    );
+  },
+  /** Import a transcript YAML into the tree under one of three
+   *  modes.  Returns the leaf node id, the new rev, and any guard
+   *  warnings (model / system-prompt / probe drift). */
+  transcriptLoad(
+    yaml: string,
+    mode: "default" | "here" | "merge",
+    strict: boolean,
+    id: string = SESSION,
+  ): Promise<TranscriptLoadResponseJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/transcript/load`,
+      jsonBody({ yaml, mode, strict }),
+    );
+  },
+};
 
 // =========================================================== traits ====
 

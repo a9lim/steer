@@ -321,6 +321,16 @@ export interface WSGenerateRequest {
   thinking?: boolean | null;
   stateless?: boolean;
   raw?: boolean;
+  /** Loom: attach result as a child of this node.  ``null``/absent =
+   *  active node.  Lets phase-3 regen target a specific user-parent. */
+  parent_node_id?: string | null;
+  /** Loom: spawn ``n`` sibling assistant nodes (deterministic seed schedule
+   *  per Decision 20).  Default 1 server-side. */
+  n?: number;
+  /** Loom: partial Recipe overlaid on the parent's — phase-5 fan-out /
+   *  auto-regen.  Accepted as a mode string (``"unsteered"`` etc) or a
+   *  partial-recipe expression string.  Engine resolves the overlay. */
+  recipe_override?: string | Record<string, unknown> | null;
 }
 
 export interface WSStopRequest {
@@ -332,6 +342,9 @@ export type WSClientMessage = WSGenerateRequest | WSStopRequest;
 export interface WSStartedEvent {
   type: "started";
   generation_id: string;
+  /** Loom: node id receiving this gen's tokens.  Optional for backward
+   * compat with the pre-phase-2 single-path server. */
+  node_id?: string;
 }
 
 export interface WSTokenEvent {
@@ -342,6 +355,9 @@ export interface WSTokenEvent {
   /** Per-layer × per-probe map populated only when probes are loaded.
    * Keys: layer-index strings → probe names → cosine-sim score. */
   per_layer_scores?: Record<string, Record<string, number>>;
+  /** Loom: node id this token belongs to.  Routes the token to the right
+   * sibling render during n-way regen.  Optional. */
+  node_id?: string;
 }
 
 export interface WSDoneResultPerToken {
@@ -364,19 +380,165 @@ export interface WSDoneResult {
 export interface WSDoneEvent {
   type: "done";
   result: WSDoneResult;
+  /** Loom: node id this gen finalised. */
+  node_id?: string;
 }
 
 export interface WSErrorEvent {
   type: "error";
   message: string;
   code?: string;
+  node_id?: string;
+}
+
+// ----------------------------------------------------- loom (v2.3) --
+
+/** Wire-shape mirror of saklas.core.loom.LoomNode.  Optional fields are
+ * absent on the wire when null/empty server-side to keep payloads slim. */
+export interface LoomNodeJSON {
+  id: string;
+  parent_id: string | null;
+  role: "user" | "assistant" | "system";
+  text: string;
+  /** Assistant nodes only.  Mirrors saklas.core.loom.Recipe. */
+  recipe?: {
+    steering?: string | null;
+    sampling?: WSSampling | null;
+    thinking?: boolean | null;
+    seed?: number | null;
+    probes?: string[];
+    probe_hashes?: Record<string, string>;
+  } | null;
+  aggregate_readings?: Record<string, number>;
+  applied_steering?: string | null;
+  finish_reason?: string | null;
+  starred?: boolean;
+  notes?: string;
+  created_at?: number;
+  edited_at?: number | null;
+  edit_count?: number;
+}
+
+/** Full tree dump returned by GET /sessions/{id}/tree.
+ *
+ *  Server's ``LoomTree.to_dict`` serializes ``nodes`` as a list (flat,
+ *  preserves insertion order) and ``children_of`` as a parent→ordered
+ *  child-id map.  Clients pivot the node list into a dict keyed by id
+ *  for the in-memory cache. */
+export interface LoomTreeJSON {
+  tree_format?: number;
+  root_id: string;
+  active_node_id: string;
+  rev: number;
+  nodes: LoomNodeJSON[];
+  /** parent_id → ordered list of child ids. */
+  children_of: Record<string, string[]>;
+  /** Optional model identifier the tree was generated against. */
+  model_id?: string | null;
+  session_id?: string | null;
+  name?: string | null;
+}
+
+/** Phase-5 cross-branch diff response (server side: NodeDiff +
+ *  per_token spans + steering-delta labels).  Returned by
+ *  ``POST /sessions/{id}/tree/diff``. */
+export interface DiffTextSpanJSON {
+  state: "equal" | "insert" | "delete";
+  text: string;
+}
+
+export interface DiffReadingDeltaJSON {
+  name: string;
+  delta: number;
+  a_value: number;
+  b_value: number;
+}
+
+export interface DiffTokenSpanJSON {
+  a_index: number;
+  b_index: number;
+  a_text: string;
+  b_text: string;
+  aligned: boolean;
+  reading_deltas: DiffReadingDeltaJSON[];
+}
+
+export interface NodeDiffJSON {
+  a_id: string;
+  b_id: string;
+  parent_id: string | null;
+  a_text: string;
+  b_text: string;
+  a_applied_steering: string | null;
+  b_applied_steering: string | null;
+  parent_applied_steering: string | null;
+  steering_delta: string;
+  parent_to_a_delta: string;
+  parent_to_b_delta: string;
+  text: DiffTextSpanJSON[];
+  readings: DiffReadingDeltaJSON[];
+  per_token: DiffTokenSpanJSON[];
+}
+
+/** Phase-5 filter route response. */
+export interface FilterMatchesJSON {
+  expr: string;
+  matching_node_ids: string[];
+}
+
+/** Phase-5 transcript-load route response. */
+export interface TranscriptLoadResponseJSON {
+  leaf_id: string;
+  rev: number;
+  guards: string[];
+}
+
+/** Per-op delta sent on every tree mutation.  Clients apply in-place
+ * keyed by ``rev`` continuity; full re-fetch on gap.
+ *
+ * Note: phase-2 server sends ``updated`` as full LoomNodeJSON entries
+ * (the plan's "partial fields" shape simplifies to "send the node again"
+ * because LoomMutated doesn't track which fields changed).  Clients merge
+ * by replacing the node entry wholesale. */
+export interface WSTreeMutatedEvent {
+  type: "tree_mutated";
+  op:
+    | "edit"
+    | "branch"
+    | "navigate"
+    | "delete"
+    | "star"
+    | "note"
+    | "reset"
+    | "regenerate"
+    | "begin_assistant"
+    | "add_user"
+    | "finalize"
+    | string;
+  added?: LoomNodeJSON[];
+  removed?: string[];
+  updated?: LoomNodeJSON[];
+  active_node_id?: string | null;
+  rev: number;
+}
+
+/** Fired at the start of each branch in an n-way generate so the client
+ * can allocate render slots before token events arrive. */
+export interface WSNodeCreatedEvent {
+  type: "node_created";
+  node_id: string;
+  parent_id: string;
+  role: "user" | "assistant" | "system";
+  rev: number;
 }
 
 export type WSServerMessage =
   | WSStartedEvent
   | WSTokenEvent
   | WSDoneEvent
-  | WSErrorEvent;
+  | WSErrorEvent
+  | WSTreeMutatedEvent
+  | WSNodeCreatedEvent;
 
 // ----------------------------------------------------- chat / UI --
 
@@ -507,7 +669,6 @@ export type DrawerName =
   | "save_conversation"
   | "load_conversation"
   | "compare"
-  | "sweep"
   | "pack"
   | "merge"
   | "clone"
@@ -517,7 +678,13 @@ export type DrawerName =
   | "correlation"
   | "layer_norms"
   | "export"
-  | "help";
+  | "help"
+  /** Cross-branch diff drawer — phase 5.  ``params`` carries the
+   * selected node ids (1 user node → compare its children, 2+
+   * assistant nodes → compare those). */
+  | "node_compare"
+  /** Transcript export/import drawer — phase 5. */
+  | "transcript";
 
 export interface DrawerState {
   open: DrawerName | null;

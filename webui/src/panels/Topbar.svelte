@@ -17,20 +17,41 @@
     chatLog,
     enqueuePending,
     onWsMessage,
+    loomTree,
+    loomUiState,
+    toggleLoomSidebar,
+    autoRegenState,
+    toggleAutoRegen,
+    setAutoRegenMode,
+    setAutoRegenCustom,
   } from "../lib/stores.svelte";
+  import type { AutoRegenMode } from "../lib/stores.svelte";
   import type { DrawerName } from "../lib/types";
   import { onMount } from "svelte";
 
   let toolsOpen = $state(false);
   let toolsRef: HTMLDivElement | null = $state(null);
+  let autoRegenPopoverOpen = $state(false);
+  let autoRegenRef: HTMLDivElement | null = $state(null);
 
-  // Close tools menu on outside click or Escape.
+  // Close tools menu / auto-regen popover on outside click or Escape.
   function onDocClick(ev: MouseEvent) {
-    if (!toolsOpen) return;
-    if (toolsRef && !toolsRef.contains(ev.target as Node)) toolsOpen = false;
+    if (toolsOpen && toolsRef && !toolsRef.contains(ev.target as Node)) {
+      toolsOpen = false;
+    }
+    if (
+      autoRegenPopoverOpen &&
+      autoRegenRef &&
+      !autoRegenRef.contains(ev.target as Node)
+    ) {
+      autoRegenPopoverOpen = false;
+    }
   }
   function onDocKey(ev: KeyboardEvent) {
-    if (ev.key === "Escape" && toolsOpen) toolsOpen = false;
+    if (ev.key === "Escape") {
+      if (toolsOpen) toolsOpen = false;
+      if (autoRegenPopoverOpen) autoRegenPopoverOpen = false;
+    }
   }
 
   onMount(() => {
@@ -41,6 +62,15 @@
       document.removeEventListener("keydown", onDocKey);
     };
   });
+
+  const AUTO_REGEN_MODES: { value: AutoRegenMode; label: string }[] = [
+    { value: "unsteered", label: "Unsteered (default)" },
+    { value: "inverted", label: "Inverted" },
+    { value: "reseed", label: "Reseed" },
+    { value: "cool", label: "Cool" },
+    { value: "hot", label: "Hot" },
+    { value: "custom", label: "Custom…" },
+  ];
 
   // Loaded = session info has populated.  Buttons gate on this so a fresh
   // page doesn't flicker with disabled→enabled mid-bootstrap.
@@ -139,6 +169,86 @@
   </div>
 
   <div class="right">
+    {#if !loomTree.unavailable}
+      <button
+        type="button"
+        class="action"
+        class:on={loomUiState.sidebarOpen}
+        disabled={!loaded}
+        onclick={toggleLoomSidebar}
+        title="Toggle loom sidebar"
+        aria-pressed={loomUiState.sidebarOpen}
+      >
+        loom
+      </button>
+
+      <button
+        type="button"
+        class="action"
+        disabled={!loaded}
+        onclick={() => openDrawer("transcript")}
+        title="Export / import transcripts"
+      >transcript</button>
+
+      <!-- Auto-regen toggle + gear popover.  Replaces the old A/B
+           checkbox; default mode is "unsteered" so previous A/B users
+           see no regression. -->
+      <div class="auto-regen-wrap" bind:this={autoRegenRef}>
+        <button
+          type="button"
+          class="action"
+          class:on={autoRegenState.enabled}
+          disabled={!loaded}
+          onclick={toggleAutoRegen}
+          title="Auto-regen: fire one regen with a recipe-override modifier after every primary gen"
+          aria-pressed={autoRegenState.enabled}
+        >
+          auto-regen <span class="dim">·</span> <span class="mode-pill">{autoRegenState.mode}</span>
+        </button>
+        <button
+          type="button"
+          class="gear"
+          disabled={!loaded}
+          aria-label="Auto-regen mode"
+          aria-expanded={autoRegenPopoverOpen}
+          onclick={(ev) => {
+            ev.stopPropagation();
+            autoRegenPopoverOpen = !autoRegenPopoverOpen;
+          }}
+        >⚙</button>
+        {#if autoRegenPopoverOpen}
+          <div class="auto-regen-popover" role="menu">
+            <div class="popover-title">Auto-regen mode</div>
+            {#each AUTO_REGEN_MODES as opt (opt.value)}
+              <label class="mode-row">
+                <input
+                  type="radio"
+                  name="auto-regen-mode"
+                  value={opt.value}
+                  checked={autoRegenState.mode === opt.value}
+                  onchange={() => setAutoRegenMode(opt.value)}
+                />
+                <span>{opt.label}</span>
+              </label>
+            {/each}
+            {#if autoRegenState.mode === "custom"}
+              <label class="custom-row">
+                <span>partial recipe</span>
+                <input
+                  type="text"
+                  class="custom-input"
+                  value={autoRegenState.custom}
+                  oninput={(ev) =>
+                    setAutoRegenCustom((ev.currentTarget as HTMLInputElement).value)}
+                  placeholder="seed=42, temperature=1.5"
+                />
+              </label>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     {#if pendingCount > 0}
       <button
         class="pending-badge"
@@ -200,7 +310,6 @@
           <button type="button" role="menuitem" onclick={() => pickTool("merge")}>merge vector…</button>
           <button type="button" role="menuitem" onclick={() => pickTool("clone")}>clone vector…</button>
           <button type="button" role="menuitem" onclick={() => pickTool("compare")}>compare vectors…</button>
-          <button type="button" role="menuitem" onclick={() => pickTool("sweep")}>sweep…</button>
           <button type="button" role="menuitem" onclick={() => pickTool("pack")}>packs…</button>
           <hr />
           <button type="button" role="menuitem" onclick={() => pickTool("correlation")}>correlation matrix…</button>
@@ -284,6 +393,11 @@
     border-color: var(--border-dim);
     cursor: not-allowed;
   }
+  .action.on {
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.08);
+  }
   .stop {
     border-color: var(--accent-red);
     color: var(--accent-red);
@@ -317,6 +431,96 @@
   }
   .tools-wrap {
     position: relative;
+  }
+  .auto-regen-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+  }
+  .auto-regen-wrap .action {
+    border-right: 0;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .gear {
+    background: transparent;
+    color: var(--fg-dim);
+    border: 1px solid var(--border);
+    padding: 0.25em 0.4em;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.85em;
+    font-family: var(--font-mono);
+  }
+  .gear:hover:not(:disabled) {
+    color: var(--accent-blue);
+    border-color: var(--fg-muted);
+  }
+  .gear:disabled {
+    color: var(--fg-muted);
+    border-color: var(--border-dim);
+    cursor: not-allowed;
+  }
+  .auto-regen-popover {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    min-width: 220px;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.5em 0.75em;
+    z-index: var(--z-modal);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+  }
+  .popover-title {
+    color: var(--fg-muted);
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+    font-size: var(--font-size-tiny);
+    margin-bottom: 0.2em;
+  }
+  .mode-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    color: var(--fg-strong);
+    cursor: pointer;
+  }
+  .custom-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2em;
+    margin-top: 0.3em;
+  }
+  .custom-input {
+    background: var(--bg-deep);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 0.3em 0.4em;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-tiny);
+  }
+  .custom-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+  }
+  .mode-pill {
+    color: var(--accent-blue);
+    font-size: 0.85em;
+    text-transform: lowercase;
+  }
+  .dim {
+    color: var(--fg-muted);
+    margin: 0 0.15em;
   }
   .tools-menu {
     position: absolute;

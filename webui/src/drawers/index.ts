@@ -34,3 +34,6 @@ export { default as Help } from "./HelpDrawer.svelte";
 export { default as Export } from "./ExportDrawer.svelte";
 export { default as Correlation } from "./CorrelationDrawer.svelte";
 export { default as LayerNorms } from "./LayerNormsDrawer.svelte";
+// Phase 5 drawers — cross-branch diff and transcript IO.
+export { default as NodeCompare } from "./NodeCompareDrawer.svelte";
+export { default as Transcript } from "./TranscriptDrawer.svelte";

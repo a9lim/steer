@@ -1,0 +1,194 @@
+<script lang="ts">
+  // A single-node chip in the loom sidebar.  Phase 3 scope: role glyph,
+  // first ~40 chars of text, active-path bolded, dead branches dimmed.
+  // Phase-5 additions (steering-delta edge labels, probe-aggregate ring
+  // decoration, star/note glyphs, pin affordances) live behind props /
+  // slots that aren't wired yet — but the hooks are here so the sidebar
+  // doesn't need a structural rewrite when phase 5 lands.
+
+  import type { LoomNodeJSON } from "../../lib/types";
+
+  interface Props {
+    node: LoomNodeJSON;
+    /** Active path membership — bold + ring + accent. */
+    onActivePath: boolean;
+    /** Current focused node for sidebar keyboard nav (j/k/h/l). */
+    focused: boolean;
+    /** Dead branch (not on active path) — render at reduced opacity. */
+    dead: boolean;
+    /** In-flight target — pulse the node so the user sees streaming. */
+    streaming: boolean;
+    /** Click handler — navigate to this node. */
+    onclick?: (ev: MouseEvent) => void;
+    /** Right-click handler — open the context menu. */
+    oncontextmenu?: (ev: MouseEvent) => void;
+    /** Optional probe ring fill in [-1, 1] (phase 5; null for now). */
+    ring?: number | null;
+  }
+
+  let {
+    node,
+    onActivePath,
+    focused,
+    dead,
+    streaming,
+    onclick,
+    oncontextmenu,
+    ring = null,
+  }: Props = $props();
+
+  const PREVIEW_CHARS = 40;
+
+  function roleGlyph(role: LoomNodeJSON["role"]): string {
+    if (role === "user") return "u";
+    if (role === "assistant") return "a";
+    return "s";
+  }
+
+  const preview = $derived.by(() => {
+    const t = (node.text ?? "").replace(/\s+/g, " ").trim();
+    if (!t) return node.role === "system" && !node.parent_id ? "root" : "(empty)";
+    return t.length > PREVIEW_CHARS ? t.slice(0, PREVIEW_CHARS) + "…" : t;
+  });
+
+  // Phase-5 hook: ring color stub.  Caller passes ``ring`` in [-1,1] —
+  // negative red, positive green.  Until phase 5 the prop is null and
+  // nothing renders.
+  const ringColor = $derived(
+    ring === null ? null : ring >= 0 ? "var(--accent-green)" : "var(--accent-red)",
+  );
+</script>
+
+<div
+  class="node"
+  class:active={onActivePath}
+  class:focused
+  class:dead
+  class:streaming
+  class:starred={node.starred}
+  class:user={node.role === "user"}
+  class:assistant={node.role === "assistant"}
+  class:system={node.role === "system"}
+  role="treeitem"
+  aria-selected={onActivePath}
+  tabindex={focused ? 0 : -1}
+  data-node-id={node.id}
+  {onclick}
+  {oncontextmenu}
+  onkeydown={(ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      onclick?.(ev as unknown as MouseEvent);
+    }
+  }}
+>
+  <span class="glyph" aria-hidden="true">{roleGlyph(node.role)}</span>
+  {#if ringColor}
+    <span class="ring" style="border-color: {ringColor}" aria-hidden="true"></span>
+  {/if}
+  {#if node.starred}
+    <span class="star" title="starred" aria-hidden="true">★</span>
+  {/if}
+  <span class="preview">{preview}</span>
+  {#if node.notes}
+    <span class="note-mark" title={node.notes} aria-label="has note">●</span>
+  {/if}
+</div>
+
+<style>
+  .node {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.2em 0.5em;
+    border-left: 2px solid transparent;
+    border-radius: 2px;
+    cursor: pointer;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    line-height: 1.35;
+    color: var(--fg-strong);
+    background: transparent;
+    transition: background 0.08s ease;
+    min-width: 0;
+    user-select: none;
+  }
+  .node:hover {
+    background: var(--bg-elev);
+  }
+  .node:focus-visible {
+    outline: 1px solid var(--accent-blue);
+    outline-offset: -1px;
+  }
+  .node.focused {
+    background: rgba(88, 166, 255, 0.12);
+    outline: 1px solid var(--accent-blue);
+    outline-offset: -1px;
+  }
+  .node.active {
+    font-weight: 600;
+    color: var(--fg);
+    border-left-color: var(--accent-green);
+  }
+  .node.dead {
+    opacity: 0.3;
+  }
+  .node.dead:hover {
+    opacity: 0.6;
+  }
+  .node.streaming {
+    background: rgba(126, 231, 135, 0.08);
+  }
+  .node.user {
+    border-left-color: var(--accent-blue);
+  }
+  .node.user .glyph {
+    color: var(--accent-blue);
+  }
+  .node.assistant {
+    border-left-color: var(--accent-green);
+  }
+  .node.assistant .glyph {
+    color: var(--accent-green);
+  }
+  .node.system {
+    border-left-color: var(--fg-muted);
+  }
+  .node.system .glyph {
+    color: var(--fg-muted);
+  }
+  .glyph {
+    font-weight: bold;
+    width: 1ch;
+    text-align: center;
+    font-size: var(--font-size-tiny);
+    text-transform: uppercase;
+  }
+  .preview {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .star {
+    color: var(--accent-yellow);
+    font-size: var(--font-size-tiny);
+  }
+  .note-mark {
+    color: var(--accent-purple);
+    font-size: 0.5em;
+    line-height: 1;
+  }
+  /* Phase-5 hook: a thin colored ring around the role glyph keyed off
+   * the highlight-probe's per-node aggregate reading.  Renders only
+   * when ``ring`` prop is non-null. */
+  .ring {
+    width: 0.9em;
+    height: 0.9em;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+    display: inline-block;
+  }
+</style>

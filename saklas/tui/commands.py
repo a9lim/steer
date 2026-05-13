@@ -83,8 +83,35 @@ def _build_registry() -> dict[str, SlashCommand]:
     """
     from saklas.tui.app import SaklasApp
 
-    def _regen(app: "SaklasApp", _raw: str) -> None:
-        app.action_regenerate()
+    def _regen(app: "SaklasApp", raw: str) -> None:
+        # Phase 4: ``/regen [N]`` — default 1, fan out N siblings under the
+        # active assistant's user-parent.  N=1 keeps today's behavior bit-
+        # identical so the registry interrupts/pending-action wiring is
+        # unchanged for the common path.
+        #
+        # Phase 5 extension: trailing ``<mode>`` token (``unsteered`` /
+        # ``inverted`` / ``reseed`` / ``cool`` / ``hot``) flips the regen
+        # over to ``session.regen_with_modifier`` so users get the same
+        # recipe-override semantics as ``/auto-regen``.
+        raw = (raw or "").strip()
+        tokens = raw.split() if raw else []
+        n = 1
+        mode: str | None = None
+        if tokens:
+            try:
+                n = max(1, int(tokens[0]))
+            except ValueError:
+                app._chat_panel.add_system_message(f"/regen: bad N '{tokens[0]}'")
+                return
+            if len(tokens) > 1:
+                mode = " ".join(tokens[1:])
+        if mode is not None:
+            app._dispatch_loom_regen(n, mode=mode)
+            return
+        if n == 1:
+            app.action_regenerate()
+            return
+        app._dispatch_loom_regen(n)
 
     def _quit(app: "SaklasApp", _raw: str) -> None:
         app.exit()
@@ -186,9 +213,9 @@ def _build_registry() -> dict[str, SlashCommand]:
         SlashCommand(
             name="/regen",
             handler=_regen,
-            usage="Usage: /regen",
+            usage="Usage: /regen [N] [mode]   (mode: unsteered|inverted|reseed|cool|hot)",
             min_args=0,
-            max_args=0,
+            max_args=None,
         ),
         SlashCommand(
             name="/model",
@@ -281,6 +308,120 @@ def _build_registry() -> dict[str, SlashCommand]:
             usage="Usage: /help",
             min_args=0,
             max_args=0,
+        ),
+        # --- Loom (phase 4) ---
+        SlashCommand(
+            name="/tree",
+            handler=SaklasApp._handle_tree,
+            usage="Usage: /tree",
+            min_args=0,
+            max_args=0,
+        ),
+        SlashCommand(
+            name="/nav",
+            handler=SaklasApp._handle_nav,
+            usage="Usage: /nav <id-prefix>",
+            min_args=1,
+            max_args=1,
+        ),
+        SlashCommand(
+            name="/edit",
+            handler=SaklasApp._handle_edit,
+            usage="Usage: /edit <text...>",
+            min_args=1,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/branch",
+            handler=SaklasApp._handle_branch,
+            usage="Usage: /branch [text...]",
+            min_args=0,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/del",
+            handler=SaklasApp._handle_del,
+            usage="Usage: /del [yes]",
+            min_args=0,
+            max_args=1,
+        ),
+        SlashCommand(
+            name="/star",
+            handler=SaklasApp._handle_star,
+            usage="Usage: /star",
+            min_args=0,
+            max_args=0,
+        ),
+        SlashCommand(
+            name="/note",
+            handler=SaklasApp._handle_note,
+            usage="Usage: /note <text>",
+            min_args=0,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/path",
+            handler=SaklasApp._handle_path,
+            usage="Usage: /path",
+            min_args=0,
+            max_args=0,
+        ),
+        SlashCommand(
+            name="/fan",
+            handler=SaklasApp._handle_fan,
+            usage=(
+                "Usage: /fan <vector> <alphas>\n"
+                "  alphas: '0.0, 0.3, 0.7'  ·  linspace(-1, 1, 5)  ·  0.0:1.0:0.25"
+            ),
+            min_args=2,
+            max_args=None,
+        ),
+        SlashCommand(
+            # Deprecated alias for ``/fan`` — phase 5 collapses sweep into
+            # the canonical fan-out primitive.  Routes through the same
+            # handler with a deprecation banner.
+            name="/sweep",
+            handler=SaklasApp._handle_sweep_deprecated,
+            usage=(
+                "Usage: /sweep <vector> <alphas>  (deprecated — use /fan)\n"
+                "  alphas: '0.0, 0.3, 0.7'  ·  linspace(-1, 1, 5)  ·  0.0:1.0:0.25"
+            ),
+            min_args=2,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/prune",
+            handler=SaklasApp._handle_prune,
+            usage="Usage: /prune <filter-expr>  (phase 5 evaluates; phase 4 stashes)",
+            min_args=0,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/auto-regen",
+            handler=SaklasApp._handle_auto_regen,
+            usage="Usage: /auto-regen [unsteered|inverted|reseed|cool|hot|<expr>]",
+            min_args=0,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/transcript",
+            handler=SaklasApp._handle_transcript,
+            usage=(
+                "Usage: /transcript export <path>\n"
+                "       /transcript load <path> [--here | --merge] [--strict]  (phase 5)"
+            ),
+            min_args=1,
+            max_args=None,
+        ),
+        SlashCommand(
+            name="/diff",
+            handler=SaklasApp._handle_diff,
+            usage=(
+                "Usage: /diff <id1> <id2> [--full]\n"
+                "       /diff --siblings"
+            ),
+            min_args=1,
+            max_args=None,
         ),
     ]
     return {c.name: c for c in cmds}

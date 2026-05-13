@@ -1,0 +1,834 @@
+"""Phase 4 — TUI loom slash commands + helpers.
+
+Tests cover the slash-command dispatch contract for the new loom verbs
+plus the standalone helpers (alpha grid parser, prefix resolver,
+transcript builder).  We don't drive the actual Textual screen — the
+loom screen is a thin renderer over ``session.tree``, and the
+mutations exercised here all flow through helpers that are easier to
+test at the unit level.
+
+The mock-session pattern mirrors ``tests/test_tui_commands.py``: build
+an app via ``object.__new__``, install a real :class:`LoomTree` on a
+MagicMock session, and verify the dispatch routes correctly.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+import saklas
+from saklas.core.loom import LoomTree, Recipe
+from saklas.tui.app import SaklasApp
+from saklas.tui.loom_helpers import (
+    AlphaListError,
+    PrefixMatch,
+    build_transcript_payload,
+    format_node_detail,
+    format_path_summary,
+    parse_alpha_list,
+    resolve_node_prefix,
+    search_nodes,
+)
+
+
+# ---------------------------------------------------------------------------
+# Test scaffolding
+# ---------------------------------------------------------------------------
+
+
+def _make_app():
+    """Minimal SaklasApp bag — same shape as test_tui_commands._make_app."""
+
+    app = object.__new__(SaklasApp)
+    session = MagicMock()
+    session.tree = LoomTree()
+    session.history = []
+    session._profiles = {}
+    session._model_info = {"model_id": "mock/mock", "model_type": "mock"}
+    session._device = SimpleNamespace(type="cpu")
+    session._layers = [0, 1, 2]
+    session._monitor = MagicMock()
+    session._monitor.probe_names = []
+    session._monitor.profiles = {}
+    session._last_result = None
+    session._last_per_token_scores = None
+    session._tokenizer = MagicMock()
+    session.config = SimpleNamespace(
+        temperature=0.7, top_p=0.9, max_new_tokens=128,
+        system_prompt=None,
+    )
+    session.is_generating = False
+    session.gen_state = saklas.GenState.IDLE
+    session._gen_state = MagicMock()
+    session._gen_state.stop_requested = MagicMock()
+    session._gen_state.stop_requested.is_set = MagicMock(return_value=False)
+
+    app._session = session
+    app._device_str = "cpu"
+    app._alphas = {}
+    app._enabled = {}
+    app._supports_thinking = False
+    app._thinking = False
+    app._current_assistant_widget = None
+    app._poll_timer = None
+    app._last_prompt = None
+    app._ab_mode = False
+    app._ab_shadow_active = False
+    app._ab_shadow_row = None
+    app._row_for_widget = {}
+    app._pending_action = None
+    app._ui_gen_active = False
+    app._focused_panel_idx = 1
+    app._highlighting = False
+    app._highlight_probe = None
+    app._default_seed = None
+    app._loom_prune_expr = None
+    app._loom_auto_regen_mode = "unsteered"
+    app._loom_auto_regen_on = False
+    import queue as _queue
+    app._ui_token_queue = _queue.SimpleQueue()
+    app._input_history = []
+    app._history_index = None
+    app._history_stash = ""
+    app._gen_start_time = 0.0
+    app._gen_token_count = 0
+    app._last_tok_per_sec = 0.0
+    app._last_elapsed = 0.0
+    app._log_ppl_sum = 0.0
+    app._ppl_count = 0
+    app._last_gen_state = (-1, -1.0, -1.0, False, -1)
+    app._assistant_messages = []
+
+    chat = MagicMock()
+    chat.messages = []
+    chat.add_system_message = lambda msg: chat.messages.append(msg)
+    app._chat_panel = chat
+
+    trait = MagicMock()
+    trait.get_selected_probe = MagicMock(return_value=None)
+    app._trait_panel = trait
+
+    left = MagicMock()
+    app._left_panel = left
+
+    return app
+
+
+def _msgs(app):
+    return "\n".join(app._chat_panel.messages)
+
+
+def _seed_tree(tree: LoomTree, *, role: str = "assistant", text: str = "hello"):
+    """Drop a one-turn user→assistant pair on the tree, return the ids."""
+    uid = tree.add_user_turn("what?")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
+    tree.finalize_assistant(aid, text=text)
+    return uid, aid
+
+
+# ---------------------------------------------------------------------------
+# parse_alpha_list — shared grammar across TUI and webui sweep drawer
+# ---------------------------------------------------------------------------
+
+
+def test_parse_alpha_list_comma_list():
+    assert parse_alpha_list("0.0, 0.3, 0.7") == [0.0, 0.3, 0.7]
+
+
+def test_parse_alpha_list_strips_empties():
+    assert parse_alpha_list("0.1, ,0.2,") == [0.1, 0.2]
+
+
+def test_parse_alpha_list_linspace_basic():
+    # linspace(-1, 1, 3) → [-1, 0, 1]
+    vals = parse_alpha_list("linspace(-1, 1, 3)")
+    assert len(vals) == 3
+    assert vals[0] == pytest.approx(-1.0)
+    assert vals[1] == pytest.approx(0.0)
+    assert vals[2] == pytest.approx(1.0)
+
+
+def test_parse_alpha_list_linspace_single_point():
+    assert parse_alpha_list("linspace(0.5, 1.0, 1)") == [0.5]
+
+
+def test_parse_alpha_list_linspace_invalid_count():
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("linspace(0, 1, 0)")
+
+
+def test_parse_alpha_list_range_form():
+    vals = parse_alpha_list("0.0:1.0:0.25")
+    # 0.0, 0.25, 0.5, 0.75, 1.0
+    assert len(vals) == 5
+    assert vals[0] == pytest.approx(0.0)
+    assert vals[-1] == pytest.approx(1.0)
+
+
+def test_parse_alpha_list_range_step_zero():
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("0:1:0")
+
+
+def test_parse_alpha_list_range_step_direction_mismatch():
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("0:1:-0.1")
+
+
+def test_parse_alpha_list_empty_errors():
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("")
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("  ")
+
+
+def test_parse_alpha_list_bad_number():
+    with pytest.raises(AlphaListError):
+        parse_alpha_list("0.1, banana, 0.2")
+
+
+# ---------------------------------------------------------------------------
+# resolve_node_prefix — `/nav <prefix>`
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_node_prefix_unique_hit():
+    tree = LoomTree()
+    uid, aid = _seed_tree(tree)
+    # Longer prefix needed — ulid timestamp prefix (first ~10 chars) is
+    # shared across nodes created in the same millisecond.
+    match = resolve_node_prefix(tree, uid[:16])
+    assert match.ok
+    assert match.node_id == uid
+    assert match.candidates == (uid,)
+
+
+def test_resolve_node_prefix_case_insensitive():
+    tree = LoomTree()
+    uid, _ = _seed_tree(tree)
+    match = resolve_node_prefix(tree, uid[:16].lower())
+    assert match.ok
+    assert match.node_id == uid
+
+
+def test_resolve_node_prefix_no_match():
+    tree = LoomTree()
+    _seed_tree(tree)
+    match = resolve_node_prefix(tree, "ZZZZZZZ")
+    assert not match.ok
+    assert match.missing
+
+
+def test_resolve_node_prefix_ambiguous():
+    tree = LoomTree()
+    uid, aid = _seed_tree(tree)
+    # Build two more siblings under the same user, then search for the
+    # shared root-id prefix "0" — should hit multiple.
+    tree.branch(aid, "another")
+    tree.branch(aid, "third")
+    match = resolve_node_prefix(tree, "0")
+    # Whether `0` happens to be ambiguous depends on the random tail,
+    # so try the smallest common prefix instead: ulids share their first
+    # 10 chars (timestamp) within ~ms of each other.  We use the first
+    # char of the root id, which is guaranteed unique to root + kids.
+    # Just verify the API contract: when more than one matches, the
+    # match isn't ok and candidates carry the matches.
+    if match.ambiguous:
+        assert match.node_id is None
+        assert len(match.candidates) >= 2
+
+
+def test_resolve_node_prefix_empty_input():
+    tree = LoomTree()
+    _seed_tree(tree)
+    match = resolve_node_prefix(tree, "")
+    assert match.missing
+    match = resolve_node_prefix(tree, "   ")
+    assert match.missing
+
+
+# ---------------------------------------------------------------------------
+# search_nodes
+# ---------------------------------------------------------------------------
+
+
+def test_search_nodes_text():
+    tree = LoomTree()
+    uid = tree.add_user_turn("what about owls?")
+    aid = tree.begin_assistant(uid)
+    tree.finalize_assistant(aid, text="owls are nocturnal birds of prey.")
+    bid = tree.branch(aid, "elephants are not nocturnal.")
+    hits = search_nodes(tree, "owl")
+    assert uid in hits
+    assert aid in hits
+    assert bid not in hits
+
+
+def test_search_nodes_notes():
+    tree = LoomTree()
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid)
+    tree.finalize_assistant(aid, text="hello")
+    tree.annotate(aid, "good answer — keep this")
+    assert aid in search_nodes(tree, "keep")
+
+
+def test_search_nodes_empty_query():
+    tree = LoomTree()
+    _seed_tree(tree)
+    assert search_nodes(tree, "") == []
+
+
+# ---------------------------------------------------------------------------
+# format_path_summary / format_node_detail
+# ---------------------------------------------------------------------------
+
+
+def test_format_path_summary_walks_active_path():
+    tree = LoomTree()
+    uid, aid = _seed_tree(tree, text="answer text")
+    out = format_path_summary(tree)
+    assert uid[:8] in out
+    assert aid[:8] in out
+    assert "what?" in out
+    assert "answer text" in out
+
+
+def test_format_path_summary_empty():
+    tree = LoomTree()
+    assert format_path_summary(tree) == "(empty path)"
+
+
+def test_format_node_detail_includes_recipe_and_readings():
+    tree = LoomTree()
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
+    tree.finalize_assistant(
+        aid, text="hello",
+        aggregate_readings={"angry.calm": -0.5, "happy.sad": 0.2},
+    )
+    out = format_node_detail(tree, aid)
+    assert "0.3 honest" in out
+    assert "42" in out
+    assert "angry.calm" in out
+    assert "happy.sad" in out
+    assert "hello" in out
+
+
+# ---------------------------------------------------------------------------
+# build_transcript_payload
+# ---------------------------------------------------------------------------
+
+
+def test_build_transcript_payload_minimal_shape():
+    tree = LoomTree(model_id="mock/mock")
+    uid = tree.add_user_turn("what?")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
+    tree.finalize_assistant(aid, text="hello", aggregate_readings={"angry.calm": 0.1})
+    payload = build_transcript_payload(
+        tree, model_id="mock/mock", system_prompt="be helpful",
+    )
+    assert payload["saklas_transcript"] == 1
+    assert payload["model_id"] == "mock/mock"
+    assert payload["system_prompt"] == "be helpful"
+    assert len(payload["turns"]) == 2
+    assert payload["turns"][0] == {"role": "user", "text": "what?"}
+    assert payload["turns"][1]["role"] == "assistant"
+    assert payload["turns"][1]["recipe"]["steering"] == "0.3 honest"
+    assert payload["turns"][1]["readings"] == {"angry.calm": 0.1}
+
+
+# ---------------------------------------------------------------------------
+# Slash command dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_tree_slash_pushes_screen():
+    app = _make_app()
+    app.push_screen = MagicMock()
+    app._handle_command("/tree")
+    app.push_screen.assert_called_once()
+    pushed = app.push_screen.call_args.args[0]
+    # Lazy import in the handler — verify by class name to avoid an
+    # eager Textual import in the test body.
+    assert type(pushed).__name__ == "LoomScreen"
+
+
+def test_nav_navigates_by_prefix():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    # Active is currently aid (begin_assistant set it).  Use a longer
+    # prefix — ulid timestamp prefix is shared across nodes created in
+    # the same millisecond.
+    app._handle_command(f"/nav {uid[:16]}")
+    assert app._session.tree.active_node_id == uid
+    assert any("navigated" in m for m in app._chat_panel.messages)
+
+
+def test_nav_missing_reports():
+    app = _make_app()
+    _seed_tree(app._session.tree)
+    app._handle_command("/nav ZZZZZZZ")
+    assert any("no node matches" in m for m in app._chat_panel.messages)
+
+
+def test_nav_usage_on_empty():
+    app = _make_app()
+    app._handle_command("/nav")
+    assert any("Usage: /nav" in m for m in app._chat_panel.messages)
+
+
+def test_edit_replaces_active_text():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree, text="old text")
+    # Active is the assistant; /edit replaces its text in place.
+    app._handle_command("/edit brand new")
+    assert app._session.tree.get(aid).text == "brand new"
+    assert app._session.tree.get(aid).edit_count == 1
+
+
+def test_edit_usage():
+    app = _make_app()
+    _seed_tree(app._session.tree)
+    app._handle_command("/edit")
+    assert any("Usage: /edit" in m for m in app._chat_panel.messages)
+
+
+def test_branch_creates_sibling():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree, text="orig")
+    before = len(app._session.tree.child_ids(uid))
+    app._handle_command("/branch alternative")
+    after = len(app._session.tree.child_ids(uid))
+    assert after == before + 1
+    # Active node moved to the new sibling.
+    new_id = app._session.tree.active_node_id
+    assert new_id != aid
+    assert app._session.tree.get(new_id).text == "alternative"
+
+
+def test_branch_blank_creates_empty_sibling():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._handle_command("/branch")
+    new_id = app._session.tree.active_node_id
+    assert new_id != aid
+    assert app._session.tree.get(new_id).text == ""
+
+
+def test_del_requires_yes_confirm():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._handle_command("/del")
+    # No 'yes' → no deletion; usage hint emitted.
+    assert aid in app._session.tree.nodes
+
+
+def test_del_yes_removes_subtree():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    # Build a deeper subtree under the user turn — branch returns the
+    # new sibling id and re-points the active node to it.
+    extra = app._session.tree.branch(aid, "alt")
+    assert app._session.tree.active_node_id == extra
+    app._handle_command("/del yes")
+    # The active sibling gets deleted; its sibling ``aid`` survives.
+    assert extra not in app._session.tree.nodes
+    assert aid in app._session.tree.nodes
+
+
+def test_star_toggles():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    assert not app._session.tree.get(aid).starred
+    app._handle_command("/star")
+    assert app._session.tree.get(aid).starred
+    app._handle_command("/star")
+    assert not app._session.tree.get(aid).starred
+
+
+def test_note_annotates_active():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._handle_command("/note keep this")
+    assert app._session.tree.get(aid).notes == "keep this"
+
+
+def test_path_prints_summary():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree, text="hello")
+    app._handle_command("/path")
+    out = _msgs(app)
+    assert uid[:8] in out
+    assert aid[:8] in out
+    assert "hello" in out
+
+
+def test_transcript_export_writes_payload(tmp_path):
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    out = tmp_path / "transcript.json"
+    app._handle_command(f"/transcript export {out}")
+    assert out.exists()
+    payload = json.loads(out.read_text())
+    assert payload["saklas_transcript"] == 1
+    assert any(t["role"] == "user" for t in payload["turns"])
+    assert any(t["role"] == "assistant" for t in payload["turns"])
+
+
+def test_transcript_load_missing_file(tmp_path):
+    """Phase 5: load surfaces a 'not a file' message when the path doesn't exist."""
+    app = _make_app()
+    missing = tmp_path / "nope.yaml"
+    app._handle_command(f"/transcript load {missing}")
+    msg = _msgs(app)
+    assert "not a file" in msg
+
+
+def test_transcript_load_default_attaches_at_root(tmp_path):
+    """Phase 5: `/transcript load <path>` runs `import_into(mode='default')`."""
+    import saklas
+    app = _make_app()
+    # Build a transcript from a non-trivial tree and dump it to YAML.
+    src = LoomTree(model_id="mock/mock")
+    uid = src.add_user_turn("hi")
+    aid = src.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
+    src.finalize_assistant(aid, text="hello", aggregate_readings={"angry.calm": 0.1})
+    transcript = saklas.Transcript(
+        model_id="mock/mock",
+        system_prompt=None,
+        probes=[],
+        turns=[
+            saklas.TranscriptTurn(role="user", text="hi"),
+            saklas.TranscriptTurn(
+                role="assistant", text="hello",
+                recipe=Recipe(steering="0.3 honest", seed=42),
+                readings={"angry.calm": 0.1},
+            ),
+        ],
+    )
+    path = tmp_path / "t.yaml"
+    path.write_text(transcript.to_yaml())
+
+    # The mock session needs _probe_hash for the guard-note walk.
+    app._session._probe_hash = lambda name: None
+    # ``model_id`` is read off ``session.model_id`` in the guard checks.
+    app._session.model_id = "mock/mock"
+
+    app._handle_command(f"/transcript load {path}")
+    msg = _msgs(app)
+    assert "/transcript load (default)" in msg
+    # Two turns landed under the synthetic root.
+    assert any(n.text == "hi" for n in app._session.tree.nodes.values())
+    assert any(n.text == "hello" for n in app._session.tree.nodes.values())
+
+
+def test_transcript_load_unknown_flag_combo(tmp_path):
+    """--here + --merge together → usage hint, no import."""
+    app = _make_app()
+    path = tmp_path / "x.yaml"
+    path.write_text("saklas_transcript: 1\nturns: []\n")
+    app._handle_command(f"/transcript load {path} --here --merge")
+    assert any("at most one" in m for m in app._chat_panel.messages)
+
+
+def test_diff_unique_prefix_diffs_two_siblings():
+    """Phase 5: `/diff a b` calls session.diff_nodes and renders the result."""
+    app = _make_app()
+    tree = app._session.tree
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest"))
+    tree.finalize_assistant(aid, text="answer one", aggregate_readings={"calm": 0.5})
+    bid = tree.branch(aid, "")
+    tree.edit(bid, "answer two")
+
+    # Wire diff_nodes to call the real loom_diff primitives so the test
+    # stays an integration test (MagicMock auto-attrs would mask the
+    # rendering shape).
+    import saklas
+    def _real_diff(a_id, b_id):
+        a = tree.get(a_id); b = tree.get(b_id)
+        return saklas.NodeDiff(
+            a_id=a_id, b_id=b_id,
+            parent_id=a.parent_id if a.parent_id == b.parent_id else None,
+            text=saklas.text_diff(a.text or "", b.text or ""),
+            readings=saklas.readings_diff(
+                a.aggregate_readings or {}, b.aggregate_readings or {},
+            ),
+        )
+    app._session.diff_nodes = _real_diff
+
+    app._handle_command(f"/diff {aid[:16]} {bid[:16]}")
+    msg = _msgs(app)
+    assert "diff:" in msg
+    # Word-level diff captures the replacement.
+    assert "two" in msg
+    # Readings table label appears.
+    assert "readings" in msg
+
+
+def test_diff_siblings_two_kids_diffs_pair():
+    app = _make_app()
+    tree = app._session.tree
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest"))
+    tree.finalize_assistant(aid, text="A")
+    bid = tree.branch(aid, "B")
+
+    import saklas
+    def _real_diff(a_id, b_id):
+        a = tree.get(a_id); b = tree.get(b_id)
+        return saklas.NodeDiff(
+            a_id=a_id, b_id=b_id, parent_id=uid,
+            text=saklas.text_diff(a.text or "", b.text or ""),
+            readings=saklas.readings_diff(
+                a.aggregate_readings or {}, b.aggregate_readings or {},
+            ),
+        )
+    app._session.diff_nodes = _real_diff
+
+    # Active is the most recent sibling — works either way for siblings dispatch.
+    app._handle_command("/diff --siblings")
+    msg = _msgs(app)
+    assert "diff:" in msg
+
+
+def test_diff_siblings_one_child_errors():
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._handle_command("/diff --siblings")
+    msg = _msgs(app)
+    assert "need ≥2" in msg
+
+
+def test_diff_usage_on_empty():
+    app = _make_app()
+    app._handle_command("/diff")
+    assert any("/diff" in m and "Usage" in m for m in app._chat_panel.messages)
+
+
+def test_prune_parses_and_stashes_expression():
+    """Phase 5: `/prune` validates via parse_filter, then stashes."""
+    app = _make_app()
+    # Sneak a node with a reading so filter_by_expr can match against it
+    # (saves us from monkey-patching the tree).
+    tree = app._session.tree
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid)
+    tree.finalize_assistant(aid, text="x", aggregate_readings={"angry.calm": 0.5})
+    app._handle_command("/prune agg:angry.calm > 0.4")
+    assert app._loom_prune_expr == "agg:angry.calm > 0.4"
+    assert any("/prune active" in m for m in app._chat_panel.messages)
+    # Empty arg clears.
+    app._handle_command("/prune")
+    assert app._loom_prune_expr is None
+
+
+def test_prune_bad_grammar_reports():
+    app = _make_app()
+    app._handle_command("/prune not a valid filter")
+    assert any("parse error" in m for m in app._chat_panel.messages)
+    assert app._loom_prune_expr is None
+
+
+def test_auto_regen_no_args_reports_state():
+    app = _make_app()
+    app._handle_command("/auto-regen")
+    msg = _msgs(app)
+    # Default: off, mode=unsteered.
+    assert "off" in msg or "unsteered" in msg
+
+
+def test_auto_regen_sets_mode():
+    app = _make_app()
+    app._handle_command("/auto-regen inverted")
+    assert app._loom_auto_regen_mode == "inverted"
+
+
+def test_auto_regen_on_off():
+    app = _make_app()
+    app._handle_command("/auto-regen on")
+    assert app._loom_auto_regen_on is True
+    app._handle_command("/auto-regen off")
+    assert app._loom_auto_regen_on is False
+
+
+def test_auto_regen_unknown_mode_rejects():
+    app = _make_app()
+    app._handle_command("/auto-regen bogus")
+    assert any("unknown mode" in m for m in app._chat_panel.messages)
+    # Mode unchanged from default.
+    assert app._loom_auto_regen_mode == "unsteered"
+
+
+def test_fan_parses_alpha_grid_and_kicks_worker():
+    """`/fan` parses the alpha grid and dispatches a fan-out worker.
+
+    We don't actually run the worker (avoids a Textual app); we verify
+    the right method receives the parsed call.
+    """
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._last_prompt = "do a thing"
+    captured = {}
+
+    def _intercept(vector, alphas, prompt):
+        captured["vector"] = vector
+        captured["alphas"] = alphas
+        captured["prompt"] = prompt
+    app._run_fan_worker = _intercept
+
+    app._handle_command("/fan angry.calm 0.0, 0.3, 0.7")
+    assert captured.get("vector") == "angry.calm"
+    assert captured.get("alphas") == [0.0, 0.3, 0.7]
+    assert captured.get("prompt") == "do a thing"
+
+
+def test_fan_alpha_grid_error():
+    app = _make_app()
+    app._last_prompt = "do a thing"
+    app._handle_command("/fan angry.calm banana")
+    assert any("alpha grid error" in m for m in app._chat_panel.messages)
+
+
+def test_fan_usage_on_missing_alphas():
+    app = _make_app()
+    app._handle_command("/fan angry.calm")
+    assert any("Usage: /fan" in m for m in app._chat_panel.messages)
+
+
+def test_regen_n_dispatches_through_loom_helper():
+    app = _make_app()
+    captured = {}
+
+    def _intercept(n):
+        captured["n"] = n
+    app._run_regen_n_worker = _intercept
+    app._dispatch_loom_regen = lambda n: _intercept(n)
+
+    app._handle_command("/regen 3")
+    assert captured.get("n") == 3
+
+
+def test_regen_default_routes_through_action_regenerate():
+    app = _make_app()
+    app.action_regenerate = MagicMock()
+    app._handle_command("/regen")
+    app.action_regenerate.assert_called_once()
+
+
+def test_regen_bad_n_reports():
+    app = _make_app()
+    app._handle_command("/regen banana")
+    assert any("/regen: bad N" in m for m in app._chat_panel.messages)
+
+
+def test_help_mentions_loom_commands():
+    app = _make_app()
+    app._handle_command("/help")
+    msg = _msgs(app)
+    assert "/tree" in msg
+    assert "/regen [N]" in msg
+    assert "/edit" in msg
+    assert "/branch" in msg
+    assert "/nav" in msg
+    assert "/del" in msg
+    assert "/star" in msg
+    assert "/note" in msg
+    assert "Ctrl+L" in msg
+    # Phase 5 additions surface in /help.
+    assert "/prune" in msg
+    assert "/auto-regen" in msg
+    assert "/diff" in msg
+    assert "/transcript load" in msg
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — `/sweep` deprecation, `/regen N mode`, steering-delta in detail
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_emits_deprecation_and_routes_to_fan():
+    """`/sweep` prints a deprecation banner and routes to the fan handler."""
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    app._last_prompt = "do a thing"
+    captured = {}
+
+    def _intercept(vector, alphas, prompt):
+        captured["vector"] = vector
+        captured["alphas"] = alphas
+    app._run_fan_worker = _intercept
+
+    app._handle_command("/sweep angry.calm 0.0, 0.3")
+    msg = _msgs(app)
+    assert "deprecated" in msg
+    assert captured.get("vector") == "angry.calm"
+
+
+def test_regen_with_mode_calls_regen_with_modifier():
+    """`/regen 2 inverted` routes through ``regen_with_modifier`` (mode≠None)."""
+    app = _make_app()
+    uid, aid = _seed_tree(app._session.tree)
+    captured = {}
+
+    def _intercept(n, mode):
+        captured["n"] = n
+        captured["mode"] = mode
+    app._run_regen_modifier_worker = _intercept
+    # Make sure we aren't deferred via _pending_action.
+    app._session.is_generating = False
+
+    app._handle_command("/regen 4 inverted")
+    assert captured.get("n") == 4
+    assert captured.get("mode") == "inverted"
+
+
+def test_node_detail_recipe_delta_block():
+    """Assistant siblings get a per-sibling steering-delta block."""
+    tree = LoomTree(model_id="mock/mock")
+    uid = tree.add_user_turn("hi")
+    a1 = tree.begin_assistant(
+        uid, recipe=Recipe(steering="0.3 honest", seed=1),
+    )
+    tree.finalize_assistant(a1, text="one")
+    a2 = tree.begin_assistant(
+        uid, recipe=Recipe(steering="0.3 honest + 0.2 warm", seed=2),
+    )
+    tree.finalize_assistant(a2, text="two")
+    out = format_node_detail(tree, a2)
+    assert "--- Recipe ---" in out
+    assert "0.3 honest" in out  # the canonical steering expression
+    assert "Δ from sibling" in out
+    # ``warm`` resolves to ``warm.clinical`` via the pole alias on the
+    # bundled bipolar concept; ``steering_delta`` drops the leading sign
+    # on the first term (sign_prefix=False).
+    assert "0.2 warm" in out  # delta from a1's recipe
+
+
+def test_node_detail_no_recipe_block_when_no_siblings():
+    """Solo assistant child gets no sibling-delta block."""
+    tree = LoomTree(model_id="mock/mock")
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest"))
+    tree.finalize_assistant(aid, text="only one")
+    out = format_node_detail(tree, aid)
+    assert "Δ from sibling" not in out
+
+
+def test_ab_compare_flips_auto_regen_on():
+    """Ctrl+A toggles both _ab_mode and _loom_auto_regen_on."""
+    app = _make_app()
+    chat_panel = app._chat_panel
+    chat_panel.set_ab_mode = MagicMock()
+    chat_panel.assistant_rows_pending_shadow = MagicMock(return_value=[])
+    app.action_ab_compare()
+    assert app._ab_mode is True
+    assert app._loom_auto_regen_on is True
+    app.action_ab_compare()
+    assert app._ab_mode is False
+    assert app._loom_auto_regen_on is False

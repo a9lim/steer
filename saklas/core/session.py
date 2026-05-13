@@ -24,6 +24,14 @@ from saklas.core.events import (
 )
 from saklas.core.generation import GenerationConfig, GenerationState, build_chat_input, generate_steered, supports_thinking
 from saklas.core.hooks import HiddenCapture, SteeringManager
+from saklas.core.loom import (
+    InvalidNodeOperationError,
+    LoomTree,
+    LoomNode,
+    Recipe,
+    MutationDuringGenerationError,
+    derive_seed_schedule,
+)
 from saklas.core.model import load_model, get_layers, get_model_info
 from saklas.core.monitor import TraitMonitor
 from saklas.io.packs import PackFormatError, PackMetadata, hash_folder_files
@@ -694,9 +702,31 @@ class SaklasSession:
         # ``_gen_state`` is the *generator's*.
         self._gen_phase: GenState = GenState.IDLE
 
-        self._history: list[dict[str, str]] = []
+        # Conversation state lives in a :class:`LoomTree` (v2.3).  The
+        # active path through the tree is what the model sees as context;
+        # ``self.history`` is a derived property over ``tree.active_path``
+        # for backward-compatibility with v2.2 callers that read the flat
+        # list directly.  Generation routes through ``tree.add_user_turn``
+        # / ``tree.begin_assistant`` / ``tree.finalize_assistant``.
+        self.tree: LoomTree = LoomTree(
+            events=self.events,
+            model_id=getattr(self._model_info, "model_id", None),
+            conflict_check=self._loom_conflict_check,
+        )
+        # Subtree root reserved by an in-flight generation (the user-parent
+        # of the streaming assistant target).  None while idle; set by
+        # ``_generate_core`` before token streaming begins, cleared in the
+        # outermost ``finally``.  Consulted by :meth:`_loom_conflict_check`.
+        self._active_gen_reservation: str | None = None
         self._last_result: GenerationResult | None = None
         self._last_per_token_scores: dict[str, list[float]] | None = None
+
+        # Probe content-hash cache for transcript export / replay (v2.3
+        # phase 5).  Keyed by probe name → sha256 hex of the baked tensor
+        # bytes (concatenated layer order).  Invalidated by
+        # :meth:`add_probe` / :meth:`remove_probe`; rebuilt lazily by
+        # :meth:`_probe_hash`.
+        self._probe_hash_cache: dict[str, str] = {}
 
         # Live trait SSE subscribers.  Each entry is (event_loop, asyncio.Queue).
         # The generation thread pushes tagged tuples via loop.call_soon_threadsafe;
@@ -855,10 +885,6 @@ class SaklasSession:
         profiles = self._monitor.profiles
         return {name: {"profile": profiles[name]}
                 for name in self._monitor.probe_names}
-
-    @property
-    def history(self) -> list[dict[str, str]]:
-        return list(self._history)
 
     @property
     def last_result(self) -> GenerationResult | None:
@@ -2338,21 +2364,246 @@ class SaklasSession:
         # capture-attach layout in place. (Probes don't mutate hidden
         # states, but the safer default keeps the contract simple.)
         self._invalidate_prefix_cache()
+        # Transcript probe-hash cache (v2.3 phase 5) is keyed by name;
+        # any change to the registered profiles invalidates the relevant
+        # entry (cheaper to drop the whole map than diff per-probe).
+        self._probe_hash_cache.pop(name, None)
 
     def unprobe(self, name: str) -> None:
         self._monitor.remove_probe(name)
         self._invalidate_prefix_cache()
+        self._probe_hash_cache.pop(name, None)
 
-    # -- History --
+    def _probe_hash(self, name: str) -> str | None:
+        """Return sha256 hex of the baked tensor bytes for ``name``.
+
+        Stamps :class:`saklas.core.loom.Recipe.probe_hashes` so transcript
+        replay can detect probe drift between save and load (decision
+        19 in ``docs/plans/loom.md``).  Cached on the session — adding
+        or removing a probe invalidates the relevant cache entry.
+
+        Returns ``None`` when the probe isn't registered.  Hashing is
+        deterministic across machines: layers iterated in sorted order,
+        each tensor's CPU bytes hashed (fp32 cast to keep dtype neutral
+        across mixed-precision storage).
+        """
+        if name in self._probe_hash_cache:
+            return self._probe_hash_cache[name]
+        profile = self._monitor.profiles.get(name)
+        if profile is None:
+            return None
+        import hashlib
+        h = hashlib.sha256()
+        for layer_idx in sorted(profile.keys()):
+            tensor = profile[layer_idx]
+            # ``tensor.detach().cpu().contiguous()`` keeps the hash stable
+            # across device placements; fp32 cast normalizes dtype so
+            # mixed-precision storage doesn't change the hex digest.
+            try:
+                arr = tensor.detach().to("cpu").to(torch.float32).contiguous()
+                h.update(arr.numpy().tobytes())
+            except Exception:
+                # Synthetic probes from unit tests may not be torch
+                # tensors — fall through to a stable text representation
+                # so the cache still produces something deterministic.
+                h.update(repr((layer_idx, tensor)).encode("utf-8"))
+        digest = h.hexdigest()
+        self._probe_hash_cache[name] = digest
+        return digest
+
+    def probe_hashes(self) -> dict[str, str]:
+        """Return ``{probe_name: sha256_hex}`` for every registered probe."""
+        out: dict[str, str] = {}
+        for name in self._monitor.probe_names:
+            d = self._probe_hash(name)
+            if d is not None:
+                out[name] = d
+        return out
+
+    # -- Cross-branch diff (v2.3 phase 5) --
+
+    def diff_nodes(self, a_id: str, b_id: str) -> Any:
+        """Return a :class:`saklas.core.loom_diff.NodeDiff` between two nodes.
+
+        Both nodes are looked up in :attr:`tree`; the diff bundles the
+        word-level text diff and the readings delta table.  ``parent_id``
+        on the returned diff is the shared user-parent when both nodes
+        share one (the common sibling-comparison case); ``None``
+        otherwise.
+        """
+        from saklas.core.loom_diff import NodeDiff, readings_diff, text_diff
+
+        a = self.tree.get(a_id)
+        b = self.tree.get(b_id)
+        parent_id = a.parent_id if a.parent_id == b.parent_id else None
+        return NodeDiff(
+            a_id=a_id,
+            b_id=b_id,
+            parent_id=parent_id,
+            text=text_diff(a.text or "", b.text or ""),
+            readings=readings_diff(
+                a.aggregate_readings or {},
+                b.aggregate_readings or {},
+            ),
+        )
+
+    # -- Recipe-override regen (v2.3 phase 5) --
+
+    def regen_with_modifier(
+        self,
+        parent_node_id: str,
+        mode: "str | Recipe",
+        *,
+        base_recipe: "Recipe | None" = None,
+        n: int = 1,
+    ) -> "GenerationResult | list[GenerationResult]":
+        """Regenerate as a sibling of ``parent_node_id`` under a modifier.
+
+        ``mode`` is either a built-in mode string (``"unsteered"``,
+        ``"inverted"``, ``"reseed"``, ``"cool"``, ``"hot"``) or a partial
+        :class:`Recipe` carrying the override fields (``"custom"`` mode).
+        The override composes onto the parent node's recipe (or
+        ``base_recipe`` if given): None fields fall through to the
+        parent's setting.
+
+        Convenience entry point: auto-regen and the manual
+        ``/regen N <mode>`` flow both call this.  Returns whatever
+        :meth:`generate` does for ``n``.
+        """
+        from saklas.core.loom import Recipe
+
+        parent = self.tree.get(parent_node_id)
+        # Walk up to find the assistant whose recipe we're overlaying —
+        # if the caller passed a user node, use its existing assistant
+        # child's recipe (regen replaces that assistant).
+        anchor: "Recipe | None" = None
+        if base_recipe is not None:
+            anchor = base_recipe
+        elif parent.role == "assistant" and parent.recipe is not None:
+            anchor = parent.recipe
+        else:
+            # Pick the most recent assistant ancestor's recipe.
+            for nid in self.tree.ancestors_of(parent_node_id):
+                anc = self.tree.nodes.get(nid)
+                if anc is not None and anc.role == "assistant" and anc.recipe is not None:
+                    anchor = anc.recipe
+                    break
+        if anchor is None:
+            anchor = Recipe()
+
+        if isinstance(mode, Recipe):
+            override = mode
+        else:
+            override = anchor.compose_modifier(str(mode))
+
+        overlaid = anchor.overlay(override)
+
+        # Resolve which node to anchor the regen under.  If the caller
+        # passed an assistant node, regen siblings under its user-parent;
+        # if a user node, siblings under it directly.
+        if parent.role == "assistant":
+            anchor_user_id = parent.parent_id
+        else:
+            anchor_user_id = parent_node_id
+
+        # Reuse the existing user-turn text for sibling spawning.  When
+        # the anchor is a user turn we feed the user-turn text to
+        # ``generate`` and let ``add_user_turn``'s dedup land it on the
+        # same parent.
+        anchor_node = self.tree.nodes.get(anchor_user_id) if anchor_user_id else None
+        if anchor_node is None or anchor_node.role != "user":
+            raise InvalidNodeOperationError(
+                f"regen_with_modifier: cannot anchor sibling under "
+                f"{parent_node_id!r} — expected user/assistant pair, "
+                f"got {parent.role}"
+            )
+        user_text = anchor_node.text
+
+        sampling = overlaid.sampling
+        return self.generate(
+            user_text,
+            steering=overlaid.steering,
+            sampling=sampling,
+            thinking=overlaid.thinking,
+            parent_node_id=anchor_node.parent_id,
+            n=n,
+        )
+
+    # -- History / loom tree --
+
+    def _loom_conflict_check(self, node_id: str, op: str) -> None:
+        """Tree-mutation conflict checker — see :mod:`saklas.core.loom`.
+
+        The :class:`LoomTree` calls this at the entry of every mutator;
+        we raise :class:`MutationDuringGenerationError` (HTTP 409) when
+        the requested op conflicts with an in-flight generation's
+        subtree reservation.
+
+        Rules (per ``docs/plans/loom.md`` phase 1):
+
+        - Decoration ops (``star``, ``note``) and ``branch`` never raise.
+        - ``add_user_turn`` / ``begin_assistant`` / ``finalize_assistant``
+          run from inside the gen path itself; never raise here.
+        - ``edit``, ``delete_subtree``, and ``reset`` raise when the
+          target intersects ``self._active_gen_reservation``.
+
+        ``self._active_gen_reservation`` is the user-parent of the
+        streaming assistant node; the subtree rooted at that node is
+        reserved.
+        """
+        reservation = self._active_gen_reservation
+        if reservation is None:
+            return  # idle — every op is free
+        if op in ("add_user_turn", "begin_assistant", "finalize_assistant",
+                  "branch", "star", "note", "navigate"):
+            return
+        # ``op`` is "edit", "delete_subtree", "reset", or some future
+        # mutator: refuse when ``node_id`` is the reservation root, a
+        # descendant of it, or — for "reset" — anything at all.
+        if op == "reset":
+            raise MutationDuringGenerationError(
+                "cannot reset tree while a generation is in flight"
+            )
+        if node_id == reservation or self.tree.is_ancestor_of(reservation, node_id) \
+                or self.tree.is_ancestor_of(node_id, reservation):
+            raise MutationDuringGenerationError(
+                f"cannot {op} on a node inside an in-flight generation's "
+                f"reservation (reservation root: {reservation})"
+            )
+
+    @property
+    def history(self) -> list[dict[str, str]]:
+        """Compat shim — chat messages along the active path.
+
+        Replaces v2.2's ``self._history`` flat list with a derived view
+        over :attr:`tree.active_path`.  Callers that mutated ``_history``
+        directly need to migrate; readers (`session.history`) work
+        unchanged.
+        """
+        return self.tree.messages_for()
 
     def rewind(self) -> None:
-        if self._history and self._history[-1]["role"] == "assistant":
-            self._history.pop()
-        if self._history and self._history[-1]["role"] == "user":
-            self._history.pop()
+        """Walk the active node back one user→assistant pair.
+
+        Non-destructive under v2.3 loom: the rewound pair stays in the
+        tree as a dead branch, navigable back via the sidebar / loom
+        screen.  ``clear_history`` is the destructive verb.
+        """
+        self.tree.rewind()
+        # Monitor history is kept aligned with the active path's
+        # finalize stream; rewinding the path means dropping the trailing
+        # readings so live trait scoring continues from a coherent state.
+        # See ``clear_history`` for the wipe-all variant.
+        self._monitor.reset_history()
 
     def clear_history(self) -> None:
-        self._history.clear()
+        """Reset the tree to a fresh root.
+
+        Destructive — drops every branch.  Matches v2.2 user expectation
+        of ``/clear`` meaning wipe.  Use :meth:`rewind` for the
+        non-destructive step-back.
+        """
+        self.tree.reset()
         self._monitor.reset_history()
 
     # -- Prefix KV cache --
@@ -2515,9 +2766,16 @@ class SaklasSession:
     def _prepare_input(
         self, input, raw: bool = False, thinking: bool = False,
         stateless: bool = False,
+        parent_node_id: str | None = None,
     ) -> torch.Tensor:
         if isinstance(input, str):
-            prior = [] if stateless else list(self._history)
+            if stateless:
+                prior: list[dict[str, str]] = []
+            else:
+                # Walk the path to ``parent_node_id`` (or the active node).
+                # Loom: the model sees the conversation along whatever path
+                # the user is currently focused on, not a single flat log.
+                prior = self.tree.messages_for(parent_node_id)
             messages = prior + [{"role": "user", "content": input}]
         elif isinstance(input, list):
             messages = list(input)
@@ -2566,6 +2824,7 @@ class SaklasSession:
         applied_steering: str | None = None,
         *,
         return_hidden: bool = False,
+        assistant_node_id: str | None = None,
     ) -> GenerationResult:
         """Shared post-generation: decode, measure probes, build result, update history."""
         token_count = len(generated_ids)
@@ -2634,22 +2893,36 @@ class SaklasSession:
                 ProbeScored(readings={name: r.mean for name, r in readings.items()}),
             )
 
-        if not stateless:
-            if isinstance(input, str):
-                self._history.append({"role": "user", "content": input})
-            if text.strip():
-                self._history.append({"role": "assistant", "content": text})
+        # Finalize the in-flight assistant node in the tree (loom v2.3).
+        # The user node was added by the gen preamble; the assistant node
+        # was created via ``begin_assistant`` and accumulated tokens along
+        # the way.  Stateless gens skip the entire tree mutation path —
+        # ``assistant_node_id`` is None on that branch.
+        if not stateless and assistant_node_id is not None:
+            self.tree.finalize_assistant(
+                assistant_node_id,
+                text=text,
+                aggregate_readings={n: r.mean for n, r in readings.items()},
+                applied_steering=applied_steering,
+                finish_reason=self._gen_state.finish_reason,
+            )
 
         return result
 
-    def _generation_preamble(self, input, raw, thinking, stateless=False):
+    def _generation_preamble(self, input, raw, thinking, stateless=False,
+                             parent_node_id: str | None = None):
         """Shared input prep + gen-state reset.
 
         Steering is NOT installed here — the caller is expected to hold a
         ``session.steering()`` scope open across the generation.
+        ``parent_node_id`` selects which loom-tree path the input is
+        anchored against (default: the active path).
         """
         use_thinking = thinking and supports_thinking(self._tokenizer)
-        input_ids = self._prepare_input(input, raw=raw, thinking=use_thinking, stateless=stateless)
+        input_ids = self._prepare_input(
+            input, raw=raw, thinking=use_thinking, stateless=stateless,
+            parent_node_id=parent_node_id,
+        )
         self._gen_state.reset()
         return input_ids, use_thinking, int(input_ids.shape[1])
 
@@ -2681,6 +2954,68 @@ class SaklasSession:
 
     # -- Generation: core --
 
+    def _resolve_recipe_override(
+        self,
+        recipe_override: "Recipe | str | None",
+        *,
+        parent_node_id: str | None,
+        steering: "str | Steering | None",
+        sampling: SamplingConfig | None,
+        thinking: bool | None,
+    ) -> tuple["str | Steering | None", SamplingConfig | None, bool | None]:
+        """Apply a recipe override to the per-call kwargs.
+
+        ``recipe_override`` is either a :class:`Recipe` partial (None
+        fields fall through) or a built-in mode string forwarded to
+        :meth:`Recipe.compose_modifier`.  The override composes onto the
+        parent node's recipe (or an empty Recipe when no parent has
+        one) and the resulting fields *replace* the explicit kwargs
+        when set — explicit kwargs only win where the override is None.
+        Returns ``(steering, sampling, thinking)`` tuple ready to feed
+        the gen path.
+        """
+        if recipe_override is None:
+            return steering, sampling, thinking
+
+        # Resolve the anchor recipe — the parent assistant's recipe
+        # when present, else an empty Recipe.  Walk ancestors so a
+        # user-anchored regen still finds a recipe to overlay onto.
+        anchor: Recipe | None = None
+        if parent_node_id is not None:
+            parent = self.tree.nodes.get(parent_node_id)
+            if parent is not None:
+                if parent.role == "assistant" and parent.recipe is not None:
+                    anchor = parent.recipe
+                else:
+                    for nid in self.tree.ancestors_of(parent_node_id):
+                        anc = self.tree.nodes.get(nid)
+                        if anc is not None and anc.role == "assistant" and anc.recipe is not None:
+                            anchor = anc.recipe
+                            break
+        if anchor is None:
+            anchor = Recipe()
+
+        if isinstance(recipe_override, str):
+            override = anchor.compose_modifier(recipe_override)
+        else:
+            override = recipe_override
+        overlaid = anchor.overlay(override)
+
+        # Override fields *win* over the caller's explicit kwargs when
+        # set.  The auto-regen UI expects "configure once via the
+        # override, ignore the caller's per-turn defaults" semantics.
+        new_steering = overlaid.steering if overlaid.steering is not None else steering
+        new_sampling = overlaid.sampling if overlaid.sampling is not None else sampling
+        new_thinking = overlaid.thinking if overlaid.thinking is not None else thinking
+        # Seed lives on the SamplingConfig — fold into new_sampling
+        # when the override specifies one and the caller's sampling
+        # doesn't already pin a seed.
+        if overlaid.seed is not None:
+            from dataclasses import replace as _replace
+            base = new_sampling if isinstance(new_sampling, SamplingConfig) else SamplingConfig()
+            new_sampling = _replace(base, seed=overlaid.seed)
+        return new_steering, new_sampling, new_thinking
+
     def _generate_core(
         self,
         input,
@@ -2691,6 +3026,8 @@ class SaklasSession:
         raw: bool = False,
         thinking: bool | None = None,
         on_token: Callable[..., None] | None = None,
+        parent_node_id: str | None = None,
+        recipe_override: "Recipe | str | None" = None,
     ) -> GenerationResult:
         """Shared generation implementation.
 
@@ -2706,6 +3043,18 @@ class SaklasSession:
             self._gen_lock.release()
             raise ConcurrentGenerationError("session generation already in flight")
         self._gen_phase = GenState.PREAMBLE
+
+        # v2.3 phase 5: apply recipe override (auto-regen / manual mode)
+        # before constructing the Steering object so the overlay wins
+        # over the per-call kwargs.
+        if recipe_override is not None:
+            steering, sampling, thinking = self._resolve_recipe_override(
+                recipe_override,
+                parent_node_id=parent_node_id,
+                steering=steering,
+                sampling=sampling,
+                thinking=thinking,
+            )
 
         steering_obj = Steering.from_value(steering)
         # Effective thinking: explicit kwarg wins; else Steering.thinking;
@@ -2795,11 +3144,48 @@ class SaklasSession:
             else {}
         )
 
+        # Loom tree wiring — create the user / assistant nodes before
+        # streaming starts so token deltas can route to ``assistant_node_id``
+        # and live readers can see the in-flight assistant node.  Stateless
+        # gens skip tree mutation entirely (matches v2.2 ``stateless``).
+        assistant_node_id: str | None = None
+        if not stateless:
+            if isinstance(input, str):
+                # ``add_user_turn`` dedups against existing user-children with
+                # identical text — re-sending the same prompt regenerates
+                # under the existing user node rather than spawning a chain.
+                user_node_id = self.tree.add_user_turn(
+                    input, parent_id=parent_node_id,
+                )
+            else:
+                # list[dict] messages: caller is bypassing the tree-as-context
+                # path; attach the assistant under the active node so the
+                # readings still land somewhere coherent.
+                user_node_id = parent_node_id or self.tree.active_node_id
+            # Reserve the subtree rooted at the user node for the gen.
+            # Edits / deletes against this subtree raise during the gen.
+            self._active_gen_reservation = user_node_id
+            seed_val = sampling.seed if sampling is not None else None
+            recipe = Recipe(
+                steering=str(steering_obj) if steering_obj is not None else None,
+                sampling=sampling,
+                thinking=use_thinking_req,
+                seed=seed_val,
+                probes=list(self._monitor.probe_names),
+            )
+            # v2.3 phase 5: stamp probe content hashes so transcript
+            # replay can detect probe drift between save and load.
+            recipe = recipe._fill_probe_hashes(self)
+            assistant_node_id = self.tree.begin_assistant(
+                user_node_id, recipe=recipe,
+            )
+
         try:
             if steering_cm is not None:
                 steering_cm.__enter__()
             input_ids, use_thinking, prompt_tokens = self._generation_preamble(
                 input, raw, use_thinking_req, stateless=stateless,
+                parent_node_id=parent_node_id,
             )
             # Refresh snapshot now that steering is pushed (first-scope case).
             vector_snapshot = _snapshot_alphas()
@@ -2948,6 +3334,7 @@ class SaklasSession:
                 logprobs_list=logprobs_list,
                 applied_steering=applied_steering,
                 return_hidden=want_hidden,
+                assistant_node_id=assistant_node_id,
             )
             self._monitor.end_live()
             self.events.emit(GenerationFinished(result=result))
@@ -2977,6 +3364,11 @@ class SaklasSession:
             # any hooks that did get attached must come off.  Idempotent.
             self._end_capture()
             self._monitor.end_live()
+            # Release the loom-tree reservation in the same scope as the
+            # gen-lock release.  Even if finalize raised, mutators (edit /
+            # delete on this subtree) need to be free again now that the
+            # streaming target is no longer live.
+            self._active_gen_reservation = None
             self._gen_phase = GenState.IDLE
             self._gen_lock.release()
 
@@ -2992,7 +3384,10 @@ class SaklasSession:
         raw: bool = False,
         thinking: bool | None = None,
         on_token: Callable[..., None] | None = None,
-    ) -> GenerationResult:
+        parent_node_id: str | None = None,
+        n: int = 1,
+        recipe_override: "Recipe | str | None" = None,
+    ) -> "GenerationResult | list[GenerationResult]":
         """Blocking generation.
 
         Args:
@@ -3012,16 +3407,58 @@ class SaklasSession:
                 logprob, top_logprobs, perplexity)`` called on each emitted
                 token.  ``perplexity`` is ``exp(entropy_nats)`` of the
                 pre-temperature, post-steering distribution.
+            parent_node_id: loom-tree node id to anchor the new turn
+                under.  ``None`` = active node (today's behavior).
+            n: fan-out count.  ``n=1`` (default) returns a single
+                :class:`GenerationResult`; ``n>1`` runs the same prompt
+                ``n`` times under deterministically-derived per-sibling
+                seeds (see :func:`~saklas.core.loom.derive_seed_schedule`)
+                and returns ``list[GenerationResult]`` in sibling order.
         """
-        return self._generate_core(
-            input,
-            steering=steering,
-            sampling=sampling,
-            stateless=stateless,
-            raw=raw,
-            thinking=thinking,
-            on_token=on_token,
-        )
+        if n < 1:
+            raise ValueError(f"n must be >= 1, got {n}")
+        if n == 1:
+            return self._generate_core(
+                input,
+                steering=steering,
+                sampling=sampling,
+                stateless=stateless,
+                raw=raw,
+                thinking=thinking,
+                on_token=on_token,
+                parent_node_id=parent_node_id,
+                recipe_override=recipe_override,
+            )
+        # N-way regen — derive per-sibling seeds from the supplied base
+        # seed (or a fresh entropy-derived one).  Each iteration runs
+        # ``_generate_core`` independently; ``add_user_turn`` dedups so
+        # all siblings share the same user-parent.
+        base_seed = sampling.seed if sampling is not None else None
+        schedule = derive_seed_schedule(base_seed, n)
+        results: list[GenerationResult] = []
+        for i, seed_i in enumerate(schedule):
+            from dataclasses import replace as _replace
+            si = sampling if sampling is not None else SamplingConfig()
+            si = _replace(si, seed=seed_i)
+            r = self._generate_core(
+                input,
+                steering=steering,
+                sampling=si,
+                stateless=stateless,
+                raw=raw,
+                thinking=thinking,
+                on_token=on_token,
+                parent_node_id=parent_node_id,
+                recipe_override=recipe_override,
+            )
+            results.append(r)
+            # External stop requested mid-batch: cancel the remainder.
+            # Sibling boundaries are the only valid stop points (matches
+            # phase 1 spec — "stop_requested cancels the currently-
+            # streaming sibling.  Remaining queued siblings are skipped").
+            if self._gen_state.stop_requested.is_set():
+                break
+        return results
 
     # -- Generation: streaming --
 
@@ -3034,6 +3471,8 @@ class SaklasSession:
         stateless: bool = False,
         raw: bool = False,
         thinking: bool | None = None,
+        parent_node_id: str | None = None,
+        recipe_override: "Recipe | str | None" = None,
     ) -> Iterator[TokenEvent]:
         """Streaming generation.  See :meth:`generate` for kwargs.
 
@@ -3084,6 +3523,8 @@ class SaklasSession:
                     raw=raw,
                     thinking=thinking,
                     on_token=_push,
+                    parent_node_id=parent_node_id,
+                    recipe_override=recipe_override,
                 )
                 result_holder.append(result)
             except BaseException as e:
@@ -3158,6 +3599,11 @@ class SaklasSession:
                 on_result(idx, r)
         return results
 
+    # v2.4 hard break — surface deletion anchor.  The webui's
+    # ``SweepDrawer.svelte`` table view and the TUI's ``/sweep``
+    # command both repoint onto the loom-sibling shape this method
+    # now produces; both surfaces are slated for deletion in v2.4
+    # (decision 5 in ``docs/plans/loom.md``).
     def generate_sweep(
         self,
         prompt,
@@ -3169,7 +3615,9 @@ class SaklasSession:
         stateless: bool = True,
         raw: bool = False,
         on_result: Callable[[int, GenerationResult, dict[str, float]], None] | None = None,
-    ) -> list[GenerationResult]:
+        parent_node_id: str | None = None,
+        return_node_ids: bool = False,
+    ) -> "list[GenerationResult] | tuple[list[GenerationResult], list[str | None]]":
         """Sweep a single prompt across a Cartesian product of alpha values.
 
         ``sweep`` maps ``concept_name → [alpha_0, alpha_1, ...]``.  The
@@ -3222,7 +3670,27 @@ class SaklasSession:
             # so we can compose with new alpha terms via string concat.
             base_str = str(base_steering)
 
+        # v2.3 loom: anchor every sibling under a shared user turn so
+        # the surfaces render the sweep as siblings under a common
+        # parent rather than a flat result list.  Stateless sweeps
+        # skip the tree mutation entirely (matches the v2.2 contract);
+        # stateful sweeps land siblings under ``parent_node_id`` (or
+        # the active node when None) and dedup on identical user text.
+        anchor_user_id: str | None = None
+        if not stateless and isinstance(prompt, str):
+            anchor_user_id = self.tree.add_user_turn(
+                prompt, parent_id=parent_node_id,
+            )
+            # The anchor parent for ``_generate_core`` is the user
+            # node's *parent* — generate's ``add_user_turn`` will dedup
+            # against the user we just spawned, so every sibling gets
+            # attached under it without spawning duplicate user turns.
+            gen_parent_id = self.tree.nodes[anchor_user_id].parent_id
+        else:
+            gen_parent_id = parent_node_id
+
         results: list[GenerationResult] = []
+        sibling_node_ids: list[str | None] = []
         for idx, combo in enumerate(itertools.product(*alpha_lists)):
             alpha_values = dict(zip(concept_names, combo))
             terms = [f"{alpha} {name}" for name, alpha in alpha_values.items()]
@@ -3230,17 +3698,41 @@ class SaklasSession:
             if base_str:
                 expr = f"{base_str} + {expr}"
 
+            # Per-sibling deterministic seed schedule so a repeat sweep
+            # with the same parent reproduces sibling for sibling.
+            from dataclasses import replace as _replace
+            base_seed = sampling.seed if sampling is not None else None
+            schedule = derive_seed_schedule(base_seed, len(list(itertools.product(*alpha_lists)))) if False else None
+            # Cheap fallback: derive per-row seed from index + base.
+            row_seed = (
+                derive_seed_schedule(base_seed, idx + 1)[-1]
+                if base_seed is not None
+                else None
+            )
+            si = sampling if sampling is not None else SamplingConfig()
+            if row_seed is not None:
+                si = _replace(si, seed=row_seed)
+
             r = self._generate_core(
                 prompt,
                 steering=expr,
-                sampling=sampling,
+                sampling=si,
                 stateless=stateless,
                 raw=raw,
                 thinking=thinking,
+                parent_node_id=gen_parent_id,
             )
             results.append(r)
+            # The sibling's assistant node id is the active node after
+            # ``_generate_core`` returns — ``finalize_assistant`` leaves
+            # it active so the path-walker view stays coherent.
+            sib_id = self.tree.active_node_id if not stateless else None
+            sibling_node_ids.append(sib_id)
             if on_result is not None:
                 on_result(idx, r, alpha_values)
+
+        if return_node_ids:
+            return results, sibling_node_ids
         return results
 
     # -- Generation control --
