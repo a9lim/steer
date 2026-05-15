@@ -141,6 +141,14 @@ class SaklasApp(App[None]):
         Binding("ctrl+t", "toggle_thinking", "Think", show=False),
         Binding("ctrl+s", "cycle_sort", "Sort", show=False),
         Binding("ctrl+y", "toggle_highlight", "Highlight", show=False),
+        # Logit-pass: three-state highlight cycle {off → probe → surprise}.
+        # Forward on Ctrl+H, backward on Ctrl+Shift+H — symmetric and
+        # the chord matches Ctrl+Y's "highlight family" mental grouping.
+        Binding("ctrl+h", "cycle_highlight_mode", "HL cycle", show=False),
+        Binding(
+            "ctrl+shift+h", "cycle_highlight_mode_back",
+            "HL cycle back", show=False,
+        ),
         Binding("ctrl+l", "open_loom", "Loom", show=False),
         Binding("ctrl+e", "edit_active", "Edit", show=False),
         Binding("ctrl+b", "branch_active", "Branch", show=False),
@@ -537,7 +545,9 @@ class SaklasApp(App[None]):
             "  /unprobe <name|ns/>         — remove probe(s)\n"
             "  /extract <concept>          — cache-warm only\n"
             "  /compare <a> [b]            — cosine similarity\n"
-            "  /surprise [off]             — tint tokens by logprob (Ctrl+Y)\n"
+            "  /surprise [off]             — tint tokens by logprob\n"
+            "                                Ctrl+Y on/off · Ctrl+H cycle\n"
+            "                                {off → probe → surprise}\n"
             "Session:\n"
             "  /clear, /rewind, /regen     — history ops\n"
             "  /save <name>, /load <name>  — snapshot conv + alphas\n"
@@ -1348,9 +1358,94 @@ class SaklasApp(App[None]):
             self._highlighting = False
         self._apply_highlight_to_all()
 
+    def action_cycle_highlight_mode(self, direction: int = 1) -> None:
+        """Step the highlight target through ``{off, probe, surprise}``.
+
+        Three-state cycle to cover the logit-pass parity gap with the
+        webui's highlight dropdown.  ``probe`` mode defers to whatever
+        the trait panel currently has selected (same model as ``Ctrl+Y``
+        toggle on); ``surprise`` pins :data:`chat_panel.SURPRISE_PROBE`
+        so the markup builder reads chosen-token logprobs instead.
+
+        Ctrl+H advances forward; Ctrl+Shift+H walks backward through the
+        same order.  System message announces each transition so users
+        learn the cycle without staring at tints to infer what changed.
+        ``probe`` is skipped when no probe is selectable (trait panel
+        empty and no stored seed) so the cycle collapses to
+        ``{off ↔ surprise}`` rather than landing in a half-state.
+        """
+        from saklas.tui.chat_panel import SURPRISE_PROBE
+
+        if self._ab_shadow_active:
+            return
+
+        # Resolve current mode by inspecting state, not a stored enum —
+        # ``/probe`` / ``/surprise`` / ``Ctrl+Y`` can land us in any
+        # of these three shapes between Ctrl+H presses, and we want the
+        # cycle to advance from wherever the user actually is.
+        if not self._highlighting:
+            current = "off"
+        elif self._highlight_probe == SURPRISE_PROBE:
+            current = "surprise"
+        else:
+            current = "probe"
+
+        # Resolve the probe slot's anchor once up front — if it's None
+        # the slot is unreachable and we'll skip it during the walk.
+        seed: str | None = self._trait_panel.get_selected_probe()
+        if seed is None and self._highlight_probe not in (None, SURPRISE_PROBE):
+            seed = self._highlight_probe
+
+        order = ["off", "probe", "surprise"]
+        step = 1 if direction >= 0 else -1
+        idx = order.index(current)
+        # Walk at most ``len(order)`` slots forward, skipping ``probe``
+        # when no anchor exists.  Bounded loop = no recursion = no risk
+        # of stack growth even on misconfigured state.
+        for _ in range(len(order)):
+            idx = (idx + step) % len(order)
+            candidate = order[idx]
+            if candidate == "probe" and seed is None:
+                continue  # skip — nothing to anchor to
+            next_mode = candidate
+            break
+        else:
+            # All slots were unreachable — should never fire (``off`` is
+            # always reachable), but stay graceful.
+            return
+
+        chat = self._chat_panel
+        if next_mode == "off":
+            self._highlighting = False
+            msg = "Highlight off."
+        elif next_mode == "surprise":
+            self._highlight_probe = SURPRISE_PROBE
+            self._highlighting = True
+            msg = "Highlight: surprise (logprob)."
+        else:  # "probe" — ``seed`` is guaranteed non-None here
+            self._highlight_probe = seed
+            self._highlighting = True
+            msg = f"Highlight: {seed}."
+        self._apply_highlight_to_all()
+        chat.add_system_message(msg)
+
+    def action_cycle_highlight_mode_back(self) -> None:
+        """Convenience: backward variant of the cycle.  Same code path
+        with ``direction=-1`` so the cycle's "skip" branch behaves
+        symmetrically when probes aren't loaded."""
+        self.action_cycle_highlight_mode(direction=-1)
+
     def _apply_highlight_to_all(self) -> None:
-        # Navigating the trait panel updates the seed live while highlight is on.
-        if self._highlighting:
+        from saklas.tui.chat_panel import SURPRISE_PROBE
+        # Navigating the trait panel updates the seed live while
+        # highlight is on — but ONLY when the active highlight is a
+        # probe.  Surprise mode pins ``_highlight_probe`` to the
+        # sentinel so the markup builder reads logprobs; without this
+        # guard, the next trait-panel arrow keystroke silently flips
+        # the highlight back to a probe (latent bug from the Phase 3
+        # pass — ``/surprise`` would survive only until the user
+        # touched the trait panel).
+        if self._highlighting and self._highlight_probe != SURPRISE_PROBE:
             nav_probe = self._trait_panel.get_selected_probe()
             if nav_probe is not None:
                 self._highlight_probe = nav_probe

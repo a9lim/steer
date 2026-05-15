@@ -1149,3 +1149,111 @@ def test_shift_arrow_uses_coarse_alpha_step():
     # Shift+left undoes the shift+right exactly.
     app._adjust_alpha(-_ALPHA_STEP_COARSE)
     assert app._alphas["honest"] == pytest.approx(_ALPHA_STEP_FINE)
+
+
+# ---- Logit-pass: highlight mode cycle (Ctrl+H) ----
+
+
+def test_highlight_cycle_off_to_probe_to_surprise():
+    """Ctrl+H walks {off → probe → surprise → off} with a probe loaded.
+
+    The cycle defers to the trait-panel selection for the ``probe``
+    slot so navigating the right rack still drives WHICH probe lights
+    up — Ctrl+H only switches between "off / a probe / surprise".
+    """
+    from saklas.tui.chat_panel import SURPRISE_PROBE
+
+    app = _make_app()
+    # Pretend a probe is loaded and trait-panel-selected.
+    app._trait_panel.get_selected_probe = MagicMock(return_value="angry.calm")
+    app._apply_highlight_to_all = MagicMock()
+
+    # Start at off.
+    assert app._highlighting is False
+
+    # off → probe
+    app.action_cycle_highlight_mode()
+    assert app._highlighting is True
+    assert app._highlight_probe == "angry.calm"
+    assert "angry.calm" in _msgs(app)
+
+    # probe → surprise
+    app.action_cycle_highlight_mode()
+    assert app._highlighting is True
+    assert app._highlight_probe == SURPRISE_PROBE
+    assert "surprise" in _msgs(app)
+
+    # surprise → off
+    app.action_cycle_highlight_mode()
+    assert app._highlighting is False
+    assert "Highlight off" in _msgs(app)
+
+
+def test_highlight_cycle_backward_walks_reverse():
+    """Ctrl+Shift+H walks the cycle backward from any state."""
+    from saklas.tui.chat_panel import SURPRISE_PROBE
+
+    app = _make_app()
+    app._trait_panel.get_selected_probe = MagicMock(return_value="warm.clinical")
+    app._apply_highlight_to_all = MagicMock()
+
+    # off → surprise (backward)
+    app.action_cycle_highlight_mode_back()
+    assert app._highlight_probe == SURPRISE_PROBE
+    assert app._highlighting is True
+
+    # surprise → probe (backward)
+    app.action_cycle_highlight_mode_back()
+    assert app._highlight_probe == "warm.clinical"
+
+    # probe → off (backward)
+    app.action_cycle_highlight_mode_back()
+    assert app._highlighting is False
+
+
+def test_highlight_cycle_skips_probe_when_none_selectable():
+    """With no probes loaded, ``probe`` slot is skipped so the cycle
+    collapses to {off ↔ surprise} rather than getting stuck."""
+    from saklas.tui.chat_panel import SURPRISE_PROBE
+
+    app = _make_app()
+    # No trait-panel selection and no stored seed — probe slot has
+    # nothing to anchor to.
+    app._trait_panel.get_selected_probe = MagicMock(return_value=None)
+    app._apply_highlight_to_all = MagicMock()
+    app._highlight_probe = None
+
+    # off → (probe-skip) → surprise
+    app.action_cycle_highlight_mode()
+    assert app._highlight_probe == SURPRISE_PROBE
+    assert app._highlighting is True
+
+    # surprise → off
+    app.action_cycle_highlight_mode()
+    assert app._highlighting is False
+
+    # Backward direction also skips cleanly.
+    app.action_cycle_highlight_mode_back()
+    assert app._highlight_probe == SURPRISE_PROBE
+
+
+def test_apply_highlight_to_all_preserves_surprise_sentinel():
+    """Trait-panel arrow keys must not clobber the SURPRISE_PROBE
+    sentinel back to a probe — that latent bug from the Phase 3 pass
+    would have flipped surprise mode off the moment the user moved
+    in the right rack."""
+    from saklas.tui.chat_panel import SURPRISE_PROBE
+
+    app = _make_app()
+    # Trait panel has a different probe selected — without the
+    # surprise-guard this would clobber the sentinel.
+    app._trait_panel.get_selected_probe = MagicMock(return_value="angry.calm")
+    app._highlight_probe = SURPRISE_PROBE
+    app._highlighting = True
+    app._assistant_messages = []  # no widgets to apply to
+
+    app._apply_highlight_to_all()
+
+    # Sentinel survived; trait-panel selection was ignored under
+    # surprise mode.
+    assert app._highlight_probe == SURPRISE_PROBE
