@@ -15,6 +15,8 @@ import type {
   FilterMatchesJSON,
   InstallPackRequest,
   InstallPackResponse,
+  JointLogprobRowJSON,
+  JointLogprobsJSON,
   LoadVectorRequest,
   LoomNodeJSON,
   LoomTreeJSON,
@@ -51,6 +53,8 @@ export type {
   FilterMatchesJSON,
   InstallPackRequest,
   InstallPackResponse,
+  JointLogprobRowJSON,
+  JointLogprobsJSON,
   LoadVectorRequest,
   LoomNodeJSON,
   LoomTreeJSON,
@@ -597,6 +601,24 @@ export const apiTree = {
     return request(
       `${SESSION_BASE(id)}/tree/transcript/load`,
       jsonBody({ yaml, mode, strict }),
+    );
+  },
+  /** Logit-pass Phase 5: cross-evaluation between two sibling assistant
+   *  nodes.  Server runs one forward pass per branch and returns
+   *  per-aligned-position rows with both self- and cross-evaluation
+   *  logprobs, rank-1-change flag, and a top-K-truncated approx KL.
+   *
+   *  Lazy / on-demand per Decision 9 — server caches the result keyed
+   *  by sorted ``(a_id, b_id)`` for the session lifetime; both
+   *  orientations of the same pair share the cache entry. */
+  jointLogprobs(
+    a_id: string,
+    b_id: string,
+    id: string = SESSION,
+  ): Promise<JointLogprobsJSON> {
+    return request(
+      `${SESSION_BASE(id)}/tree/joint_logprobs`,
+      jsonBody({ a_id, b_id }),
     );
   },
 };

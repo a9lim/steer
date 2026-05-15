@@ -47,6 +47,7 @@ import type {
   Trigger,
   Variant,
   VectorRackEntry,
+  WSSampling,
 } from "./types";
 import { serializeExpression } from "./expression";
 
@@ -1015,6 +1016,13 @@ export interface SamplingState {
    * defaults.  TUI parity with the "session default vs. next message"
    * radio in the sampling strip. */
   oneShotOverride: boolean;
+  /** Logit-pass: top-K alternatives to capture per token (``0`` = off,
+   *  matches the engine's chosen-only mode).  When ``> 0`` the WS ``token``
+   *  event carries ``top_alts`` and the drilldown's logits tab + the
+   *  inline ``surprise`` highlight mode populate.  Flipped via the
+   *  "show alts" toggle in ``SamplingStrip``; the canonical "on" value
+   *  is ``8`` per Decision 1 of ``docs/plans/logit-pass.md``. */
+  return_top_k: number;
 }
 
 export const samplingState: SamplingState = $state({
@@ -1031,6 +1039,10 @@ export const samplingState: SamplingState = $state({
   // meant the model thought even though the box was visually off.
   thinking: false,
   oneShotOverride: true,
+  // Logit-pass: default off (wire-cost-free for users who don't care).
+  // The SamplingStrip's "alts" toggle flips this between 0 and 8 per
+  // Decision 1 in docs/plans/logit-pass.md.
+  return_top_k: 0,
 });
 
 export function setSampling<K extends keyof SamplingState>(
@@ -1337,6 +1349,12 @@ function handleWsMessage(msg: WSServerMessage): void {
         thinking: msg.thinking,
         tokenId: msg.token_id,
         perLayerScores: msg.per_layer_scores,
+        // Logit-pass: pipe chosen-token logprob + top-K alternatives onto
+        // the per-token row.  Both ride the WS ``token`` event directly
+        // from Phase 1's engine capture; absent when ``return_top_k == 0``
+        // and no other on_token consumer is live (legacy default).
+        logprob: msg.logprob ?? null,
+        topAlts: msg.top_alts ?? null,
       };
       // Pull "best score" from the latest layer's selected probe so
       // panels rendering a single highlight have something to draw
@@ -1417,6 +1435,10 @@ function handleWsMessage(msg: WSServerMessage): void {
       if (turn) {
         turn.finishReason = msg.result?.finish_reason ?? "stop";
         turn.tokensSoFar = msg.result?.tokens ?? genStatus.tokensSoFar;
+        // Logit-pass: per-turn mean chosen-token logprob (response span
+        // only).  Null when capture wasn't live; the inline surprise
+        // mode + loom weight mode null-guard on this directly.
+        turn.meanLogprob = msg.result?.mean_logprob ?? null;
       }
 
       const wasShadow = abState.processingAb;
@@ -1555,15 +1577,25 @@ export async function sendGenerate(
   const sock = await ensureWebSocket();
   const steering =
     opts.steering === undefined ? currentSteeringExpression() : opts.steering;
-  const sampling = samplingState.oneShotOverride
+  // Build the sampling payload.  ``oneShotOverride`` picks between
+  // session-default mode (null payload, server reads its own defaults)
+  // and next-message mode (full payload from local state).  Logit-pass:
+  // ``return_top_k`` always rides along when non-zero so the "show alts"
+  // toggle works regardless of mode — the server's PATCH endpoint doesn't
+  // accept ``return_top_k`` today, so without this branch the toggle
+  // would be silently ignored in session-default mode.
+  const sampling: WSSampling | null = samplingState.oneShotOverride
     ? {
         temperature: samplingState.temperature,
         top_p: samplingState.top_p,
         top_k: samplingState.top_k,
         max_tokens: samplingState.max_tokens,
         seed: samplingState.seed,
+        return_top_k: samplingState.return_top_k || null,
       }
-    : null;
+    : samplingState.return_top_k > 0
+      ? { return_top_k: samplingState.return_top_k }
+      : null;
   // Update genStatus.maxTokens locally so the progress bar widths know
   // their target before the first token lands.
   genStatus.maxTokens = sampling?.max_tokens ?? samplingState.max_tokens;
@@ -1771,15 +1803,22 @@ async function _sendShadowGenerate(steeredIdx: number): Promise<void> {
   const messages = _buildShadowMessages(steeredIdx);
   if (messages === null) return;
   const sock = await ensureWebSocket();
-  const sampling = samplingState.oneShotOverride
+  // Shadow path mirrors ``sendGenerate``'s sampling-payload build so the
+  // ``return_top_k`` opt-in rides shadow / auto-regen runs too (matches
+  // the steered turn's wire-shape, keeps logit captures comparable across
+  // siblings).
+  const sampling: WSSampling | null = samplingState.oneShotOverride
     ? {
         temperature: samplingState.temperature,
         top_p: samplingState.top_p,
         top_k: samplingState.top_k,
         max_tokens: samplingState.max_tokens,
         seed: samplingState.seed,
+        return_top_k: samplingState.return_top_k || null,
       }
-    : null;
+    : samplingState.return_top_k > 0
+      ? { return_top_k: samplingState.return_top_k }
+      : null;
   // Mark the WS reception path before the request lands so the
   // ``started`` event routes into the abPair and not a fresh turn.
   abState.pendingTurnIdx = steeredIdx;
@@ -2180,6 +2219,21 @@ export interface LoomUiState {
     text: string;
     n: number;
   };
+  /** Logit-pass (Phase 4 of docs/plans/logit-pass.md): drive the loom
+   *  edge stroke-width / opacity and the per-node mean_logprob badge.
+   *  ``"none"`` (default) renders today's flat shape.  ``"confidence"``
+   *  thickens edges to confident children (low surprise); ``"surprise"``
+   *  thickens edges to surprising children.  Nodes without
+   *  ``mean_logprob`` render unchanged regardless of mode. */
+  weightMode: "none" | "confidence" | "surprise";
+  /** Logit-pass: sibling sort key derived from filter grammar
+   *  ``sort:surprise`` / ``sort:confidence``.  ``"default"`` preserves
+   *  server insertion order.  Parsed client-side out of the filter
+   *  input before the rest of the expression is sent to the server. */
+  siblingSort: "default" | "surprise" | "confidence";
+  /** Filter help popover visibility (Decision 8).  Toggled by the
+   *  ``?`` button next to the filter input. */
+  filterHelpOpen: boolean;
 }
 
 /** Visibility toggle for the LoomSidebar — wired to a Topbar button.
@@ -2188,6 +2242,9 @@ export interface LoomUiState {
 export const loomUiState: LoomUiState = $state({
   sidebarOpen: false,
   modalRequest: { seq: 0, kind: null, nodeId: null, text: "", n: 1 },
+  weightMode: "none",
+  siblingSort: "default",
+  filterHelpOpen: false,
 });
 
 // ============================================================ phase 5 ====
@@ -2264,10 +2321,47 @@ export const filterState: FilterState = $state({
   loading: false,
 });
 
+/** Strip ``sort:surprise`` / ``sort:confidence`` terms out of the filter
+ *  expression before it reaches the server.  Sort is a client-side
+ *  rendering concern (the DFS walk in LoomSidebar reorders siblings),
+ *  so the server filter grammar doesn't need to know about it.  Stashes
+ *  the resolved mode on ``loomUiState.siblingSort`` and returns the
+ *  cleaned expression for the server.  Unknown ``sort:`` values fall
+ *  through to the server, which will surface a parse error — that's
+ *  the right UX (typo discovery), better than silently dropping. */
+function _consumeSortPrefix(expr: string): string {
+  // Match a comma-separated ``sort:<value>`` term anywhere in the
+  // expression.  Comma is the filter grammar's AND separator so this
+  // composes cleanly with other terms.
+  const sortRe = /(?:^|,)\s*sort:(surprise|confidence)\s*(?=,|$)/gi;
+  let mode: "default" | "surprise" | "confidence" = "default";
+  const cleaned = expr.replace(sortRe, (_match, value: string) => {
+    mode = value.toLowerCase() as "surprise" | "confidence";
+    return "";
+  });
+  loomUiState.siblingSort = mode;
+  // Drop leading / trailing commas and collapse double commas left by
+  // the replace.
+  return cleaned.replace(/,,+/g, ",").replace(/^\s*,|,\s*$/g, "").trim();
+}
+
 export async function applyTreeFilter(expr: string): Promise<void> {
   filterState.expr = expr;
   const trimmed = expr.trim();
   if (!trimmed) {
+    filterState.matchingIds = null;
+    filterState.error = null;
+    filterState.loading = false;
+    loomUiState.siblingSort = "default";
+    return;
+  }
+  // Logit-pass: peel the client-side sort term off before sending to
+  // the server.  Server filter grammar stays unchanged.
+  const serverExpr = _consumeSortPrefix(trimmed);
+  if (!serverExpr) {
+    // Only ``sort:...`` was provided — no node-set filter, just a sort
+    // directive.  Clear the matching-set so every node renders; the
+    // sidebar's DFS picks up ``siblingSort`` independently.
     filterState.matchingIds = null;
     filterState.error = null;
     filterState.loading = false;
@@ -2276,7 +2370,7 @@ export async function applyTreeFilter(expr: string): Promise<void> {
   filterState.loading = true;
   filterState.error = null;
   try {
-    const r = await apiTree.filter(trimmed);
+    const r = await apiTree.filter(serverExpr);
     filterState.matchingIds = new Set(r.matching_node_ids);
   } catch (e) {
     if (e instanceof ApiError) {
@@ -2299,6 +2393,9 @@ export function clearTreeFilter(): void {
   filterState.matchingIds = null;
   filterState.error = null;
   filterState.loading = false;
+  // Logit-pass: clear the sibling-sort directive too — Esc / ✕ on the
+  // filter input is the canonical "go back to default rendering" gesture.
+  loomUiState.siblingSort = "default";
 }
 
 // ------------------------------------------- branch pinning ----------

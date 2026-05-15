@@ -77,6 +77,13 @@
   );
   const thinkingView = $derived(samplingState.thinking ?? false);
 
+  /** Logit-pass: top-K alts toggle.  ``return_top_k > 0`` is the "show
+   *  alts" mode that lights up the token drilldown's logits tab + the
+   *  inline ``surprise`` highlight mode.  Canonical ``on`` value is 8
+   *  per Decision 1 of docs/plans/logit-pass.md. */
+  const altsOn = $derived(samplingState.return_top_k > 0);
+  const ALTS_K = 8;
+
   // ------------------------------------------------------------------- writes
 
   /** PATCH the server with a single field when in session-default mode.
@@ -154,6 +161,16 @@
     const v = (ev.currentTarget as HTMLInputElement).checked;
     setSampling("thinking", v);
     if (!samplingState.oneShotOverride) void persistDefault({ thinking: v });
+  }
+
+  /** Logit-pass: flip the top-K-alts capture on/off.  No PATCH — the
+   *  server's session-PATCH endpoint doesn't accept ``return_top_k``;
+   *  the value rides on the WS sampling payload directly (see
+   *  ``stores.svelte.ts::sendGenerate``).  Effective on the next
+   *  generation; running gens keep their captured shape. */
+  function onAlts(ev: Event): void {
+    const v = (ev.currentTarget as HTMLInputElement).checked;
+    setSampling("return_top_k", v ? ALTS_K : 0);
   }
 
   function setOneShot(oneShot: boolean): void {
@@ -279,6 +296,23 @@
       disabled={!ready || !thinkingSupported}
       onchange={onThinking}
       aria-label="thinking mode"
+    />
+  </label>
+
+  <!-- Top-K alternatives toggle (logit-pass).  Off by default to keep
+       the wire shape minimal; flip on to populate the drilldown logits
+       tab + the inline surprise highlight mode.  K=8 per Decision 1. -->
+  <label
+    class="control toggle"
+    title="Capture top-{ALTS_K} alternative tokens per position (drilldown logits tab + surprise highlight)"
+  >
+    <span class="label">alts</span>
+    <input
+      type="checkbox"
+      checked={altsOn}
+      disabled={!ready}
+      onchange={onAlts}
+      aria-label="capture top-K alternatives"
     />
   </label>
 

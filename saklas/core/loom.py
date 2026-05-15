@@ -350,6 +350,15 @@ class LoomNode:
     created_at: float = field(default_factory=time.time)
     edited_at: float | None = None
     edit_count: int = 0
+    # Mean chosen-token logprob over the non-thinking response span,
+    # computed in :meth:`SaklasSession._generate_core` and stamped at
+    # :meth:`LoomTree.finalize_assistant` time. ``None`` for legacy
+    # nodes replayed from pre-logit-pass transcripts. ``mean_surprise``
+    # caches ``-mean_logprob`` so the sidebar's "sort by surprise" mode
+    # is a keyboard sort, not a recompute. Both fields surface through
+    # ``to_dict`` / ``from_dict`` for tree persistence + WS bridge.
+    mean_logprob: float | None = None
+    mean_surprise: float | None = None
 
     def to_dict(self, *, include_tokens: bool = False) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -365,6 +374,8 @@ class LoomNode:
             "created_at": self.created_at,
             "edited_at": self.edited_at,
             "edit_count": self.edit_count,
+            "mean_logprob": self.mean_logprob,
+            "mean_surprise": self.mean_surprise,
         }
         if self.recipe is not None:
             out["recipe"] = self.recipe.to_dict()
@@ -394,6 +405,8 @@ class LoomNode:
             created_at=float(data.get("created_at", time.time())),
             edited_at=data.get("edited_at"),
             edit_count=int(data.get("edit_count", 0)),
+            mean_logprob=data.get("mean_logprob"),
+            mean_surprise=data.get("mean_surprise"),
         )
 
 
@@ -777,8 +790,18 @@ class LoomTree:
         aggregate_readings: dict[str, float] | None = None,
         applied_steering: str | None = None,
         finish_reason: str | None = None,
+        mean_logprob: float | None = None,
+        mean_surprise: float | None = None,
     ) -> None:
-        """Mark an in-flight assistant node as complete."""
+        """Mark an in-flight assistant node as complete.
+
+        ``mean_logprob`` / ``mean_surprise`` are the per-turn rollups
+        computed in :meth:`SaklasSession._generate_core` from the engine's
+        chosen-token logprob stream (response span only — thinking tokens
+        are excluded by construction).  ``None`` when logprob capture
+        wasn't live (no on_token consumer + no logprobs request), which
+        also covers replay-from-legacy-transcripts.
+        """
         with self._lock:
             node = self.nodes.get(node_id)
             if node is None:
@@ -788,6 +811,8 @@ class LoomTree:
                 node.aggregate_readings = dict(aggregate_readings)
             node.applied_steering = applied_steering
             node.finish_reason = finish_reason
+            node.mean_logprob = mean_logprob
+            node.mean_surprise = mean_surprise
             self.rev += 1
             self._emit(LoomMutated(
                 op="finalize_assistant", rev=self.rev,

@@ -537,6 +537,7 @@ class SaklasApp(App[None]):
             "  /unprobe <name|ns/>         — remove probe(s)\n"
             "  /extract <concept>          — cache-warm only\n"
             "  /compare <a> [b]            — cosine similarity\n"
+            "  /surprise [off]             — tint tokens by logprob (Ctrl+Y)\n"
             "Session:\n"
             "  /clear, /rewind, /regen     — history ops\n"
             "  /save <name>, /load <name>  — snapshot conv + alphas\n"
@@ -912,6 +913,40 @@ class SaklasApp(App[None]):
             pending_type="extract",
         )
 
+    def _handle_surprise(self, arg: str) -> None:
+        """Toggle the inline surprise highlight (logit-pass).
+
+        Flips ``_highlight_probe`` to the ``SURPRISE_PROBE`` sentinel and
+        turns highlighting on so the chat panel tints tokens by chosen-
+        token logprob.  Bare ``/surprise off`` (or ``/surprise no``) turns
+        the surprise overlay off but leaves ``_highlight_probe`` at the
+        sentinel so a subsequent Ctrl+Y restores it.  Bare ``/surprise``
+        is the canonical on-switch.
+
+        Per-token logprob capture is automatic — the engine populates
+        ``TokenEvent.logprob`` whenever any ``on_token`` consumer is live
+        (always true on the TUI worker), so no SamplingConfig knob is
+        required to make this work.
+        """
+        from saklas.tui.chat_panel import SURPRISE_PROBE
+        arg = arg.strip().lower()
+        chat = self._chat_panel
+        if arg in ("off", "no", "n"):
+            if self._highlight_probe == SURPRISE_PROBE:
+                self._highlighting = False
+                self._apply_highlight_to_all()
+                chat.add_system_message("Surprise highlight off.")
+            else:
+                chat.add_system_message("Surprise highlight already off.")
+            return
+        self._highlight_probe = SURPRISE_PROBE
+        self._highlighting = True
+        self._apply_highlight_to_all()
+        chat.add_system_message(
+            "Surprise highlight on — tokens tinted by chosen-token logprob. "
+            "Ctrl+Y to toggle."
+        )
+
     def _steer_status(self, msg: str) -> None:
         self._chat_panel.add_system_message(msg)
 
@@ -1060,8 +1095,13 @@ class SaklasApp(App[None]):
                 )
                 for event in stream:
                     self._ui_token_queue.put(
+                        # Logit-pass: ``event.logprob`` rides along so the
+                        # surprise highlight mode + chat_panel's per-token
+                        # logprob storage can render mid-gen.  None when
+                        # capture wasn't live (no probes, return_top_k=0,
+                        # no user on_token consumer).
                         ("tok", event.text, event.thinking, event.scores,
-                         event.perplexity, widget, False),
+                         event.perplexity, event.logprob, widget, False),
                     )
                     self._gen_token_count += 1
                 # Normal completion — pull per-token scores out of the
@@ -1097,7 +1137,13 @@ class SaklasApp(App[None]):
                 # without a global "current" lookup.  Shadow streams
                 # bypass the gen-stat counters (token count, ppl) — those
                 # describe the steered run only.
-                _, token, is_thinking, scores, perplexity, widget, is_shadow = item
+                # Logit-pass: 7-element tuple now (logprob between
+                # perplexity and widget).  Drives the surprise highlight
+                # mode + the per-token logprob storage on the widget.
+                (
+                    _, token, is_thinking, scores, perplexity, logprob,
+                    widget, is_shadow,
+                ) = item
                 if widget is not None:
                     if is_thinking:
                         widget.append_thinking_token(token)
@@ -1106,6 +1152,10 @@ class SaklasApp(App[None]):
                         widget.append_token(token)
                     if scores is not None:
                         widget.append_token_score(scores, is_thinking)
+                    # ``logprob`` may legitimately be ``None`` during prefill
+                    # or replay; always append so the per-token list stays
+                    # index-aligned with the token list.
+                    widget.append_token_logprob(logprob, is_thinking)
                 if not is_shadow:
                     if perplexity is not None and perplexity > 0:
                         # Geometric mean over the gen: accumulate log(ppl),
@@ -2162,7 +2212,7 @@ class SaklasApp(App[None]):
                 for event in stream:
                     self._ui_token_queue.put(
                         ("tok", event.text, event.thinking, event.scores,
-                         event.perplexity, widget, True),
+                         event.perplexity, event.logprob, widget, True),
                     )
                 self._ui_token_queue.put(("finalize", widget, True))
             except BaseException as e:
@@ -2909,7 +2959,7 @@ class SaklasApp(App[None]):
                 for event in stream:
                     self._ui_token_queue.put(
                         ("tok", event.text, event.thinking, event.scores,
-                         event.perplexity, widget, True),
+                         event.perplexity, event.logprob, widget, True),
                     )
                 self._ui_token_queue.put(("finalize", widget, True))
             except BaseException as e:

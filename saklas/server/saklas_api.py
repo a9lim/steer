@@ -98,6 +98,14 @@ class WSSamplingParams(BaseModel):
     stop: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    # Phase 1 logit pass: webui "show alts" toggle wires through this
+    # field. 0 (default) inherits the session-level
+    # ``return_top_k`` set at startup via ``--top-k-alts`` / YAML;
+    # K > 0 overrides per-request, so a webui session can flip alts
+    # capture on/off without re-loading the model.  Clamped at the
+    # SamplingConfig layer to ``[0, 256]``; pydantic accepts the int
+    # and forwards as-is.
+    return_top_k: int = 0
 
 
 class WSGenerateMessage(BaseModel):
@@ -172,6 +180,22 @@ class TreeTranscriptLoadRequest(BaseModel):
 
 class TreeDiffRequest(BaseModel):
     """Body for ``POST /saklas/v1/sessions/{id}/tree/diff`` (phase 5)."""
+
+    a_id: str
+    b_id: str
+
+
+class JointLogprobsRequest(BaseModel):
+    """Body for ``POST /saklas/v1/sessions/{id}/tree/joint_logprobs``
+    (logit-pass Phase 5 of ``docs/plans/logit-pass.md``).
+
+    Lazy / on-demand cross-evaluation between two sibling assistant
+    nodes — fired only when ``NodeCompareDrawer`` asks for it.  Results
+    cache on the session for the session lifetime, keyed by sorted
+    ``(a_id, b_id)`` so ``(A, B)`` and ``(B, A)`` requests share an
+    entry; the response is re-oriented to match the request's
+    a/b ordering before serialization.
+    """
 
     a_id: str
     b_id: str
@@ -346,6 +370,7 @@ def _build_sampling(body: WSSamplingParams | None) -> SamplingConfig | None:
         stop=stop,
         presence_penalty=body.presence_penalty or 0.0,
         frequency_penalty=body.frequency_penalty or 0.0,
+        return_top_k=body.return_top_k,
     )
 
 
@@ -1115,6 +1140,65 @@ def register_saklas_routes(app: FastAPI) -> None:
             ],
             "per_token": per_token_spans,
         }
+
+    @app.post("/saklas/v1/sessions/{session_id}/tree/joint_logprobs")
+    async def tree_joint_logprobs(session_id: str, req: JointLogprobsRequest):
+        """Cross-evaluation between two sibling assistant nodes.
+
+        Logit-pass Phase 5 of ``docs/plans/logit-pass.md``.  Runs one
+        forward pass per branch under ``inference_mode``, computes the
+        log-softmax at each position, and returns per-aligned-position
+        records carrying both branches' chosen-token logprobs *and* the
+        cross-branch evaluation (what each side would have given the
+        other's chosen token at the same byte-aligned position).
+
+        Cache shape:
+        * Stored on ``session._joint_logprob_cache: dict[tuple[str,
+          str], JointLogprobs]`` keyed by sorted ``(a_id, b_id)`` so
+          the symmetric pair shares an entry.
+        * Persists for the session lifetime — the underlying nodes are
+          immutable by ulid (mutations create new node ids), so stale
+          entries can't poison the response.
+
+        Held under ``acquire_session_lock`` because the forward passes
+        compete for the same model with any concurrent generation;
+        request queues FIFO at the lock rather than 409ing.
+        """
+        from saklas.core.joint_logprobs import (
+            compute_joint_logprobs,
+            _cache_key,
+            reorient_for_request,
+        )
+
+        _resolve_session_id(session, session_id)
+        if req.a_id == req.b_id:
+            raise HTTPException(400, "a_id and b_id must differ")
+        if req.a_id not in session.tree.nodes:
+            raise HTTPException(404, f"unknown node id: {req.a_id}")
+        if req.b_id not in session.tree.nodes:
+            raise HTTPException(404, f"unknown node id: {req.b_id}")
+
+        # Lazy cache attached to the session at first request — keeps
+        # the SaklasSession constructor footprint untouched.
+        cache_obj: Any = getattr(session, "_joint_logprob_cache", None)
+        if cache_obj is None:
+            cache_obj = {}
+            session._joint_logprob_cache = cache_obj  # type: ignore[attr-defined]
+        cache: dict[tuple[str, str], Any] = cache_obj
+
+        key = _cache_key(req.a_id, req.b_id)
+        hit = cache.get(key)
+        if hit is None:
+            async with acquire_session_lock(session):
+                # Double-check under lock — another request may have
+                # populated the cache while we waited.
+                hit = cache.get(key)
+                if hit is None:
+                    hit = await asyncio.to_thread(
+                        compute_joint_logprobs, session, req.a_id, req.b_id,
+                    )
+                    cache[key] = hit
+        return reorient_for_request(hit, req.a_id, req.b_id).to_dict()
 
     # ----- vectors -------------------------------------------------------
 
@@ -2128,7 +2212,7 @@ async def _ws_handle_generate(
                 is_thinking: bool,
                 tid: int | None,
                 lp: float | None,
-                top: list[tuple[str, float]] | None,
+                top_alts: list[Any] | None,
                 perplexity: float | None = None,
                 _node_holder: list[str | None] = current_node_holder,
             ) -> None:
@@ -2156,6 +2240,22 @@ async def _ws_handle_generate(
                     "token_id": int(tid) if tid is not None else None,
                     "node_id": node_id,
                 }
+                # Phase 1 logit pass: surface chosen-token logprob + top-K
+                # alternatives on the wire so webui drilldown / inline
+                # surprise / NodeCompare can render distributional info
+                # without a second fetch. Both fields are None when the
+                # engine didn't capture them (no on_token consumer + no
+                # logprobs / return_top_k request); subscribers ``?? null``-
+                # guard so legacy / unconfigured streams pass through
+                # cleanly. ``top_alts`` items are TokenAlt dataclasses;
+                # serialize each to ``{id, text, logprob}`` for JSON.
+                if lp is not None:
+                    event["logprob"] = float(lp)
+                if top_alts:
+                    event["top_alts"] = [
+                        {"id": int(a.id), "text": a.text, "logprob": float(a.logprob)}
+                        for a in top_alts
+                    ]
                 # Per-layer × per-probe heatmap data for the inspector
                 # panel.  Computed inline only when probes are loaded
                 # (covers the cost of N matmul + N CPU syncs against the
@@ -2325,6 +2425,29 @@ async def _ws_handle_generate(
                 )
             else:
                 result_json["per_token_probes"] = []
+            # Phase 1 logit pass: stamp the per-turn logprob rollup on the
+            # ``done`` event so subscribers (loom sidebar's sort-by-surprise,
+            # webui chat-header summary) don't need to re-fetch the node.
+            # Source of truth is the finalized loom node, populated by
+            # :meth:`LoomTree.finalize_assistant` upstream of this branch.
+            # Stateless gens / pre-logit-pass replays land with ``None``
+            # which the wire layer passes through transparently.
+            mean_logprob_out: float | None = None
+            mean_surprise_out: float | None = None
+            finalized_node_id = current_node_holder[0]
+            if finalized_node_id is not None:
+                try:
+                    node = session.tree.nodes.get(finalized_node_id)
+                    if node is not None:
+                        mean_logprob_out = node.mean_logprob
+                        mean_surprise_out = node.mean_surprise
+                except Exception:
+                    # Defensive: tree access during shutdown / mocked
+                    # session edge cases. Default-None values keep the
+                    # wire payload well-formed.
+                    pass
+            result_json["mean_logprob"] = mean_logprob_out
+            result_json["mean_surprise"] = mean_surprise_out
             await send_json({
                 "type": "done",
                 "result": result_json,

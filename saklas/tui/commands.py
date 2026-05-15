@@ -183,6 +183,16 @@ def _build_registry() -> dict[str, SlashCommand]:
             min_args=1,
             max_args=None,
         ),
+        # Logit-pass: ``/surprise`` flips the inline surprise highlight on
+        # (tokens tinted by chosen-token logprob).  ``/surprise off`` turns
+        # the overlay off without losing the probe seed — Ctrl+Y restores.
+        SlashCommand(
+            name="/surprise",
+            handler=SaklasApp._handle_surprise,
+            usage="Usage: /surprise  |  /surprise off",
+            min_args=0,
+            max_args=1,
+        ),
         SlashCommand(
             name="/extract",
             handler=SaklasApp._handle_extract_only,

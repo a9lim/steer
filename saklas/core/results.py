@@ -8,6 +8,21 @@ if TYPE_CHECKING:
     import torch
 
 
+@dataclass(frozen=True)
+class TokenAlt:
+    """One alternative the model considered at a given position.
+
+    Captured at decode time when ``SamplingConfig.return_top_k > 0`` (or
+    when OpenAI ``logprobs`` is set to a positive int).  ``logprob`` is the
+    post-sampler, post-temperature natural-log probability under the same
+    distribution the chosen token was drawn from — that's the calibrated
+    quantity for "how surprising was this token to the configured sampler."
+    """
+    id: int
+    text: str
+    logprob: float
+
+
 @dataclass
 class ProbeReadings:
     """Probe monitor readings across a generation run."""
@@ -34,9 +49,15 @@ class GenerationResult:
     vectors: dict[str, float] = field(default_factory=dict)
     prompt_tokens: int = 0
     finish_reason: str = "stop"
-    # Per-completion-token (token_id, logprob, top_logprobs) — populated
-    # only when logprobs were requested. top_logprobs is list[(id, logprob)].
-    logprobs: list[tuple[int, float, list[tuple[int, float]]]] | None = None
+    # Per-completion-token ``(token_id, logprob, top_alts)`` — populated
+    # only when chosen-logprob capture is live (any ``on_token`` consumer
+    # or an explicit logprobs request). ``top_alts`` is a list of
+    # :class:`TokenAlt` carrying ``(id, text, logprob)`` triples; empty
+    # list when no top-K alternatives were requested (``return_top_k == 0``
+    # and OpenAI ``logprobs`` was set to 0). Inner-tuple shape replaces the
+    # legacy ``list[tuple[int, float]]`` pair shape; renderers that consume
+    # this field read ``alt.text`` directly rather than re-decoding.
+    logprobs: list[tuple[int, float, list[TokenAlt]]] | None = None
     # Steering expression applied to this generation, stringified via
     # :func:`saklas.core.steering_expr.format_expr` for round-trip
     # reproduction.  ``None`` when no steering was active.  Receipts /
@@ -74,7 +95,12 @@ class TokenEvent:
     index: int
     thinking: bool = False
     logprob: float | None = None
-    top_logprobs: list[tuple[int, float]] | None = None
+    # Top-K alternatives the model considered at this position. ``None``
+    # when no top-K was requested (``return_top_k == 0`` and OpenAI
+    # ``logprobs`` was None or 0). Replaces the legacy
+    # ``top_logprobs: list[tuple[int, float]]`` pair shape — entries now
+    # carry decoded text so consumers don't re-tokenize.
+    top_alts: list[TokenAlt] | None = None
     finish_reason: str | None = None
     # Per-probe cosine similarities computed inline against the latest
     # captured hidden state. Populated by ``generate_stream`` only when

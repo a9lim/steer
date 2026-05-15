@@ -54,7 +54,7 @@ from saklas.core.session import GenState, SaklasSession
 from saklas.core.steering import Steering
 from saklas.core.triggers import Trigger
 from saklas.io.datasource import DataSource
-from saklas.core.results import GenerationResult, TokenEvent, ProbeReadings, ResultCollector
+from saklas.core.results import GenerationResult, TokenAlt, TokenEvent, ProbeReadings, ResultCollector
 
 __all__ = [
     "SaklasSession",
@@ -76,6 +76,7 @@ __all__ = [
     "GenerationFinished",
     "DataSource",
     "GenerationResult",
+    "TokenAlt",
     "TokenEvent",
     "ProbeReadings",
     "ResultCollector",

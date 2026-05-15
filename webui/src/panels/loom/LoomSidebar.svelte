@@ -68,10 +68,43 @@
   const activePathSet = $derived(new Set(loomTree.activePath));
   const selectionSet = $derived(new Set(nodeSelection.ids));
 
+  /** Logit-pass: order children by ``mean_logprob`` when the sibling-sort
+   *  filter directive is active.  Returns the children list in the order
+   *  to *visit* (DFS pushes in reverse, so this is "first-out" order).
+   *  Nodes without ``mean_logprob`` sink to the end and preserve their
+   *  insertion-order tiebreak. */
+  function _orderedChildren(parentId: string): string[] {
+    const children = loomTree.children_of.get(parentId) ?? [];
+    const mode = loomUiState.siblingSort;
+    if (mode === "default" || children.length < 2) return children;
+    // ``surprise`` first ⇒ most-surprising (lowest logprob) first.
+    // ``confidence`` first ⇒ highest logprob first.
+    const sign = mode === "surprise" ? 1 : -1;
+    const indexed = children.map((id, idx) => ({
+      id,
+      idx,
+      lp: loomTree.nodes.get(id)?.mean_logprob ?? null,
+    }));
+    indexed.sort((a, b) => {
+      // Stable: null sinks; equal logprobs preserve insertion order.
+      if (a.lp === null && b.lp === null) return a.idx - b.idx;
+      if (a.lp === null) return 1;
+      if (b.lp === null) return -1;
+      const delta = sign * (a.lp - b.lp);
+      return delta !== 0 ? delta : a.idx - b.idx;
+    });
+    return indexed.map((e) => e.id);
+  }
+
   const rows = $derived.by<Row[]>(() => {
     const out: Row[] = [];
     if (!loomTree.root_id) return out;
     const matching = filterState.matchingIds;
+    // Touch the sort key so $derived re-runs when it flips.  Reading
+    // ``loomUiState.siblingSort`` happens inside ``_orderedChildren``
+    // already; this is the Svelte 5 idiom for keeping the dependency
+    // explicit when the helper is called inside a tight loop.
+    void loomUiState.siblingSort;
     const stack: { id: string; depth: number; deadAncestor: boolean }[] = [
       { id: loomTree.root_id, depth: 0, deadAncestor: false },
     ];
@@ -93,8 +126,9 @@
           filteredOut,
         });
       }
-      // Push children in reverse so DFS visits them in order.
-      const children = loomTree.children_of.get(id) ?? [];
+      // Push children in reverse so DFS visits them in order, then
+      // apply the optional sibling-sort.
+      const children = _orderedChildren(id);
       for (let i = children.length - 1; i >= 0; i--) {
         stack.push({
           id: children[i],
@@ -122,6 +156,24 @@
     if (!readings) return null;
     const v = readings[target];
     return typeof v === "number" ? v : null;
+  }
+
+  /** Logit-pass: the badge value to render on a node — the node's own
+   *  ``mean_logprob`` when weight mode is on, else null (which suppresses
+   *  the badge entirely in ``LoomNode``). */
+  function weightBadgeFor(node: LoomNodeJSON): number | null {
+    if (loomUiState.weightMode === "none") return null;
+    const v = node.mean_logprob;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  }
+
+  /** Logit-pass: per-edge weight is the child's ``mean_logprob``.  The
+   *  edge component picks confidence vs surprise from ``weightMode`` so
+   *  the same number drives both modes. */
+  function edgeWeightFor(node: LoomNodeJSON): number | null {
+    if (loomUiState.weightMode === "none") return null;
+    const v = node.mean_logprob;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
   }
 
   // ----------------------------------------- filter input ------------
@@ -764,8 +816,22 @@
       onkeydown={onFilterKey}
       placeholder="filter: agg:angry.calm > 0.4"
       aria-label="Filter expression"
-      title="Filter grammar: agg:|any:|last:<probe> <op> <threshold> — comma-AND'd"
+      title="Filter grammar — click ? for help"
     />
+    <!-- Logit-pass (Decision 8): help popover for the filter grammar.
+         Clicked-toggle keeps the popover anchored without stealing
+         keyboard focus from the filter input.  The grammar text mirrors
+         tree_filter.py's accepted forms plus the client-side sort
+         directive added in Phase 4. -->
+    <button
+      type="button"
+      class="icon-btn help-btn"
+      class:on={loomUiState.filterHelpOpen}
+      onclick={() => (loomUiState.filterHelpOpen = !loomUiState.filterHelpOpen)}
+      title="Filter grammar help"
+      aria-label="Filter grammar help"
+      aria-expanded={loomUiState.filterHelpOpen}
+    >?</button>
     {#if filterState.expr}
       <button
         type="button"
@@ -782,6 +848,57 @@
     {:else if filterState.matchingIds !== null}
       <span class="filter-status" title="matches">
         {filterState.matchingIds.size}
+      </span>
+    {/if}
+  </div>
+
+  {#if loomUiState.filterHelpOpen}
+    <!-- Inline grammar reference + worked examples.  Dismissible by
+         clicking the ? again or pressing Esc on the sidebar. -->
+    <div class="filter-help" role="region" aria-label="Filter grammar help">
+      <p>
+        <strong>Grammar:</strong> comma-separated terms; all must match.
+      </p>
+      <ul>
+        <li><code>&lt;probe&gt; &gt; &lt;n&gt;</code> — aggregate reading (e.g. <code>angry.calm &gt; 0.4</code>)</li>
+        <li><code>agg:</code>|<code>any:</code>|<code>last:&lt;probe&gt; &lt;op&gt; &lt;n&gt;</code> — pick aggregator</li>
+        <li><code>starred</code> — only starred nodes</li>
+        <li><code>text:&lt;query&gt;</code> — substring search</li>
+        <li><code>sort:surprise</code> — reorder siblings most-surprising first</li>
+        <li><code>sort:confidence</code> — reorder siblings most-confident first</li>
+      </ul>
+      <p>
+        <strong>Examples:</strong>
+      </p>
+      <ul class="examples">
+        <li><code>agg:angry.calm &gt; 0.4</code></li>
+        <li><code>starred, text:fox</code></li>
+        <li><code>sort:surprise, agg:honest &lt; 0</code></li>
+      </ul>
+    </div>
+  {/if}
+
+  <!-- Logit-pass: edge weight mode picker (Phase 4).  ``none`` keeps the
+       v2.3 flat shape; ``confidence`` / ``surprise`` thicken edges + show
+       the ``mean_logprob`` badge per node. -->
+  <div class="weight-bar" title="Loom edge weighting by mean chosen-token logprob">
+    <span class="weight-label">edges</span>
+    <select
+      class="weight-select"
+      value={loomUiState.weightMode}
+      onchange={(ev) => {
+        loomUiState.weightMode = (ev.currentTarget as HTMLSelectElement)
+          .value as "none" | "confidence" | "surprise";
+      }}
+      aria-label="Edge weight mode"
+    >
+      <option value="none">none</option>
+      <option value="confidence">confidence</option>
+      <option value="surprise">surprise</option>
+    </select>
+    {#if loomUiState.siblingSort !== "default"}
+      <span class="weight-label" title="active sibling sort directive">
+        · sort:{loomUiState.siblingSort}
       </span>
     {/if}
   </div>
@@ -833,6 +950,8 @@
               dead={row.isDead}
               parentId={row.node.parent_id}
               childId={row.node.id}
+              weight={edgeWeightFor(row.node)}
+              weightMode={loomUiState.weightMode}
             />
           {/if}
           <LoomNode
@@ -842,6 +961,7 @@
             dead={row.isDead}
             streaming={loomTree.pendingNodeId === row.node.id}
             ring={ringFor(row.node)}
+            weightBadge={weightBadgeFor(row.node)}
             onclick={(ev) => onNodeClick(row.node, ev)}
             oncontextmenu={(ev) => openMenu(ev, row.node.id)}
           />
@@ -1081,6 +1201,64 @@
   }
   .filter-status.err {
     color: var(--accent-red);
+  }
+
+  /* Logit-pass: help affordance, help popover, weight-mode picker. */
+  .help-btn.on {
+    color: var(--accent-blue);
+    border-color: var(--accent-blue);
+  }
+  .filter-help {
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--border-dim);
+    padding: 0.5em 0.7em;
+    color: var(--fg-dim);
+    font-size: var(--font-size-tiny);
+    line-height: 1.45;
+    max-height: 14em;
+    overflow: auto;
+  }
+  .filter-help strong {
+    color: var(--fg);
+  }
+  .filter-help code {
+    color: var(--accent-blue);
+    background: transparent;
+    font-family: var(--font-mono);
+  }
+  .filter-help ul {
+    margin: 0.2em 0 0.4em 1.2em;
+    padding: 0;
+    list-style: disc;
+  }
+  .filter-help li {
+    margin: 0.15em 0;
+  }
+  .filter-help .examples code {
+    color: var(--fg-strong);
+  }
+  .weight-bar {
+    display: flex;
+    gap: 0.4em;
+    align-items: center;
+    padding: 0.3em 0.5em;
+    border-bottom: 1px solid var(--border-dim);
+    background: var(--bg-deep);
+    font-size: var(--font-size-tiny);
+    color: var(--fg-dim);
+  }
+  .weight-label {
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .weight-select {
+    background: var(--bg-alt);
+    color: var(--fg-strong);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.4em;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-tiny);
   }
 
   .selection-bar {

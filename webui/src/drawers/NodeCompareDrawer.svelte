@@ -22,6 +22,8 @@
     DiffReadingDeltaJSON,
     DiffTextSpanJSON,
     DiffTokenSpanJSON,
+    JointLogprobsJSON,
+    JointLogprobRowJSON,
     NodeDiffJSON,
   } from "../lib/types";
 
@@ -49,7 +51,17 @@
     | { kind: "ok"; diff: NodeDiffJSON }
     | { kind: "err"; message: string };
 
+  /** Logit-pass Phase 5: joint-logprobs cache state per (anchor, other)
+   *  pair.  Loads lazily after the main diff lands so the drawer feels
+   *  responsive — the forward passes for cross-evaluation are slower
+   *  than the text diff. */
+  type JointOrError =
+    | { kind: "loading" }
+    | { kind: "ok"; data: JointLogprobsJSON }
+    | { kind: "err"; message: string };
+
   let diffs: DiffOrError[] = $state([]);
+  let joints: JointOrError[] = $state([]);
   let loading = $state(false);
   let hoveredAnchorIdx: number | null = $state(null);
 
@@ -62,6 +74,7 @@
     const list = ids;
     if (list.length < 2 || !anchorId) {
       diffs = [];
+      joints = [];
       return;
     }
     loading = true;
@@ -90,6 +103,47 @@
     } finally {
       loading = false;
     }
+    // Logit-pass Phase 5: fire the cross-evaluation forward passes in
+    // parallel after the text diff is in place.  Loading state per
+    // pair so the drawer can show "(crunching cross logprobs…)"
+    // independently of the diff rendering.
+    await fetchJoints();
+  }
+
+  /** Lazy fetch of joint logprobs for each (anchor, other) pair.
+   *  Hits the session-lifetime cache on the server side; second open
+   *  of the same pair is a memory lookup. */
+  async function fetchJoints(): Promise<void> {
+    const list = ids;
+    if (list.length < 2 || !anchorId) {
+      joints = [];
+      return;
+    }
+    joints = list.slice(1).map(() => ({ kind: "loading" }) as JointOrError);
+    const out: JointOrError[] = [];
+    for (let i = 1; i < list.length; i++) {
+      try {
+        const r = await apiTree.jointLogprobs(anchorId, list[i]);
+        out.push({ kind: "ok", data: r });
+      } catch (e) {
+        if (e instanceof ApiError) {
+          const detail =
+            e.body && typeof e.body === "object" && "detail" in (e.body as object)
+              ? String((e.body as { detail: unknown }).detail)
+              : e.message;
+          out.push({ kind: "err", message: `${e.status}: ${detail}` });
+        } else {
+          out.push({
+            kind: "err",
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      // Update incrementally so each pair lands as soon as the server
+      // returns — useful for N-way comparisons.
+      joints = [...out, ...joints.slice(out.length)];
+    }
+    joints = out;
   }
 
   // Refetch whenever the id list changes.
@@ -192,6 +246,139 @@
       .map((r) => `${r.name} ${formatReadingDelta(r)}`)
       .join(" · ");
   }
+
+  // ----------------------------------------- joint logprobs (Phase 5) --
+
+  /** Format a logprob.  Null / non-finite render as ``—``. */
+  function fmtLp(v: number | null | undefined): string {
+    if (v == null || !Number.isFinite(v)) return "—";
+    return v.toFixed(2);
+  }
+
+  /** Format a delta logprob (always signed) — useful when reading
+   *  "did B give this token less / more weight than A did?". */
+  function fmtDeltaLp(a: number | null, b: number | null): string {
+    if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b)) {
+      return "—";
+    }
+    const d = a - b;
+    const sign = d >= 0 ? "+" : "";
+    return `${sign}${d.toFixed(2)}`;
+  }
+
+  /** Format the approx-KL value — small numbers get more precision so
+   *  the leading digits remain readable. */
+  function fmtKl(v: number | null): string {
+    if (v == null || !Number.isFinite(v)) return "—";
+    if (Math.abs(v) < 0.01) return v.toExponential(1);
+    return v.toFixed(2);
+  }
+
+  /** Aligned-only filter — divergent rows have null cross-eval and are
+   *  surfaced separately in the divergent-text view above.  Keeps the
+   *  logprob table focused on the byte-aligned positions where the
+   *  cross comparison is well-defined. */
+  function alignedRows(rows: JointLogprobRowJSON[]): JointLogprobRowJSON[] {
+    return rows.filter((r) => r.aligned);
+  }
+
+  // ------------------------------ siblings summary (Phase 6) ------------
+  //
+  // Per-sibling rollup for the loom "compare children" surface — answers
+  // "did my α=0.5 shift the distribution at the contentious tokens, or
+  // just the argmax?" without making the researcher scan the per-token
+  // table.  Baseline = anchor (left-most node); one row per non-anchor
+  // sibling shows ``mean_logprob`` (from the node), ``rank-1 %
+  // unchanged`` (= 1 − n_rank1_changed / n_aligned), and the mean
+  // ``approx_kl`` across aligned positions.  The anchor row carries
+  // ``—`` for the comparison columns (it's not compared to itself).
+
+  interface SiblingSummaryRow {
+    nodeId: string;
+    isAnchor: boolean;
+    label: string;
+    preview: string;
+    meanLogprob: number | null;
+    /** Fraction of aligned positions where the argmax did NOT change.
+     *  Null for the anchor row. */
+    rank1Unchanged: number | null;
+    /** Mean approx-KL across aligned positions (the joint table's
+     *  ``approx_kl`` column).  Null for the anchor row. */
+    klMean: number | null;
+    /** Joint-table loading state per row, so we can show a "(crunching)"
+     *  shape next to the values instead of a blank row. */
+    jointReady: boolean;
+  }
+
+  /** Build the summary table from currently-loaded state.  Pulls
+   *  ``mean_logprob`` from the local tree cache and rolls up rank-1 /
+   *  KL stats from each joint-logprobs response.  Re-runs reactively
+   *  whenever ``ids`` or ``joints`` updates. */
+  const siblingSummary = $derived.by<SiblingSummaryRow[]>(() => {
+    if (ids.length < 2) return [];
+    const out: SiblingSummaryRow[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const node = loomTree.nodes.get(id);
+      const isAnchor = i === 0;
+      const baseRow: SiblingSummaryRow = {
+        nodeId: id,
+        isAnchor,
+        label: isAnchor
+          ? "A"
+          : ids.length === 2
+            ? "B"
+            : `B${i}`,
+        preview: nodePreview(id),
+        meanLogprob:
+          node && typeof node.mean_logprob === "number"
+            ? node.mean_logprob
+            : null,
+        rank1Unchanged: null,
+        klMean: null,
+        jointReady: isAnchor,
+      };
+      if (!isAnchor) {
+        // Anchor takes index 0; ``joints`` is indexed by non-anchor
+        // position so ``joints[i - 1]`` matches this row.
+        const j = joints[i - 1];
+        if (j) {
+          if (j.kind === "ok") {
+            const aligned = alignedRows(j.data.rows);
+            if (aligned.length > 0) {
+              baseRow.rank1Unchanged =
+                1 - j.data.n_rank1_changed / aligned.length;
+              let sum = 0;
+              let n = 0;
+              for (const r of aligned) {
+                if (r.approx_kl != null && Number.isFinite(r.approx_kl)) {
+                  sum += r.approx_kl;
+                  n += 1;
+                }
+              }
+              baseRow.klMean = n > 0 ? sum / n : null;
+            }
+            baseRow.jointReady = true;
+          } else if (j.kind === "err") {
+            baseRow.jointReady = true;
+          }
+        }
+      }
+      out.push(baseRow);
+    }
+    return out;
+  });
+
+  function fmtPct(v: number | null): string {
+    if (v == null || !Number.isFinite(v)) return "—";
+    return `${(v * 100).toFixed(0)}%`;
+  }
+
+  function fmtKlMean(v: number | null): string {
+    if (v == null || !Number.isFinite(v)) return "—";
+    if (Math.abs(v) < 0.01) return v.toExponential(1);
+    return v.toFixed(3);
+  }
 </script>
 
 <section class="drawer-shell" aria-label="Cross-branch diff drawer">
@@ -247,6 +434,60 @@
         {/each}
       </div>
 
+      <!-- Logit-pass Phase 6: per-sibling rollup summary.  Renders for
+           both N=2 and N>2 modes — the table is more useful at N>2 (the
+           old "sweep result table" use case) but it's still a clean
+           at-a-glance read for a single pair.  KL / rank-1 columns
+           populate lazily as the joint-logprobs fetches complete. -->
+      {#if siblingSummary.length > 0}
+        <section class="siblings-summary">
+          <header class="ss-header">
+            <span class="ss-label">siblings · distributional rollup</span>
+            <span class="ss-foot">vs. {siblingSummary[0]?.label ?? "A"} (baseline)</span>
+          </header>
+          <table class="ss-table">
+            <thead>
+              <tr>
+                <th class="ss-tag">tag</th>
+                <th class="ss-preview">preview</th>
+                <th class="ss-num" title="mean chosen-token logprob over the response span">
+                  mean lp
+                </th>
+                <th class="ss-num" title="fraction of aligned positions where argmax did not change">
+                  rk1 unchanged
+                </th>
+                <th class="ss-num" title="mean top-K-truncated KL(baseline ∥ this) across aligned positions">
+                  mean ≈KL
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each siblingSummary as row (row.nodeId)}
+                <tr class:anchor={row.isAnchor}>
+                  <td class="ss-tag">{row.label}</td>
+                  <td class="ss-preview">{row.preview}</td>
+                  <td class="ss-num">{fmtLp(row.meanLogprob)}</td>
+                  <td class="ss-num">
+                    {row.isAnchor
+                      ? "—"
+                      : row.jointReady
+                        ? fmtPct(row.rank1Unchanged)
+                        : "…"}
+                  </td>
+                  <td class="ss-num">
+                    {row.isAnchor
+                      ? "—"
+                      : row.jointReady
+                        ? fmtKlMean(row.klMean)
+                        : "…"}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </section>
+      {/if}
+
       {#each diffs as result, diffIdx (diffIdx)}
         {#if result.kind === "err"}
           <p class="error" role="alert">{result.message}</p>
@@ -254,6 +495,7 @@
           {@const d = result.diff}
           {@const topDeltas = topKSet(d.readings, 5)}
           {@const sortedRs = sortedReadings(d.readings)}
+          {@const joint = joints[diffIdx]}
 
           <section class="diff-block">
             <header class="diff-header">
@@ -333,6 +575,82 @@
                   </span>
                 {/each}
               </div>
+            {/if}
+
+            <!-- Logit-pass Phase 5: per-aligned-token cross-evaluation
+                 table.  Lazy fetch in parallel with the diff; loading /
+                 error states surface inline.  ``joint`` is declared at
+                 the top of the {:else} block (Svelte requires @const at
+                 the start of a parent block). -->
+            {#if joint}
+              {#if joint.kind === "loading"}
+                <p class="dim small">
+                  computing cross-branch logprobs…
+                </p>
+              {:else if joint.kind === "err"}
+                <p class="error small" role="alert">
+                  joint logprobs unavailable: {joint.message}
+                </p>
+              {:else}
+                {@const aligned = alignedRows(joint.data.rows)}
+                {#if aligned.length > 0}
+                  <div class="joint-table">
+                    <header class="joint-header">
+                      <span class="joint-label">cross-branch logprobs</span>
+                      <span class="joint-summary">
+                        rank-1 changed at <strong>
+                          {joint.data.n_rank1_changed}
+                        </strong> of {aligned.length} aligned positions
+                      </span>
+                    </header>
+                    <table class="lp-table">
+                      <thead>
+                        <tr>
+                          <th class="lp-pos">pos</th>
+                          <th class="lp-tok">token</th>
+                          <th class="lp-num">lp(A)</th>
+                          <th class="lp-num">lp(B)</th>
+                          <th class="lp-num" title="lp(A's token under B's distribution) − lp(A's own)">
+                            Δ lp(A)
+                          </th>
+                          <th class="lp-num" title="approx KL(A ∥ B), top-K truncated">
+                            ≈KL
+                          </th>
+                          <th class="lp-flag" title="argmax differs">rk1Δ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each aligned as row (`${row.a_index}-${row.b_index}`)}
+                          <tr class:rank-flip={row.rank_changed}>
+                            <td class="lp-pos">{row.a_index}</td>
+                            <td class="lp-tok">
+                              <code>{JSON.stringify(row.a_text)}</code>
+                            </td>
+                            <td class="lp-num">{fmtLp(row.lp_a_in_a)}</td>
+                            <td class="lp-num">{fmtLp(row.lp_b_in_b)}</td>
+                            <td class="lp-num">
+                              {fmtDeltaLp(row.lp_a_in_b, row.lp_a_in_a)}
+                            </td>
+                            <td class="lp-num">{fmtKl(row.approx_kl)}</td>
+                            <td class="lp-flag">{row.rank_changed ? "●" : ""}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                    <p class="joint-foot">
+                      lp: chosen-token logprob.  Δ lp(A): how B would have
+                      scored A's chosen token, minus what A actually gave
+                      it (negative = B disagreed).  ≈KL: top-{32}-truncated
+                      KL(A ∥ B) — approximate signal, not measurement.
+                    </p>
+                  </div>
+                {:else}
+                  <p class="dim small">
+                    no byte-aligned assistant tokens between these
+                    branches — cross-evaluation has nothing to score.
+                  </p>
+                {/if}
+              {/if}
             {/if}
 
             <!-- Readings delta table. -->
@@ -591,6 +909,161 @@
   }
   .span-equal {
     color: var(--fg-strong);
+  }
+
+  /* Logit-pass Phase 6: per-sibling distributional rollup. */
+  .siblings-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    background: var(--bg-alt);
+    border: 1px solid var(--border-dim);
+    padding: 0.5em 0.7em;
+    margin: 0;
+  }
+  .ss-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6em;
+  }
+  .ss-label {
+    color: var(--accent-blue);
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+    font-size: var(--font-size-tiny);
+  }
+  .ss-foot {
+    color: var(--fg-muted);
+    font-size: var(--font-size-tiny);
+  }
+  .ss-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: var(--font-size-tiny);
+    font-variant-numeric: tabular-nums;
+  }
+  .ss-table th,
+  .ss-table td {
+    padding: 0.25em 0.5em;
+    border-bottom: 1px solid var(--border-dim);
+    text-align: left;
+  }
+  .ss-table thead th {
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: normal;
+  }
+  .ss-table td.ss-num,
+  .ss-table th.ss-num {
+    text-align: right;
+    white-space: nowrap;
+    width: 6em;
+  }
+  .ss-table td.ss-tag,
+  .ss-table th.ss-tag {
+    width: 3em;
+    color: var(--fg-dim);
+  }
+  .ss-table td.ss-preview {
+    color: var(--fg);
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ss-table tr.anchor td {
+    background: rgba(88, 166, 255, 0.08);
+  }
+  .ss-table tr.anchor td.ss-tag {
+    color: var(--accent-blue);
+    font-weight: 600;
+  }
+
+  /* Logit-pass Phase 5: cross-evaluation table. */
+  .joint-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    margin: 0.3em 0 0.5em 0;
+  }
+  .joint-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6em;
+  }
+  .joint-label {
+    color: var(--fg-muted);
+    font-size: var(--font-size-tiny);
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+  }
+  .joint-summary {
+    color: var(--fg-dim);
+    font-size: var(--font-size-tiny);
+  }
+  .joint-summary strong {
+    color: var(--fg-strong);
+  }
+  .lp-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-variant-numeric: tabular-nums;
+    font-size: var(--font-size-tiny);
+    background: var(--bg-alt);
+    border: 1px solid var(--border-dim);
+  }
+  .lp-table th,
+  .lp-table td {
+    padding: 0.2em 0.5em;
+    border-bottom: 1px solid var(--border-dim);
+    text-align: left;
+  }
+  .lp-table thead th {
+    color: var(--fg-muted);
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg-deep);
+  }
+  .lp-table td.lp-num,
+  .lp-table th.lp-num {
+    text-align: right;
+    width: 4.5em;
+  }
+  .lp-table td.lp-pos,
+  .lp-table th.lp-pos {
+    text-align: right;
+    width: 2.5em;
+    color: var(--fg-dim);
+  }
+  .lp-table td.lp-flag,
+  .lp-table th.lp-flag {
+    text-align: center;
+    width: 2em;
+  }
+  .lp-table td.lp-tok code {
+    color: var(--fg-strong);
+    background: transparent;
+    word-break: break-all;
+  }
+  /* Rank-1 flips read as the highest-signal rows — give them a soft
+     yellow tint, mirroring the readings table's top-delta affordance. */
+  .lp-table tr.rank-flip td {
+    background: rgba(240, 200, 88, 0.10);
+  }
+  .lp-table tr.rank-flip .lp-flag {
+    color: var(--accent-yellow);
+  }
+  .joint-foot {
+    color: var(--fg-muted);
+    font-size: var(--font-size-tiny);
+    line-height: 1.4;
+    margin: 0;
   }
 
   .readings-table {

@@ -41,6 +41,28 @@ def _add_config_args(p: argparse.ArgumentParser) -> None:
                    help="With -c: fail hard on missing vectors")
 
 
+def _add_logit_args(p: argparse.ArgumentParser) -> None:
+    """Logit-capture options shared between ``tui`` and ``serve``.
+
+    Phase 1 of the logit pass: ``--top-k-alts`` sets the session-level
+    default for ``SamplingConfig.return_top_k`` — the number of top-K
+    alternatives the engine decodes per generated token (with text). K=0
+    (the default) means "logprob only", a near-free addition on top of
+    the existing log_softmax in the loom path. K>0 enables the
+    distributional surfaces (drilldown logits tab, inline surprise tint,
+    NodeCompareDrawer logit columns); ~60 KB/turn on the wire at K=8.
+    Per-call ``SamplingConfig.return_top_k > 0`` overrides; K=0 inherits.
+    YAML equivalent: ``return_top_k:`` int in ``[0, 256]``.
+    """
+    p.add_argument(
+        "--top-k-alts", dest="top_k_alts", type=int, default=None, metavar="N",
+        help="Session default for top-K alternatives capture (0–256). "
+             "0 (default) = chosen-token logprob only; N>0 ships top-N "
+             "decoded alternatives per token for distributional surfaces. "
+             "Unset = inherit YAML ``return_top_k:`` / session default.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level parsers
 # ---------------------------------------------------------------------------
@@ -159,6 +181,7 @@ def _build_tui_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-tokens", type=int, default=1024,
                         help="Default max generation tokens")
     _add_injection_args(parser)
+    _add_logit_args(parser)
     _add_config_args(parser)
 
 
@@ -176,6 +199,7 @@ def _build_serve_parser(parser: argparse.ArgumentParser) -> None:
                         help="Skip the analytics dashboard mount at / "
                              "(API-only mode for production / proxied deployments)")
     _add_injection_args(parser)
+    _add_logit_args(parser)
     _add_config_args(parser)
 
 

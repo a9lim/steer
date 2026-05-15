@@ -41,6 +41,8 @@
     twoStripeStyle,
     twoBlendStyle,
     formatScoreTooltip,
+    surpriseScore,
+    SURPRISE_TARGET,
   } from "../lib/tokens";
 
   // --------------------------------------------------------------- input --
@@ -301,20 +303,29 @@
   // ----------------------------------------------------------- token render --
 
   /** Score lookup for a single token against the currently-selected
-   * probe.  Falls back to the cached single-probe ``score`` field when
-   * the full ``probes`` map is missing (live tokens before done). */
-  function pickScore(t: TokenScore, probe: string | null): number | undefined {
-    if (!probe) return undefined;
-    if (t.probes && probe in t.probes) return t.probes[probe];
+   * highlight target.  Handles the logit-pass ``SURPRISE_TARGET`` sentinel
+   * by routing to ``surpriseScore``; for real probe names, reads
+   * ``t.probes`` first and falls back to the cached single-probe
+   * ``score`` field (live tokens before done). */
+  function pickScore(t: TokenScore, target: string | null): number | undefined {
+    if (!target) return undefined;
+    if (target === SURPRISE_TARGET) return surpriseScore(t.logprob);
+    if (t.probes && target in t.probes) return t.probes[target];
     // The store's ``handleWsMessage`` sets ``t.score`` against the
     // current highlight target, so it's safe to use as a hot-path fall-
-    // back when the per-probe map hasn't been recorded yet.
+    // back when the per-probe map hasn't been recorded yet.  Only valid
+    // when the cached score matches the selected probe — when the
+    // dropdown switches probes mid-stream, this branch can return a
+    // stale value for the old probe; the rendering converges once
+    // ``done`` lands with the full per-probe map.
     return t.score;
   }
 
   /** Build the inline-style object for one token's background.  Compare-
    * two needs both probes set; if only one of the two is configured we
-   * gracefully fall back to single-probe rendering. */
+   * gracefully fall back to single-probe rendering.  ``SURPRISE_TARGET``
+   * works in either slot — the resulting score feeds the same
+   * ``scoreToRgb`` ramp (positive half by construction). */
   function tokenStyle(
     t: TokenScore,
   ): { backgroundColor?: string; backgroundImage?: string } {
@@ -345,7 +356,49 @@
     return parts.join(";");
   }
 
+  /** Format the logprob suffix for the surprise-mode tooltip.  Includes
+   *  the rank-of-K readout when ``top_alts`` was captured for this
+   *  position so researchers can read "this is rank 1 of 8" at a glance. */
+  function surpriseTooltip(t: TokenScore): string {
+    if (t.logprob == null || !Number.isFinite(t.logprob)) {
+      return "no logprob data";
+    }
+    const lp = `logprob = ${t.logprob.toFixed(3)}`;
+    const alts = t.topAlts;
+    if (!alts || alts.length === 0) return lp;
+    // Look up the chosen token's rank within the captured alts.  Falls
+    // back to text equality when ``tokenId`` is missing (legacy shape).
+    let rank: number | null = null;
+    for (let i = 0; i < alts.length; i++) {
+      const a = alts[i];
+      if (t.tokenId != null ? a.id === t.tokenId : a.text === t.text) {
+        rank = i + 1;
+        break;
+      }
+    }
+    return rank !== null
+      ? `${lp}, rank ${rank} of ${alts.length}`
+      : `${lp}, chosen not in top-${alts.length}`;
+  }
+
   function tooltipFor(t: TokenScore): string {
+    // Logit-pass: surprise mode owns the tooltip when active so the
+    // surprise number is what hovers on the inline tint.
+    if (highlightState.target === SURPRISE_TARGET) return surpriseTooltip(t);
+    if (
+      highlightState.compareTwo &&
+      highlightState.compareTarget === SURPRISE_TARGET
+    ) {
+      // compare-two with surprise as the B stripe — prefer the probe
+      // tooltip but append the surprise number so hover gives both.
+      const probeTip = t.probes
+        ? formatScoreTooltip(t.probes)
+        : t.score !== undefined && highlightState.target
+          ? `${highlightState.target} ${t.score >= 0 ? "+" : ""}${t.score.toFixed(3)}`
+          : "";
+      const sup = surpriseTooltip(t);
+      return probeTip ? `${probeTip}\n${sup}` : sup;
+    }
     if (t.probes) return formatScoreTooltip(t.probes);
     if (t.score !== undefined && highlightState.target) {
       return `${highlightState.target} ${
@@ -405,6 +458,11 @@
         aria-label="Highlight probe"
       >
         <option value="">(off)</option>
+        <!-- Logit-pass: ``surprise`` tints tokens by ``-logprob /
+             (1 - logprob)`` per Decision 4.  Sentinel value sits next to
+             real probe names in the same picker so a single dropdown
+             covers both axes. -->
+        <option value={SURPRISE_TARGET}>surprise (logprob)</option>
         {#each probeNames as name (name)}
           <option value={name}>{name}</option>
         {/each}
@@ -431,6 +489,12 @@
           aria-label="Compare probe"
         >
           <option value="">(off)</option>
+          <!-- Allow surprise as the B-stripe target too — "probe X vs.
+               surprise" is a useful axis ("does probe X light up at the
+               surprising tokens?"). -->
+          {#if highlightState.target !== SURPRISE_TARGET}
+            <option value={SURPRISE_TARGET}>surprise (logprob)</option>
+          {/if}
           {#each probeNames as name (name)}
             {#if name !== highlightState.target}
               <option value={name}>{name}</option>

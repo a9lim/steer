@@ -428,6 +428,7 @@ class SaklasSession:
         compile_mode: str | None = None,
         cuda_graphs: bool = True,
         session_id: str | None = None,
+        return_top_k: int = 0,
     ) -> "SaklasSession":
         """Load a HF model + tokenizer and return a fully initialized session.
 
@@ -568,6 +569,7 @@ class SaklasSession:
             dls=dls,
             cuda_graphs=cuda_graphs,
             session_id=session_id,
+            return_top_k=return_top_k,
         )
 
     def __init__(
@@ -585,6 +587,7 @@ class SaklasSession:
         dls: bool = True,
         cuda_graphs: bool = True,
         session_id: str | None = None,
+        return_top_k: int = 0,
     ):
         self._model = model
         self._tokenizer = tokenizer
@@ -632,6 +635,17 @@ class SaklasSession:
         # with no neutral-activation cache yet), the materialize site
         # falls back to Euclidean per layer transparently.
         self._projection_metric: str = projection_metric
+        # Phase 1 logit pass: session-level default for SamplingConfig
+        # .return_top_k.  Per-call value > 0 wins; per-call K=0 (the
+        # SamplingConfig default) inherits this stored value via the
+        # composition in ``_generate_core``.  Clamped on entry mirroring
+        # SamplingConfig.__post_init__ so out-of-range values from
+        # ``--top-k-alts`` or YAML don't reach the engine slice.
+        if return_top_k < 0:
+            return_top_k = 0
+        elif return_top_k > 256:
+            return_top_k = 256
+        self._default_return_top_k: int = int(return_top_k)
         self._steering = SteeringManager(
             injection_mode=self._injection_mode,  # type: ignore[arg-type]
             theta_max=self._theta_max,
@@ -2946,11 +2960,13 @@ class SaklasSession:
         self, input, generated_ids: list[int], elapsed: float,
         vector_snapshot: dict[str, float], prompt_tokens: int = 0,
         stateless: bool = False,
-        logprobs_list: list[tuple[int, float, list[tuple[int, float]]]] | None = None,
+        logprobs_list: list[tuple[int, float, list[Any]]] | None = None,
         applied_steering: str | None = None,
         *,
         return_hidden: bool = False,
         assistant_node_id: str | None = None,
+        mean_logprob: float | None = None,
+        mean_surprise: float | None = None,
     ) -> GenerationResult:
         """Shared post-generation: decode, measure probes, build result, update history."""
         token_count = len(generated_ids)
@@ -3024,6 +3040,10 @@ class SaklasSession:
         # was created via ``begin_assistant`` and accumulated tokens along
         # the way.  Stateless gens skip the entire tree mutation path —
         # ``assistant_node_id`` is None on that branch.
+        # ``mean_logprob`` / ``mean_surprise`` come pre-computed from
+        # ``_generate_core`` (the only function with scope on the
+        # ``_token_tap`` accumulator); both are ``None`` when no logprob
+        # capture was live, so legacy paths land cleanly.
         if not stateless and assistant_node_id is not None:
             self.tree.finalize_assistant(
                 assistant_node_id,
@@ -3031,6 +3051,8 @@ class SaklasSession:
                 aggregate_readings={n: r.mean for n, r in readings.items()},
                 applied_steering=applied_steering,
                 finish_reason=self._gen_state.finish_reason,
+                mean_logprob=mean_logprob,
+                mean_surprise=mean_surprise,
             )
 
         return result
@@ -3193,7 +3215,35 @@ class SaklasSession:
             use_thinking_req = thinking
 
         gen_config = self._compose_gen_config(sampling)
-        lp_count = sampling.logprobs if sampling is not None else None
+        # Compose the effective engine ``logprobs`` knob from two
+        # SamplingConfig sources:
+        #   - ``sampling.logprobs`` (OpenAI-shape: ``None`` = no capture,
+        #     ``0`` = chosen-only, ``>0`` = top-K).  Controls whether
+        #     ``result.logprobs`` gets populated for OpenAI route shape.
+        #   - ``sampling.return_top_k`` (saklas-native: ``0`` = no alts,
+        #     ``>0`` = top-K).  Set by the loom path / webui when the
+        #     "show alts" toggle is on.
+        # Engine semantics merge them under ``max`` so the larger of the
+        # two requested K wins; whichever surface asked for more wins.
+        # ``result.logprobs`` still only populates when ``sampling.logprobs``
+        # was explicitly set (preserves OpenAI-route discipline of not
+        # leaking logprobs into responses that didn't ask for them).
+        raw_lp = sampling.logprobs if sampling is not None else None
+        raw_top_k = sampling.return_top_k if sampling is not None else 0
+        # Inherit session-level default when the per-call value is the
+        # SamplingConfig default of 0. There's no way to *explicitly*
+        # request K=0 over a non-zero session default through this knob —
+        # callers who want to suppress alts on a single call set the
+        # session default to 0 instead, or pass an explicit
+        # ``sampling.logprobs=0`` to capture chosen-logprob only.
+        if raw_top_k == 0:
+            raw_top_k = self._default_return_top_k
+        if raw_top_k > 0:
+            lp_count: int | None = (
+                max(raw_top_k, raw_lp) if raw_lp is not None else raw_top_k
+            )
+        else:
+            lp_count = raw_lp
         seed = sampling.seed if sampling is not None else None
         stop_tuple = sampling.stop if sampling is not None else None
         stop_list = list(stop_tuple) if stop_tuple else None
@@ -3201,14 +3251,31 @@ class SaklasSession:
         presence_penalty = sampling.presence_penalty if sampling is not None else 0.0
         frequency_penalty = sampling.frequency_penalty if sampling is not None else 0.0
 
-        logprobs_list: list | None = [] if lp_count is not None else None
+        # ``logprobs_list`` populates ``GenerationResult.logprobs`` (OpenAI
+        # route shape); only allocate when the user explicitly opted in
+        # via ``sampling.logprobs`` (not when only ``return_top_k`` is set
+        # — the loom path consumes alts off the per-token event, not the
+        # post-hoc result.logprobs blob).
+        logprobs_list: list | None = [] if raw_lp is not None else None
+        # ``mean_logprob_accum`` averages chosen-token logprobs over the
+        # non-thinking response span — surfaced on ``LoomNode.mean_logprob``
+        # at finalize-assistant time so the loom sidebar can sort siblings
+        # by surprise.  Populates whenever the engine captures chosen
+        # logprob (any ``on_token`` consumer with ``lp_count is not None``
+        # — i.e. the loom path or an explicit logprobs request).
+        mean_logprob_sum: float = 0.0
+        mean_logprob_count: int = 0
         trait_token_counter = [0]
 
-        def _token_tap(text, is_thinking, tid, lp, top_lp, perplexity):
+        def _token_tap(text, is_thinking, tid, lp, top_alts, perplexity):
+            nonlocal mean_logprob_sum, mean_logprob_count
             if logprobs_list is not None and tid >= 0 and not is_thinking:
-                logprobs_list.append((tid, lp if lp is not None else 0.0, top_lp or []))
+                logprobs_list.append((tid, lp if lp is not None else 0.0, top_alts or []))
+            if lp is not None and tid >= 0 and not is_thinking:
+                mean_logprob_sum += lp
+                mean_logprob_count += 1
             if on_token is not None:
-                on_token(text, is_thinking, tid, lp, top_lp, perplexity)
+                on_token(text, is_thinking, tid, lp, top_alts, perplexity)
             # Inline per-token scoring for live SSE trait subscribers.
             if self._trait_queues and self._monitor.probe_names:
                 latest_hidden = {
@@ -3458,6 +3525,17 @@ class SaklasSession:
             applied_steering = (
                 str(steering_obj) if steering_obj is not None else None
             )
+            # Phase 1 logit pass: convert the in-loop logprob accumulator
+            # into per-turn rollups before handing finalize the slot.
+            # ``mean_logprob_count == 0`` covers both "no captures because
+            # gen was empty" and "no captures because no on_token consumer
+            # was wired" — both produce ``None`` so the wire/tree carry a
+            # clean back-compat shape.
+            _mean_logprob_out: float | None = None
+            _mean_surprise_out: float | None = None
+            if mean_logprob_count > 0:
+                _mean_logprob_out = mean_logprob_sum / mean_logprob_count
+                _mean_surprise_out = -_mean_logprob_out
             result = self._finalize_generation(
                 input, generated_ids, elapsed, vector_snapshot,
                 prompt_tokens=prompt_tokens, stateless=stateless,
@@ -3465,6 +3543,8 @@ class SaklasSession:
                 applied_steering=applied_steering,
                 return_hidden=want_hidden,
                 assistant_node_id=assistant_node_id,
+                mean_logprob=_mean_logprob_out,
+                mean_surprise=_mean_surprise_out,
             )
             self._monitor.end_live()
             self.events.emit(GenerationFinished(result=result))
@@ -3534,8 +3614,11 @@ class SaklasSession:
             thinking: per-call thinking override.  ``None`` = auto-detect
                 via ``supports_thinking`` (or ``steering.thinking`` if set).
             on_token: optional callback ``(text, is_thinking, token_id,
-                logprob, top_logprobs, perplexity)`` called on each emitted
-                token.  ``perplexity`` is ``exp(entropy_nats)`` of the
+                logprob, top_alts, perplexity)`` called on each emitted
+                token.  ``top_alts`` is ``list[TokenAlt]`` (decoded
+                ``(id, text, logprob)`` triples) when ``sampling.logprobs > 0``
+                or ``sampling.return_top_k > 0``; ``None`` otherwise.
+                ``perplexity`` is ``exp(entropy_nats)`` of the
                 pre-temperature, post-steering distribution.
             parent_node_id: loom-tree node id to anchor the new turn
                 under.  ``None`` = active node (today's behavior).
@@ -3635,7 +3718,7 @@ class SaklasSession:
         exc_holder: list[BaseException] = []
         idx_counter = [0]
 
-        def _push(text, is_thinking, tid, lp, tlp, perplexity):
+        def _push(text, is_thinking, tid, lp, top_alts, perplexity):
             scores: dict[str, float] | None = None
             if self._monitor.probe_names:
                 latest_hidden = {
@@ -3648,7 +3731,7 @@ class SaklasSession:
                     self._monitor.update_live(scores)
             event = TokenEvent(
                 text=text, token_id=tid, index=idx_counter[0],
-                thinking=is_thinking, logprob=lp, top_logprobs=tlp,
+                thinking=is_thinking, logprob=lp, top_alts=top_alts,
                 scores=scores, perplexity=perplexity,
             )
             idx_counter[0] += 1

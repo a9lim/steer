@@ -11,6 +11,7 @@ from typing import Callable
 
 import torch
 
+from saklas.core.results import TokenAlt
 from saklas.core.triggers import TriggerContext
 
 
@@ -455,7 +456,7 @@ def generate_steered(
     """
     Runs in a worker thread (not the async event loop).
 
-    *on_token(text, is_thinking, token_id, logprob, top_logprobs, perplexity)*
+    *on_token(text, is_thinking, token_id, logprob, top_alts, perplexity)*
     is called for each emitted token. ``perplexity`` is ``exp`` of the
     Shannon entropy of the pre-temperature, post-steering next-token
     distribution (bounded above by ``vocab_size``; ≈1 when the model is
@@ -463,10 +464,13 @@ def generate_steered(
     *token_id* is ``-1`` and logprob is None; ``perplexity`` carries the
     flushing step's value.
 
-    ``logprobs`` is None (disabled) or the number of top logprobs to include
-    per token (0 = only the chosen token's logprob).  ``stop`` is a list of
-    strings that terminate generation when any appears in the completion
-    text.  ``seed`` seeds the RNG for deterministic sampling.
+    ``logprobs`` is None (disabled) or the number of top alternatives to
+    include per token (0 = only the chosen token's logprob).  When
+    captured, ``top_alts`` is a ``list[TokenAlt]`` carrying decoded
+    ``(id, text, logprob)`` triples — consumers don't need to retokenize
+    to render the alternatives.  ``stop`` is a list of strings that
+    terminate generation when any appears in the completion text.
+    ``seed`` seeds the RNG for deterministic sampling.
 
     Sets ``state.finish_reason`` on exit: "stop" (EOS/external), "length"
     (max tokens), "stop_sequence" (stop string matched).
@@ -640,11 +644,23 @@ def generate_steered(
         state.response_text = ""
 
     def _emit_token(text: str, is_thinking: bool, token_id: int,
-                    logprob, top_logprobs, perplexity) -> None:
+                    logprob, top_alts, perplexity) -> None:
         if not is_thinking and state.response_text is not None:
             state.response_text += text
         if on_token is not None:
-            on_token(text, is_thinking, token_id, logprob, top_logprobs, perplexity)
+            on_token(text, is_thinking, token_id, logprob, top_alts, perplexity)
+
+    def _decode_alt(tid: int) -> str:
+        """Decode a single alt token id to text, preferring the cached
+        token_table (already built once for the chosen-token rendering
+        path) and falling back to ``tokenizer.decode`` for partial-UTF-8
+        ids whose table entry is None. Only fires K times per step when
+        top-K capture is live, so the slower fallback is in the noise."""
+        if token_table is not None and 0 <= tid < _vocab:
+            cached = token_table[tid]
+            if cached is not None:
+                return cached
+        return tokenizer.decode([tid])
 
     try:
         with torch.inference_mode():
@@ -764,7 +780,7 @@ def generate_steered(
                 # this gate fires for the v3-style stateless prefill workload
                 # that pegged this block on the profile.
                 chosen_logprob: float | None = None
-                top_lp_pairs: list[tuple[int, float]] | None = None
+                top_alts: list[TokenAlt] | None = None
                 if on_token is not None or logprobs is not None:
                     lp = torch.log_softmax(logits.float(), dim=-1)
                     # Shannon entropy in nats → perplexity via exp.
@@ -797,7 +813,10 @@ def generate_steered(
                     chosen_logprob = lp[0, token_id].item()
                     if logprobs > 0:
                         tlv, tli = lp[0].topk(min(logprobs, _vocab))
-                        top_lp_pairs = [(int(i), float(v)) for i, v in zip(tli.tolist(), tlv.tolist())]
+                        top_alts = [
+                            TokenAlt(id=int(i), text=_decode_alt(int(i)), logprob=float(v))
+                            for i, v in zip(tli.tolist(), tlv.tolist())
+                        ]
 
                 if token_id in eos_ids:
                     # Channel-based models (gpt-oss) use EOS tokens as
@@ -928,14 +947,14 @@ def generate_steered(
                                 if trimmed:
                                     state.emit_map.append((len(generated_ids) - 1, emit_thinking))
                                     _emit_token(trimmed, emit_thinking, emit_id,
-                                                chosen_logprob, top_lp_pairs,
+                                                chosen_logprob, top_alts,
                                                 current_perplexity)
                                 state.finish_reason = "stop_sequence"
                                 break
                             completion_text = new_text
                         state.emit_map.append((len(generated_ids) - 1, emit_thinking))
                         _emit_token(emit_text, emit_thinking, emit_id,
-                                    chosen_logprob, top_lp_pairs,
+                                    chosen_logprob, top_alts,
                                     current_perplexity)
 
         # Flush any remaining buffered partial tokens.  No fresh forward

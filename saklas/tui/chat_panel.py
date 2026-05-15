@@ -17,6 +17,37 @@ from saklas.tui.utils import BAR_WIDTH, build_bar
 _HIGHLIGHT_SAT = 0.5
 _HIGHLIGHT_CACHE_MAX = 4
 
+# Logit-pass: sentinel ``_highlight_probe`` value that selects the
+# inline surprise highlight (tokens tinted by chosen-token logprob).
+# Distinct from any real probe name — probe names are slugged
+# ``[a-z0-9._-]`` so the double-underscore form can't collide.  Same
+# string as ``webui/src/lib/tokens.ts::SURPRISE_TARGET`` to keep the
+# two surfaces in sync.
+SURPRISE_PROBE = "__surprise__"
+
+
+def _surprise_score(logprob: float | None) -> float:
+    """Map a chosen-token logprob to a positive ``[0, ~0.5]`` tint score
+    suitable for ``_build_highlight_markup``'s saturation mapping.
+
+    Decision 4 of docs/plans/logit-pass.md:
+        tint = -logprob / (1 - logprob)        # [0, 1)
+        score = tint * _HIGHLIGHT_SAT          # so 1.0 saturates green
+
+    ``logprob`` is the log of a probability so it's always ≤ 0 — the
+    denominator ``1 - logprob`` is ≥ 1, never division-by-zero.  None /
+    non-finite logprobs return 0 (no tint).
+    """
+    if logprob is None:
+        return 0.0
+    # Defensive bounds: logprob is the log of a probability so it must be
+    # ≤ 0.  Anything outside that range (NaN, inf, accidental positive)
+    # falls through to "no tint" rather than poisoning the markup.
+    if not (-float("inf") < logprob <= 0.0):
+        return 0.0
+    tint = -logprob / (1.0 - logprob)
+    return tint * _HIGHLIGHT_SAT
+
 
 def _build_highlight_markup(
     token_strs: list[str], scores: list[float], *, strip_leading_whitespace: bool = False,
@@ -78,6 +109,12 @@ class _AssistantMessage(Vertical):
         self._thinking_markup_cache: OrderedDict[str, str] = OrderedDict()
         self._response_probe_scores: dict[str, list[float]] = {}
         self._thinking_probe_scores: dict[str, list[float]] = {}
+        # Logit-pass: parallel per-token logprob lists feed the
+        # ``SURPRISE_PROBE`` markup path.  Indexed in lock-step with the
+        # streamed-token lists; missing entries are None (the surprise
+        # score helper renders no tint for those positions).
+        self._response_logprobs: list[float | None] = []
+        self._thinking_logprobs: list[float | None] = []
 
         self._highlight_on: bool = False
         self._highlight_probe: str | None = None
@@ -165,20 +202,55 @@ class _AssistantMessage(Vertical):
             else:
                 self._render_response()
 
+    def append_token_logprob(
+        self, logprob: float | None, is_thinking: bool,
+    ) -> None:
+        """Append one token's chosen-token logprob (logit-pass).
+
+        Mirrors ``append_token_score``: appends to the per-side logprob
+        list, invalidates the surprise-mode markup cache (only the
+        ``SURPRISE_PROBE`` key — leaving probe-keyed cache entries
+        intact), and re-renders if the user is currently sitting in
+        surprise highlight.
+        """
+        target = self._thinking_logprobs if is_thinking else self._response_logprobs
+        target.append(logprob)
+        cache = (
+            self._thinking_markup_cache if is_thinking else self._response_markup_cache
+        )
+        cache.pop(SURPRISE_PROBE, None)
+        if self._highlight_on and self._highlight_probe == SURPRISE_PROBE:
+            if is_thinking:
+                self._render_thinking()
+            else:
+                self._render_response()
+
     def _get_response_markup(self, probe: str) -> str | None:
         cached = self._response_markup_cache.get(probe)
         if cached is not None:
             self._response_markup_cache.move_to_end(probe)
             return cached
-        scores = self._response_probe_scores.get(probe)
-        if scores is None:
-            return None
         # Prefer the live-streamed token list (always current) over the
         # finalize-time canonical list, which set_token_data fills only at end.
         token_strs = self.response_token_strs or self._streamed_response_tokens
-        markup = _build_highlight_markup(
-            token_strs, scores, strip_leading_whitespace=True,
-        )
+        if probe == SURPRISE_PROBE:
+            # Logit-pass: tint by ``surprise_score(logprob)``.  Empty
+            # logprob list short-circuits to None so the renderer falls
+            # through to plain-text and the user sees raw text instead of
+            # uniform-no-tint markup.
+            if not self._response_logprobs:
+                return None
+            scores = [_surprise_score(lp) for lp in self._response_logprobs]
+            markup = _build_highlight_markup(
+                token_strs, scores, strip_leading_whitespace=True,
+            )
+        else:
+            scores = self._response_probe_scores.get(probe)
+            if scores is None:
+                return None
+            markup = _build_highlight_markup(
+                token_strs, scores, strip_leading_whitespace=True,
+            )
         self._response_markup_cache[probe] = markup
         if len(self._response_markup_cache) > _HIGHLIGHT_CACHE_MAX:
             self._response_markup_cache.popitem(last=False)
@@ -189,11 +261,17 @@ class _AssistantMessage(Vertical):
         if cached is not None:
             self._thinking_markup_cache.move_to_end(probe)
             return cached
-        scores = self._thinking_probe_scores.get(probe)
-        if scores is None:
-            return None
         token_strs = self.thinking_token_strs or self._streamed_thinking_tokens
-        markup = _build_highlight_markup(token_strs, scores)
+        if probe == SURPRISE_PROBE:
+            if not self._thinking_logprobs:
+                return None
+            scores = [_surprise_score(lp) for lp in self._thinking_logprobs]
+            markup = _build_highlight_markup(token_strs, scores)
+        else:
+            scores = self._thinking_probe_scores.get(probe)
+            if scores is None:
+                return None
+            markup = _build_highlight_markup(token_strs, scores)
         self._thinking_markup_cache[probe] = markup
         if len(self._thinking_markup_cache) > _HIGHLIGHT_CACHE_MAX:
             self._thinking_markup_cache.popitem(last=False)

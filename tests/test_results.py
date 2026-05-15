@@ -106,19 +106,24 @@ class TestTokenEvent:
         """All extension fields default to ``None`` / unset — old callers unaffected."""
         event = TokenEvent(text="x", token_id=0, index=0)
         assert event.logprob is None
-        assert event.top_logprobs is None
+        assert event.top_alts is None
         assert event.finish_reason is None
         assert event.scores is None
         assert event.perplexity is None
 
     def test_logprobs_carried_through(self):
-        """Populated logprob fields land on the dataclass as given."""
+        """Populated logprob + top_alts (phase 1 logit pass) land on the
+        dataclass as given. ``top_alts`` is ``list[TokenAlt]`` post-pass
+        replacing the legacy ``top_logprobs: list[tuple[int, float]]``."""
+        from saklas import TokenAlt
+        alts = [TokenAlt(id=0, text=" a", logprob=-0.2),
+                TokenAlt(id=1, text=" b", logprob=-2.3)]
         event = TokenEvent(
             text="x", token_id=0, index=0,
-            logprob=-1.5, top_logprobs=[(0, -0.2), (1, -2.3)],
+            logprob=-1.5, top_alts=alts,
         )
         assert event.logprob == -1.5
-        assert event.top_logprobs == [(0, -0.2), (1, -2.3)]
+        assert event.top_alts == alts
 
     def test_scores_and_perplexity(self):
         event = TokenEvent(

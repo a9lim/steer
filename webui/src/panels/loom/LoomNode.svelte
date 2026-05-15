@@ -24,6 +24,11 @@
     oncontextmenu?: (ev: MouseEvent) => void;
     /** Optional probe ring fill in [-1, 1] (phase 5; null for now). */
     ring?: number | null;
+    /** Logit-pass: per-turn ``mean_logprob`` to render as a numeric
+     *  badge.  Null suppresses the badge entirely.  Sidebar passes the
+     *  value only when ``loomUiState.weightMode !== "none"`` so the
+     *  default render shape is unchanged. */
+    weightBadge?: number | null;
   }
 
   let {
@@ -35,6 +40,7 @@
     onclick,
     oncontextmenu,
     ring = null,
+    weightBadge = null,
   }: Props = $props();
 
   const PREVIEW_CHARS = 40;
@@ -90,6 +96,11 @@
     <span class="star" title="starred" aria-hidden="true">★</span>
   {/if}
   <span class="preview">{preview}</span>
+  {#if weightBadge != null}
+    <span class="weight" title="mean chosen-token logprob (response span)">
+      {weightBadge.toFixed(2)}
+    </span>
+  {/if}
   {#if node.notes}
     <span class="note-mark" title={node.notes} aria-label="has note">●</span>
   {/if}
@@ -98,7 +109,10 @@
 <style>
   .node {
     display: grid;
-    grid-template-columns: auto auto 1fr auto;
+    /* Columns: glyph · ring? · star? · preview (1fr) · weight? · note? .
+     * Optional cells get ``auto`` slots; absent items collapse to zero
+     * width.  Five explicit slots is enough for the full render. */
+    grid-template-columns: auto auto auto 1fr auto auto;
     align-items: center;
     gap: 0.4em;
     padding: 0.2em 0.5em;
@@ -190,5 +204,17 @@
     border-radius: 50%;
     border: 1.5px solid transparent;
     display: inline-block;
+  }
+  /* Logit-pass: numeric ``mean_logprob`` badge.  Tabular-nums so the
+     digits line up across siblings even when sort:surprise reorders
+     them; subdued color so the badge reads as metadata, not content. */
+  .weight {
+    color: var(--fg-dim);
+    font-size: var(--font-size-tiny);
+    font-variant-numeric: tabular-nums;
+    background: var(--bg-alt);
+    border: 1px solid var(--border-dim);
+    padding: 0 0.3em;
+    border-radius: 2px;
   }
 </style>

@@ -114,6 +114,11 @@ def _make_session(args: argparse.Namespace):
     # came from.
     compile_enabled = not bool(getattr(args, "no_compile", False))
     cuda_graphs_enabled = not bool(getattr(args, "no_cuda_graphs", False))
+    # Phase 1 logit pass: session-level default for top-K alternatives
+    # capture.  Per-call ``SamplingConfig.return_top_k > 0`` overrides;
+    # K=0 inherits this value through ``_generate_core``.  argparse
+    # default ``None`` falls back to 0 here (no alts).
+    return_top_k = getattr(args, "top_k_alts", None) or 0
     return SaklasSession.from_pretrained(
         args.model, device=args.device, quantize=args.quantize,
         probes=probe_categories,
@@ -126,6 +131,7 @@ def _make_session(args: argparse.Namespace):
         dls=dls,
         compile=compile_enabled,
         cuda_graphs=cuda_graphs_enabled,
+        return_top_k=return_top_k,
     )
 
 
@@ -201,6 +207,13 @@ def _load_effective_config(args: argparse.Namespace):
         and not bool(getattr(args, "no_cuda_graphs", False))
     ):
         args.no_cuda_graphs = True
+    # Phase 1 logit pass: YAML ``return_top_k:`` wins when CLI
+    # ``--top-k-alts`` is unset, matching the rest of the v2.1 stack.
+    if (
+        composed.return_top_k is not None
+        and getattr(args, "top_k_alts", None) is None
+    ):
+        args.top_k_alts = composed.return_top_k
     ensure_vectors_installed(composed, strict=getattr(args, "strict", False))
     return composed
 

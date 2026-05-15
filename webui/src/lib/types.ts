@@ -311,6 +311,12 @@ export interface WSSampling {
   stop?: string[] | null;
   presence_penalty?: number;
   frequency_penalty?: number;
+  /** Logit-pass: opt in to top-K alternatives + chosen-token logprob on
+   *  the WS ``token`` event.  Server-side clamped to ``[0, 256]``.  Zero
+   *  (or absent) means logprob-only — chosen-token logprob still flows
+   *  when any on_token consumer is live, just no top alternatives.
+   *  Default 0 keeps the wire shape unchanged for opt-out users. */
+  return_top_k?: number | null;
 }
 
 export interface WSGenerateRequest {
@@ -347,6 +353,17 @@ export interface WSStartedEvent {
   node_id?: string;
 }
 
+/** Logit-pass (v2.3): one alternative the model considered at this
+ *  position.  Wire-shape mirror of ``saklas.core.results.TokenAlt``.
+ *  ``logprob`` is the post-sampler natural-log probability under the
+ *  post-temperature / post-top-p / post-top-k distribution sampling
+ *  actually drew from. */
+export interface TokenAltJSON {
+  id: number;
+  text: string;
+  logprob: number;
+}
+
 export interface WSTokenEvent {
   type: "token";
   text: string;
@@ -355,6 +372,16 @@ export interface WSTokenEvent {
   /** Per-layer × per-probe map populated only when probes are loaded.
    * Keys: layer-index strings → probe names → cosine-sim score. */
   per_layer_scores?: Record<string, Record<string, number>>;
+  /** Logit-pass: chosen-token logprob under the post-sampler distribution.
+   *  Populated whenever the engine's log_softmax ran (any ``on_token``
+   *  consumer or an explicit ``logprobs``/``return_top_k`` request).
+   *  Absent on legacy / replayed events. */
+  logprob?: number | null;
+  /** Logit-pass: top-K alternatives sorted by descending logprob.  Length
+   *  matches ``SamplingConfig.return_top_k`` when populated, else absent.
+   *  The chosen token may or may not appear in this list depending on
+   *  K. */
+  top_alts?: TokenAltJSON[] | null;
   /** Loom: node id this token belongs to.  Routes the token to the right
    * sibling render during n-way regen.  Optional. */
   node_id?: string;
@@ -375,6 +402,10 @@ export interface WSDoneResult {
     total_tokens: number;
   };
   per_token_probes: WSDoneResultPerToken[];
+  /** Logit-pass: per-turn mean chosen-token logprob over the assistant
+   *  response span (thinking tokens excluded by construction).  Null when
+   *  logprob capture wasn't live (replay / no on_token consumer). */
+  mean_logprob?: number | null;
 }
 
 export interface WSDoneEvent {
@@ -417,6 +448,11 @@ export interface LoomNodeJSON {
   created_at?: number;
   edited_at?: number | null;
   edit_count?: number;
+  /** Logit-pass: mean chosen-token logprob over the response span when
+   *  logprob capture was live; absent on legacy / replayed nodes.  Drives
+   *  the loom sidebar's confidence / surprise weight mode and the
+   *  ``sort:surprise`` / ``sort:confidence`` filter grammar. */
+  mean_logprob?: number | null;
 }
 
 /** Full tree dump returned by GET /sessions/{id}/tree.
@@ -484,6 +520,39 @@ export interface NodeDiffJSON {
 export interface FilterMatchesJSON {
   expr: string;
   matching_node_ids: string[];
+}
+
+/** Logit-pass Phase 5 — one aligned-position row in the joint-logprobs
+ *  response.  Mirrors ``saklas.core.joint_logprobs.JointLogprobRow``.
+ *
+ *  ``lp_*_in_*`` are post-temperature, post-sampler natural-log
+ *  probabilities (matches the engine's chosen-token logprob shape).
+ *  Cross fields and ``approx_kl`` are populated only on byte-aligned
+ *  rows — divergent positions leave them ``null`` because the cross
+ *  probability is ambiguous on non-aligned positions. */
+export interface JointLogprobRowJSON {
+  a_index: number;
+  b_index: number;
+  a_text: string;
+  b_text: string;
+  aligned: boolean;
+  lp_a_in_a: number | null;
+  lp_b_in_b: number | null;
+  lp_a_in_b: number | null;
+  lp_b_in_a: number | null;
+  rank_changed: boolean;
+  approx_kl: number | null;
+}
+
+/** Logit-pass Phase 5 — joint-logprobs response.  ``rows`` covers the
+ *  full byte-walk; ``n_rank1_changed`` is a summary stat of how many
+ *  aligned rows flipped argmax across the two branches. */
+export interface JointLogprobsJSON {
+  a_id: string;
+  b_id: string;
+  parent_id: string | null;
+  rows: JointLogprobRowJSON[];
+  n_rank1_changed: number;
 }
 
 /** Phase-5 transcript-load route response. */
@@ -558,6 +627,14 @@ export interface TokenScore {
   /** Per-layer × per-probe heatmap data captured during streaming.
    * Drives the click-token drilldown drawer. */
   perLayerScores?: Record<string, Record<string, number>>;
+  /** Logit-pass: chosen-token post-sampler logprob.  Absent on legacy /
+   *  replayed turns when ``return_top_k`` wasn't enabled and the engine
+   *  didn't run log_softmax.  Drives the inline ``surprise`` highlight
+   *  mode and the token drilldown's logits tab. */
+  logprob?: number | null;
+  /** Logit-pass: top-K alternatives captured at this position (descending
+   *  by logprob).  Absent when ``return_top_k == 0`` or replayed. */
+  topAlts?: TokenAltJSON[] | null;
 }
 
 export interface ChatTurn {
@@ -584,6 +661,10 @@ export interface ChatTurn {
   tokPerSec?: number;
   elapsedSec?: number;
   perplexity?: number;
+  /** Logit-pass: per-turn mean chosen-token logprob (response span only,
+   *  thinking excluded).  Populated from the WS ``done`` event; absent for
+   *  legacy / replayed turns. */
+  meanLogprob?: number | null;
 }
 
 // ----------------------------------------------------- vector rack --

@@ -281,7 +281,11 @@ def test_generate_worker_uses_generate_stream(monkeypatch):
         thinking = False
         token_id = 1
         logprob = None
-        top_logprobs = None
+        # Phase 1 logit pass: renamed ``top_logprobs`` → ``top_alts``
+        # (now carries decoded ``TokenAlt`` triples instead of id/lp
+        # pairs).  Stub keeps it None — this test exercises a code path
+        # that doesn't consume alts.
+        top_alts = None
         index = 0
 
     def _fake_stream(input, **kwargs):
