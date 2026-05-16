@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import math
 import queue
 import shlex
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, TYPE_CHECKING, overload
 
@@ -140,13 +138,16 @@ class SaklasApp(App[None]):
         Binding("ctrl+c", "copy_selection", "Copy", show=False),
         Binding("ctrl+t", "toggle_thinking", "Think", show=False),
         Binding("ctrl+s", "cycle_sort", "Sort", show=False),
-        Binding("ctrl+y", "toggle_highlight", "Highlight", show=False),
-        # Logit-pass: three-state highlight cycle {off → probe → surprise}.
-        # Forward on Ctrl+H, backward on Ctrl+Shift+H — symmetric and
-        # the chord matches Ctrl+Y's "highlight family" mental grouping.
-        Binding("ctrl+h", "cycle_highlight_mode", "HL cycle", show=False),
+        # Highlight: a single three-state cycle {off → probe → surprise}
+        # on Ctrl+Y, with Ctrl+Shift+Y walking it backward.  Ctrl+H is
+        # *not* an option — terminals send 0x08 for it, which Textual
+        # hard-maps to ``backspace`` before binding resolution, so a
+        # ``ctrl+h`` binding can never fire.  Ctrl+Shift+Y degrades
+        # gracefully to a forward step on terminals that can't report
+        # the shift, vs. Ctrl+Shift+H degrading to backspace.
+        Binding("ctrl+y", "cycle_highlight_mode", "HL cycle", show=False),
         Binding(
-            "ctrl+shift+h", "cycle_highlight_mode_back",
+            "ctrl+shift+y", "cycle_highlight_mode_back",
             "HL cycle back", show=False,
         ),
         Binding("ctrl+l", "open_loom", "Loom", show=False),
@@ -545,12 +546,11 @@ class SaklasApp(App[None]):
             "  /unprobe <name|ns/>         — remove probe(s)\n"
             "  /extract <concept>          — cache-warm only\n"
             "  /compare <a> [b]            — cosine similarity\n"
-            "  /surprise [off]             — tint tokens by logprob\n"
-            "                                Ctrl+Y on/off · Ctrl+H cycle\n"
-            "                                {off → probe → surprise}\n"
+            "Highlight:\n"
+            "  Ctrl+Y / Ctrl+Shift+Y       — cycle {off → probe → surprise}\n"
             "Session:\n"
             "  /clear, /rewind, /regen     — history ops\n"
-            "  /save <name>, /load <name>  — snapshot conv + alphas\n"
+            "  /save <name>, /load <name>  — save / restore the loom tree\n"
             "  /export <path>              — JSONL w/ probe readings\n"
             "  /seed [n|clear]             — default sampling seed\n"
             "  /sys [prompt]               — system prompt\n"
@@ -574,8 +574,6 @@ class SaklasApp(App[None]):
             "  /auto-regen [on|off|mode]   — sibling regen modifier (Ctrl+A toggles)\n"
             "  /diff <id1> <id2> [--full]  — cross-branch text + readings diff\n"
             "  /diff --siblings            — diff active user-parent's kids\n"
-            "  /transcript export <path>   — save active path (YAML)\n"
-            "  /transcript load <path> [--here|--merge] [--strict]\n"
             "  Ctrl+E/B/N/D open the loom screen; use /edit /branch /nav /del\n"
             "  for inline equivalents.\n"
             "Keys: Tab focus · ←/→ alpha (±0.01) · Shift+←/→ ±0.1\n"
@@ -923,52 +921,18 @@ class SaklasApp(App[None]):
             pending_type="extract",
         )
 
-    def _handle_surprise(self, arg: str) -> None:
-        """Toggle the inline surprise highlight (logit-pass).
-
-        Flips ``_highlight_probe`` to the ``SURPRISE_PROBE`` sentinel and
-        turns highlighting on so the chat panel tints tokens by chosen-
-        token logprob.  Bare ``/surprise off`` (or ``/surprise no``) turns
-        the surprise overlay off but leaves ``_highlight_probe`` at the
-        sentinel so a subsequent Ctrl+Y restores it.  Bare ``/surprise``
-        is the canonical on-switch.
-
-        Per-token logprob capture is automatic — the engine populates
-        ``TokenEvent.logprob`` whenever any ``on_token`` consumer is live
-        (always true on the TUI worker), so no SamplingConfig knob is
-        required to make this work.
-        """
-        from saklas.tui.chat_panel import SURPRISE_PROBE
-        arg = arg.strip().lower()
-        chat = self._chat_panel
-        if arg in ("off", "no", "n"):
-            if self._highlight_probe == SURPRISE_PROBE:
-                self._highlighting = False
-                self._apply_highlight_to_all()
-                chat.add_system_message("Surprise highlight off.")
-            else:
-                chat.add_system_message("Surprise highlight already off.")
-            return
-        self._highlight_probe = SURPRISE_PROBE
-        self._highlighting = True
-        self._apply_highlight_to_all()
-        chat.add_system_message(
-            "Surprise highlight on — tokens tinted by chosen-token logprob. "
-            "Ctrl+Y to toggle."
-        )
-
     def _steer_status(self, msg: str) -> None:
         self._chat_panel.add_system_message(msg)
 
     def _on_probe_added(self, name: str) -> None:
         self._trait_panel.set_active_probes(set(self._session._monitor.probe_names))
         # Per-token highlight default-on when a probe is explicitly added
-        # via /probe. Seed to this probe; Ctrl+Y toggles visually.
+        # via /probe. Seed to this probe; Ctrl+Y cycles the mode.
         self._highlight_probe = name
         self._highlighting = True
         self._apply_highlight_to_all()
         self._refresh_trait_why()
-        self._steer_status(f"Probe '{name}' active. Highlight on (Ctrl+Y to toggle).")
+        self._steer_status(f"Probe '{name}' active. Highlight on (Ctrl+Y to cycle).")
 
     def _refresh_left_panel(self) -> None:
         self._left_panel.update_vectors(self._vector_list_for_panel())
@@ -1048,7 +1012,7 @@ class SaklasApp(App[None]):
         # Fresh widgets spawn with ``_highlight_on=False``; inherit the
         # app's current highlight state so streamed tokens render
         # highlighted from the first emit instead of requiring a Ctrl+Y
-        # off/on cycle after the response completes.
+        # mode-cycle round trip after the response completes.
         if self._highlighting:
             widget.apply_highlight(True, self._highlight_probe)
 
@@ -1077,6 +1041,14 @@ class SaklasApp(App[None]):
             top_p=self._session.config.top_p,
             max_tokens=self._session.config.max_new_tokens,
             seed=self._default_seed,
+            # Logit-pass: request chosen-token logprob capture so the
+            # surprise highlight mode has data to tint with.  ``0`` =
+            # chosen-only (no top-K alts) — one extra ``.item()`` per
+            # token; the ``log_softmax`` it reads is already computed
+            # because the worker always installs an ``on_token``
+            # consumer.  Without this ``event.logprob`` is always None
+            # and surprise mode renders uniform-no-tint.
+            logprobs=0,
         )
         steering = Steering(alphas=dict(alphas), thinking=use_thinking) if alphas else None
 
@@ -1107,9 +1079,11 @@ class SaklasApp(App[None]):
                     self._ui_token_queue.put(
                         # Logit-pass: ``event.logprob`` rides along so the
                         # surprise highlight mode + chat_panel's per-token
-                        # logprob storage can render mid-gen.  None when
-                        # capture wasn't live (no probes, return_top_k=0,
-                        # no user on_token consumer).
+                        # logprob storage can render mid-gen.  Populated
+                        # because the SamplingConfig above sets
+                        # ``logprobs=0``; ``None`` only on the prefill /
+                        # partial-UTF-8 flush steps the engine never
+                        # assigns a chosen-token logprob to.
                         ("tok", event.text, event.thinking, event.scores,
                          event.perplexity, event.logprob, widget, False),
                     )
@@ -1344,32 +1318,19 @@ class SaklasApp(App[None]):
             self._alphas[name] = max(-MAX_ALPHA, min(MAX_ALPHA, self._alphas.get(name, 0.0) + delta))
             self._refresh_left_panel()
 
-    def action_toggle_highlight(self) -> None:
-        if self._ab_shadow_active:
-            return
-        if not self._highlighting:
-            # Prefer the stored seed, fall back to trait-panel selection.
-            seed = self._highlight_probe or self._trait_panel.get_selected_probe()
-            if seed is None:
-                return
-            self._highlight_probe = seed
-            self._highlighting = True
-        else:
-            self._highlighting = False
-        self._apply_highlight_to_all()
-
     def action_cycle_highlight_mode(self, direction: int = 1) -> None:
         """Step the highlight target through ``{off, probe, surprise}``.
 
         Three-state cycle to cover the logit-pass parity gap with the
         webui's highlight dropdown.  ``probe`` mode defers to whatever
-        the trait panel currently has selected (same model as ``Ctrl+Y``
-        toggle on); ``surprise`` pins :data:`chat_panel.SURPRISE_PROBE`
-        so the markup builder reads chosen-token logprobs instead.
+        the trait panel currently has selected; ``surprise`` pins
+        :data:`chat_panel.SURPRISE_PROBE` so the markup builder reads
+        chosen-token logprobs instead.
 
-        Ctrl+H advances forward; Ctrl+Shift+H walks backward through the
-        same order.  System message announces each transition so users
-        learn the cycle without staring at tints to infer what changed.
+        Ctrl+Y advances forward; Ctrl+Shift+Y walks backward through the
+        same order.  The current mode shows as the persistent ``HL`` line
+        in the left panel's GENERATION block (refreshed by
+        ``_apply_highlight_to_all``) rather than a transient chat message.
         ``probe`` is skipped when no probe is selectable (trait panel
         empty and no stored seed) so the cycle collapses to
         ``{off ↔ surprise}`` rather than landing in a half-state.
@@ -1380,9 +1341,9 @@ class SaklasApp(App[None]):
             return
 
         # Resolve current mode by inspecting state, not a stored enum —
-        # ``/probe`` / ``/surprise`` / ``Ctrl+Y`` can land us in any
-        # of these three shapes between Ctrl+H presses, and we want the
-        # cycle to advance from wherever the user actually is.
+        # ``/probe`` can land us in any of these three shapes between
+        # Ctrl+Y presses, and we want the cycle to advance from
+        # wherever the user actually is.
         if not self._highlighting:
             current = "off"
         elif self._highlight_probe == SURPRISE_PROBE:
@@ -1414,20 +1375,18 @@ class SaklasApp(App[None]):
             # always reachable), but stay graceful.
             return
 
-        chat = self._chat_panel
         if next_mode == "off":
             self._highlighting = False
-            msg = "Highlight off."
         elif next_mode == "surprise":
             self._highlight_probe = SURPRISE_PROBE
             self._highlighting = True
-            msg = "Highlight: surprise (logprob)."
         else:  # "probe" — ``seed`` is guaranteed non-None here
             self._highlight_probe = seed
             self._highlighting = True
-            msg = f"Highlight: {seed}."
+        # No system message — ``_apply_highlight_to_all`` refreshes the
+        # persistent HL line in the left panel's GENERATION block, which
+        # is a quieter and always-visible readout of the current mode.
         self._apply_highlight_to_all()
-        chat.add_system_message(msg)
 
     def action_cycle_highlight_mode_back(self) -> None:
         """Convenience: backward variant of the cycle.  Same code path
@@ -1443,7 +1402,7 @@ class SaklasApp(App[None]):
         # sentinel so the markup builder reads logprobs; without this
         # guard, the next trait-panel arrow keystroke silently flips
         # the highlight back to a probe (latent bug from the Phase 3
-        # pass — ``/surprise`` would survive only until the user
+        # pass — surprise mode would survive only until the user
         # touched the trait panel).
         if self._highlighting and self._highlight_probe != SURPRISE_PROBE:
             nav_probe = self._trait_panel.get_selected_probe()
@@ -1454,6 +1413,17 @@ class SaklasApp(App[None]):
         self._assistant_messages = [w for w in self._assistant_messages if w.is_mounted]
         for widget in self._assistant_messages:
             widget.apply_highlight(self._highlighting, probe)
+        # Refresh the persistent HL readout in the left panel — this is
+        # the funnel every highlight-state mutation passes through
+        # (cycle, /probe, /unprobe, trait-panel nav), so the line stays
+        # in sync without each call site remembering to update it.
+        if not self._highlighting:
+            hl_label = "off"
+        elif self._highlight_probe == SURPRISE_PROBE:
+            hl_label = "surprise"
+        else:
+            hl_label = self._highlight_probe or "off"
+        self._left_panel.update_highlight(hl_label)
 
     def _set_widget_token_data(
         self, widget: _AssistantMessage,
@@ -1752,7 +1722,7 @@ class SaklasApp(App[None]):
                     self._refresh_trait_why()
                 lines = [f"Bulk probe '{ns}/': added {len(loaded)} probe(s)."]
                 if loaded:
-                    lines.append("  Highlight on (Ctrl+Y to toggle).")
+                    lines.append("  Highlight on (Ctrl+Y to cycle).")
                 if skipped:
                     lines.append(self._bulk_skip_message(ns, skipped))
                 chat.add_system_message("\n".join(lines))
@@ -1896,59 +1866,83 @@ class SaklasApp(App[None]):
         return d
 
     def _handle_save(self, arg: str) -> None:
+        """`/save <name>` — write the full loom tree to disk.
+
+        Serializes the entire tree — every branch, not just the active
+        path — to ``~/.saklas/conversations/<name>.json`` via
+        :meth:`saklas.core.loom.LoomTree.save`.  ``/load <name>``
+        restores it.  Per-token highlight scores are not persisted
+        (see ``LoomTree.to_dict``); structure, text, and recipes are.
+        """
         chat = self._chat_panel
         name = arg.strip()
         if not name:
             chat.add_system_message("Usage: /save <name>")
             return
-        snapshot = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model_id": self._session._model_info.get("model_id", "unknown"),
-            "history": list(self._session._history),
-            "alphas": dict(self._alphas),
-            "enabled": dict(self._enabled),
-            "probes": list(self._session._monitor.probe_names) if self._session._monitor else [],
-            "seed": self._default_seed,
-        }
         path = self._conv_dir() / f"{name}.json"
-        path.write_text(json.dumps(snapshot, indent=2))
-        chat.add_system_message(f"Saved snapshot to {path}")
+        try:
+            self._session.tree.save(path)
+        except Exception as e:
+            chat.add_system_message(f"/save failed: {e}")
+            return
+        chat.add_system_message(
+            f"saved tree → {path} ({len(self._session.tree.nodes)} nodes)"
+        )
 
     def _handle_load(self, arg: str) -> None:
+        """`/load <name>` — replace the loom tree with a saved one.
+
+        Loads ``~/.saklas/conversations/<name>.json`` (written by
+        ``/save``) and swaps it in wholesale — all branches restored.
+        The deserialized tree has no event bus or conflict-check hook,
+        so both are rewired here.  The chat log is cleared; it
+        re-renders along the loaded tree's active path on the next
+        message (``Ctrl+L`` inspects the tree immediately).
+        """
+        from saklas.core.loom import LoomTree, LoomTreeError
+
         chat = self._chat_panel
         name = arg.strip()
         if not name:
             chat.add_system_message("Usage: /load <name>")
             return
         path = self._conv_dir() / f"{name}.json"
-        if not path.exists():
-            chat.add_system_message(f"No snapshot at {path}")
+        if not path.is_file():
+            chat.add_system_message(f"no saved tree at {path}")
             return
         try:
-            snapshot = json.loads(path.read_text())
-        except Exception as e:
-            chat.add_system_message(f"Load error: {e}")
+            loaded = LoomTree.load(path)
+        except LoomTreeError as e:
+            chat.add_system_message(f"/load failed: {e}")
             return
-        self._session.clear_history()
+        except Exception as e:
+            chat.add_system_message(f"/load failed to read: {e}")
+            return
+
+        # The deserialized tree carries no event bus / conflict hook.
+        loaded.attach_events(self._session.events)
+        loaded.set_conflict_check(self._session._loom_conflict_check)
+        live_model = self._session._model_info.get("model_id")
+        if loaded.model_id is None:
+            loaded.model_id = live_model
+        elif live_model is not None and loaded.model_id != live_model:
+            chat.add_system_message(
+                f"⚠ /load: tree saved on '{loaded.model_id}', running "
+                f"'{live_model}' — steering/probe vectors may not match"
+            )
+        self._session.tree = loaded
+        if self._session._monitor is not None:
+            self._session._monitor.reset_history()
+
+        # Drop the stale chat log + assistant-widget bookkeeping; the
+        # loaded tree's active path renders on the next turn.
         self._chat_panel.clear_log()
         self._assistant_messages.clear()
         self._row_for_widget.clear()
-        for msg in snapshot.get("history", []):
-            self._session._history.append(msg)
-            if msg["role"] == "user":
-                chat.add_user_message(msg["content"]) if hasattr(chat, "add_user_message") else None
-        # Restore alphas (vectors must already be installed in session)
-        self._alphas = {
-            k: v for k, v in snapshot.get("alphas", {}).items()
-            if k in self._session._profiles
-        }
-        self._enabled = {k: True for k in self._alphas}
-        self._enabled.update(snapshot.get("enabled", {}))
-        self._default_seed = snapshot.get("seed")
         self._refresh_left_panel()
         chat.add_system_message(
-            f"Loaded {name}: {len(self._session._history)} msgs, "
-            f"{len(self._alphas)} alphas."
+            f"loaded tree from {path} ({len(loaded.nodes)} nodes) — "
+            f"chat re-renders on next message; Ctrl+L to view the tree"
         )
 
     def _handle_export(self, arg: str) -> None:
@@ -2292,6 +2286,9 @@ class SaklasApp(App[None]):
             top_p=self._session.config.top_p,
             max_tokens=self._session.config.max_new_tokens,
             seed=self._default_seed,
+            # Logit-pass: chosen-token logprob capture so surprise
+            # highlighting works in the A/B shadow column too.
+            logprobs=0,
         )
         use_thinking = self._thinking
 
@@ -3069,162 +3066,6 @@ class SaklasApp(App[None]):
                 self._ui_token_queue.put(("done", True))
 
         self.run_worker(_stream_worker, thread=True)
-
-    def _handle_transcript(self, arg: str) -> None:
-        """`/transcript export <path>` / `/transcript load <path> [flags]`.
-
-        Phase 5 wires the load side: parses ``--here`` / ``--merge`` /
-        ``--strict`` (which compose), routes through
-        :meth:`saklas.core.transcript.Transcript.import_into`, and
-        navigates the active node to the imported leaf.  Guard warnings
-        (model mismatch, system-prompt drift, missing probes, probe-
-        content drift) print to chat with a clear sigil; under
-        ``--strict`` probe drift raises :class:`TranscriptProbeDriftError`
-        which we catch and report.
-        """
-
-        from pathlib import Path
-        from saklas.tui.loom_helpers import build_transcript_payload
-        from saklas.core.transcript import _emit_yaml_minimal
-
-        chat = self._chat_panel
-        parts = arg.split(maxsplit=1)
-        if not parts:
-            chat.add_system_message(
-                "Usage: /transcript export <path>  |  "
-                "/transcript load <path> [--here|--merge] [--strict]"
-            )
-            return
-        verb = parts[0].lower()
-
-        if verb == "export":
-            if len(parts) < 2:
-                chat.add_system_message("Usage: /transcript export <path>")
-                return
-            path = Path(parts[1].strip()).expanduser()
-            try:
-                payload = build_transcript_payload(
-                    self._session.tree,
-                    model_id=self._session._model_info.get("model_id"),
-                    system_prompt=self._session.config.system_prompt,
-                )
-                # YAML matches the spec example in docs/plans/loom.md and
-                # round-trips through ``Transcript.load``.  Prefer pyyaml
-                # when available; fall back to the in-tree emitter for
-                # the flat transcript schema.
-                try:
-                    import yaml  # pyyaml is a saklas dep
-                    text = yaml.safe_dump(
-                        payload, sort_keys=False, default_flow_style=False,
-                    )
-                except ImportError:  # pragma: no cover — pyyaml is in pyproject
-                    text = _emit_yaml_minimal(payload)
-                path.write_text(text)
-                chat.add_system_message(
-                    f"transcript export → {path} ({len(payload['turns'])} turns)"
-                )
-            except Exception as e:
-                chat.add_system_message(f"/transcript export failed: {e}")
-            return
-
-        if verb == "load":
-            if len(parts) < 2:
-                chat.add_system_message(
-                    "Usage: /transcript load <path> [--here|--merge] [--strict]"
-                )
-                return
-            self._handle_transcript_load(parts[1])
-            return
-
-        chat.add_system_message(
-            "Usage: /transcript export <path>  |  "
-            "/transcript load <path> [--here|--merge] [--strict]"
-        )
-
-    def _handle_transcript_load(self, raw: str) -> None:
-        """Parse and execute `/transcript load <path> [flags]`."""
-        import warnings as _warnings
-        from pathlib import Path
-        from saklas.core.transcript import (
-            Transcript, TranscriptError, TranscriptModelMismatch,
-            TranscriptProbeDriftError,
-        )
-
-        chat = self._chat_panel
-        try:
-            tokens = shlex.split(raw)
-        except ValueError as e:
-            chat.add_system_message(f"/transcript load parse error: {e}")
-            return
-        flags = {t for t in tokens if t.startswith("--")}
-        non_flags = [t for t in tokens if not t.startswith("--")]
-        if len(non_flags) != 1:
-            chat.add_system_message(
-                "Usage: /transcript load <path> [--here|--merge] [--strict]"
-            )
-            return
-        path_str = non_flags[0]
-        path = Path(path_str).expanduser()
-        if not path.is_file():
-            chat.add_system_message(f"/transcript load: not a file: {path}")
-            return
-
-        mode_flags = flags & {"--here", "--merge"}
-        if len(mode_flags) > 1:
-            chat.add_system_message(
-                "/transcript load: pass at most one of --here / --merge"
-            )
-            return
-        mode = "default"
-        if "--here" in flags:
-            mode = "here"
-        elif "--merge" in flags:
-            mode = "merge"
-        strict = "--strict" in flags
-
-        try:
-            transcript = Transcript.load(path)
-        except TranscriptError as e:
-            chat.add_system_message(f"/transcript load: {e}")
-            return
-        except Exception as e:
-            chat.add_system_message(f"/transcript load: failed to read: {e}")
-            return
-
-        # Capture guard warnings inline so the chat shows them instead of
-        # only the stderr ``UserWarning`` stream.
-        try:
-            with _warnings.catch_warnings(record=True) as caught:
-                _warnings.simplefilter("always")
-                leaf_id = transcript.import_into(
-                    self._session, mode=mode, strict=strict,
-                )
-        except TranscriptModelMismatch as e:
-            chat.add_system_message(f"/transcript load: model mismatch — {e}")
-            return
-        except TranscriptProbeDriftError as e:
-            chat.add_system_message(f"/transcript load: probe drift (--strict) — {e}")
-            return
-        except TranscriptError as e:
-            chat.add_system_message(f"/transcript load: {e}")
-            return
-        except Exception as e:
-            chat.add_system_message(f"/transcript load: import failed: {e}")
-            return
-
-        for w in caught:
-            chat.add_system_message(f"⚠ transcript guard: {w.message}")
-
-        # Navigate active to the imported leaf so the chat panel
-        # re-renders along the new path.
-        try:
-            self._session.tree.navigate(leaf_id)
-        except Exception:
-            pass
-        chat.add_system_message(
-            f"/transcript load ({mode}): {len(transcript.turns)} turns "
-            f"imported → leaf {leaf_id[:8]}"
-        )
 
     def _handle_diff(self, arg: str) -> None:
         """`/diff <id1> <id2> [--full]` / `/diff --siblings` (phase 5).

@@ -340,54 +340,6 @@ def _format_sibling_recipe_block(tree: LoomTree, node: LoomNode) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Transcript export — phase-4 minimal shape per docs/plans/loom.md
-# ---------------------------------------------------------------------------
-
-
-def build_transcript_payload(
-    tree: LoomTree,
-    *,
-    model_id: str | None,
-    system_prompt: str | None = None,
-    leaf_id: str | None = None,
-) -> dict:
-    """Build the transcript shape phase 4 ships.
-
-    Mirrors the YAML example in ``docs/plans/loom.md``; phase 5 fills in
-    probe content hashes.  Returns a dict (caller writes YAML or JSON).
-    """
-
-    path = tree.path_to(leaf_id) if leaf_id else tree.active_path()
-    turns: list[dict] = []
-    probes_seen: dict[str, str] = {}
-    for node in path:
-        if node.id == tree.root_id:
-            continue
-        if node.role == "system":
-            continue
-        if node.role == "user":
-            turns.append({"role": "user", "text": node.text})
-            continue
-        entry: dict = {"role": "assistant", "text": node.text}
-        if node.recipe is not None:
-            recipe_d = node.recipe.to_dict()
-            entry["recipe"] = recipe_d
-            for probe in (node.recipe.probes or []):
-                probes_seen.setdefault(probe, node.recipe.probe_hashes.get(probe, ""))
-        if node.aggregate_readings:
-            entry["readings"] = dict(node.aggregate_readings)
-        turns.append(entry)
-
-    return {
-        "saklas_transcript": 1,
-        "model_id": model_id or tree.model_id,
-        "system_prompt": system_prompt,
-        "probes": [{"name": k, "sha256": v} for k, v in sorted(probes_seen.items())],
-        "turns": turns,
-    }
-
-
 __all__ = [
     "AlphaListError",
     "PrefixMatch",
@@ -396,5 +348,4 @@ __all__ = [
     "search_nodes",
     "format_path_summary",
     "format_node_detail",
-    "build_transcript_payload",
 ]

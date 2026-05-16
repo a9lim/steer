@@ -27,7 +27,6 @@ from saklas.tui.app import SaklasApp
 from saklas.tui.loom_helpers import (
     AlphaListError,
     PrefixMatch,
-    build_transcript_payload,
     format_node_detail,
     format_path_summary,
     parse_alpha_list,
@@ -321,29 +320,6 @@ def test_format_node_detail_includes_recipe_and_readings():
 
 
 # ---------------------------------------------------------------------------
-# build_transcript_payload
-# ---------------------------------------------------------------------------
-
-
-def test_build_transcript_payload_minimal_shape():
-    tree = LoomTree(model_id="mock/mock")
-    uid = tree.add_user_turn("what?")
-    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
-    tree.finalize_assistant(aid, text="hello", aggregate_readings={"angry.calm": 0.1})
-    payload = build_transcript_payload(
-        tree, model_id="mock/mock", system_prompt="be helpful",
-    )
-    assert payload["saklas_transcript"] == 1
-    assert payload["model_id"] == "mock/mock"
-    assert payload["system_prompt"] == "be helpful"
-    assert len(payload["turns"]) == 2
-    assert payload["turns"][0] == {"role": "user", "text": "what?"}
-    assert payload["turns"][1]["role"] == "assistant"
-    assert payload["turns"][1]["recipe"]["steering"] == "0.3 honest"
-    assert payload["turns"][1]["readings"] == {"angry.calm": 0.1}
-
-
-# ---------------------------------------------------------------------------
 # Slash command dispatch
 # ---------------------------------------------------------------------------
 
@@ -504,90 +480,42 @@ def test_path_prints_summary():
     assert "hello" in out
 
 
-def test_transcript_export_writes_payload(tmp_path: Path) -> None:
-    """`/transcript export` emits YAML (phase 5; pyyaml-parseable)."""
-    import yaml
+def test_save_writes_full_tree(tmp_path: Path, monkeypatch) -> None:
+    """`/save` serializes the whole loom tree to the conversations dir."""
+    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
+    app = _make_app()
+    _seed_tree(app._session.tree)
+    app._handle_command("/save mytree")
+    saved = tmp_path / "conversations" / "mytree.json"
+    assert saved.exists()
+    assert "saved tree" in _msgs(app)
+
+
+def test_save_load_preserves_branches(tmp_path: Path, monkeypatch) -> None:
+    """`/save` + `/load` round-trip every branch, not just the active path."""
+    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
     app = _make_app()
     uid, aid = _seed_tree(app._session.tree)
-    out = tmp_path / "transcript.yaml"
-    app._handle_command(f"/transcript export {out}")
-    assert out.exists()
-    payload = yaml.safe_load(out.read_text())
-    assert payload["saklas_transcript"] == 1
-    assert any(t["role"] == "user" for t in payload["turns"])
-    assert any(t["role"] == "assistant" for t in payload["turns"])
+    # A second assistant under the same user turn — an off-path branch.
+    app._session.tree.branch(aid, "alt reply")
+    app._handle_command("/save branched")
+
+    # Fresh app — load it back and confirm the off-path sibling survived.
+    app2 = _make_app()
+    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
+    app2._handle_command("/load branched")
+    assert "loaded tree" in _msgs(app2)
+    texts = {n.text for n in app2._session.tree.nodes.values()}
+    assert "hello" in texts          # active-path assistant
+    assert "alt reply" in texts      # off-path branch
 
 
-def test_transcript_export_load_roundtrip(tmp_path: Path) -> None:
-    """`/transcript export` writes YAML that round-trips through Transcript.load."""
-    from saklas.core.transcript import Transcript
+def test_load_missing_file(tmp_path: Path, monkeypatch) -> None:
+    """`/load` on an absent name reports cleanly without raising."""
+    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
     app = _make_app()
-    uid, aid = _seed_tree(app._session.tree)
-    out = tmp_path / "transcript.yaml"
-    app._handle_command(f"/transcript export {out}")
-    assert out.exists()
-    # Should parse via Transcript.load (which uses pyyaml).
-    transcript = Transcript.load(out)
-    assert transcript.model_id == "mock/mock"
-    roles = [t.role for t in transcript.turns]
-    assert "user" in roles
-    assert "assistant" in roles
-
-
-def test_transcript_load_missing_file(tmp_path: Path) -> None:
-    """Phase 5: load surfaces a 'not a file' message when the path doesn't exist."""
-    app = _make_app()
-    missing = tmp_path / "nope.yaml"
-    app._handle_command(f"/transcript load {missing}")
-    msg = _msgs(app)
-    assert "not a file" in msg
-
-
-def test_transcript_load_default_attaches_at_root(tmp_path: Path) -> None:
-    """Phase 5: `/transcript load <path>` runs `import_into(mode='default')`."""
-    import saklas
-    app = _make_app()
-    # Build a transcript from a non-trivial tree and dump it to YAML.
-    src = LoomTree(model_id="mock/mock")
-    uid = src.add_user_turn("hi")
-    aid = src.begin_assistant(uid, recipe=Recipe(steering="0.3 honest", seed=42))
-    src.finalize_assistant(aid, text="hello", aggregate_readings={"angry.calm": 0.1})
-    transcript = saklas.Transcript(
-        model_id="mock/mock",
-        system_prompt=None,
-        probes=[],
-        turns=[
-            saklas.TranscriptTurn(role="user", text="hi"),
-            saklas.TranscriptTurn(
-                role="assistant", text="hello",
-                recipe=Recipe(steering="0.3 honest", seed=42),
-                readings={"angry.calm": 0.1},
-            ),
-        ],
-    )
-    path = tmp_path / "t.yaml"
-    path.write_text(transcript.to_yaml())
-
-    # The mock session needs _probe_hash for the guard-note walk.
-    app._session._probe_hash = lambda name: None
-    # ``model_id`` is read off ``session.model_id`` in the guard checks.
-    app._session.model_id = "mock/mock"
-
-    app._handle_command(f"/transcript load {path}")
-    msg = _msgs(app)
-    assert "/transcript load (default)" in msg
-    # Two turns landed under the synthetic root.
-    assert any(n.text == "hi" for n in app._session.tree.nodes.values())
-    assert any(n.text == "hello" for n in app._session.tree.nodes.values())
-
-
-def test_transcript_load_unknown_flag_combo(tmp_path):
-    """--here + --merge together → usage hint, no import."""
-    app = _make_app()
-    path = tmp_path / "x.yaml"
-    path.write_text("saklas_transcript: 1\nturns: []\n")
-    app._handle_command(f"/transcript load {path} --here --merge")
-    assert any("at most one" in m for m in app._chat_panel.messages)
+    app._handle_command("/load ghost")
+    assert "no saved tree" in _msgs(app)
 
 
 def test_fire_auto_regen_streams_into_shadow_column():
@@ -906,7 +834,8 @@ def test_help_mentions_loom_commands():
     assert "/prune" in msg
     assert "/auto-regen" in msg
     assert "/diff" in msg
-    assert "/transcript load" in msg
+    assert "/save" in msg
+    assert "/load" in msg
 
 
 # ---------------------------------------------------------------------------

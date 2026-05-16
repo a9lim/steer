@@ -211,44 +211,35 @@ def test_model_info():
 
 
 def test_save_load_roundtrip(tmp_path, monkeypatch):
-    # Redirect saklas_home() → tmp_path via env var.
+    """/save serializes the full loom tree; /load swaps it back in."""
     monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
     app = _make_app()
-    # v2.3 loom: history is derived from the tree, so seed via tree ops.
-    _uid = app._session.tree.add_user_turn("hi")
-    _aid = app._session.tree.begin_assistant(_uid)
-    app._session.tree.finalize_assistant(_aid, text="hello")
-    # The mock's ``session.history`` shadows the tree-derived view; mirror
-    # the seeded turns into it so ``app._messages`` (which reads
-    # ``session.history``) sees them.
-    app._session.history = app._session.tree.messages_for()
-    app._alphas["foo"] = 0.5
-    app._session._profiles["foo"] = {0: None}  # so load restores it
-    app._enabled["foo"] = True
-    app._default_seed = 7
+    # Seed a small tree: user "hi" → assistant "hello".
+    uid = app._session.tree.add_user_turn("hi")
+    aid = app._session.tree.begin_assistant(uid)
+    app._session.tree.finalize_assistant(aid, text="hello")
+
     app._handle_command("/save convtest")
-
-    saved = (tmp_path / "conversations" / "convtest.json")
+    saved = tmp_path / "conversations" / "convtest.json"
     assert saved.exists()
+    assert "saved tree" in _msgs(app)
 
-    # Wipe state and load.
+    # Fresh app — load the saved tree back.
     app2 = _make_app()
-    monkeypatch.setenv("SAKLAS_HOME", str(tmp_path))
-    app2._session._profiles["foo"] = {0: None}
-    app2._refresh_left_panel = MagicMock()
-
-    # chat_panel mocks used by _do_clear.
-    app2._chat_panel.clear_log = MagicMock()
-    app2._session.clear_history = MagicMock(
-        side_effect=lambda: (
-            app2._session.tree.reset(),
-            setattr(app2._session, "history", []),
-        )
-    )
-
     app2._handle_command("/load convtest")
-    assert app2._alphas.get("foo") == 0.5
-    assert app2._default_seed == 7
+    assert "loaded tree" in _msgs(app2)
+
+    # The loaded tree carries the saved nodes (full tree, every branch).
+    texts = {n.text for n in app2._session.tree.nodes.values()}
+    assert "hi" in texts
+    assert "hello" in texts
+
+
+def test_load_missing_file_reports():
+    """/load on a name with no saved file reports cleanly."""
+    app = _make_app()
+    app._handle_command("/load does-not-exist")
+    assert "no saved tree" in _msgs(app)
 
 
 def test_help_mentions_new_bindings():
@@ -319,7 +310,8 @@ def test_start_generation_inherits_highlight_state():
     """Fresh assistant widgets spawn with ``_highlight_on=False``; the
     app must push its current highlight state onto the widget at
     generation start so streamed tokens render highlighted from the
-    first emit (regression: required Ctrl+Y off/on cycle post-gen).
+    first emit (regression: required a Ctrl+Y mode-cycle round trip
+    post-gen).
     """
     app = _make_app()
     app._session._device = SimpleNamespace(type="cpu")
@@ -1151,15 +1143,15 @@ def test_shift_arrow_uses_coarse_alpha_step():
     assert app._alphas["honest"] == pytest.approx(_ALPHA_STEP_FINE)
 
 
-# ---- Logit-pass: highlight mode cycle (Ctrl+H) ----
+# ---- Logit-pass: highlight mode cycle (Ctrl+Y) ----
 
 
 def test_highlight_cycle_off_to_probe_to_surprise():
-    """Ctrl+H walks {off → probe → surprise → off} with a probe loaded.
+    """Ctrl+Y walks {off → probe → surprise → off} with a probe loaded.
 
     The cycle defers to the trait-panel selection for the ``probe``
     slot so navigating the right rack still drives WHICH probe lights
-    up — Ctrl+H only switches between "off / a probe / surprise".
+    up — Ctrl+Y only switches between "off / a probe / surprise".
     """
     from saklas.tui.chat_panel import SURPRISE_PROBE
 
@@ -1171,26 +1163,25 @@ def test_highlight_cycle_off_to_probe_to_surprise():
     # Start at off.
     assert app._highlighting is False
 
-    # off → probe
+    # off → probe.  The cycle no longer emits a chat message — mode is
+    # surfaced by the persistent HL line in the left panel instead — so
+    # the assertions track ``_highlighting`` / ``_highlight_probe``.
     app.action_cycle_highlight_mode()
     assert app._highlighting is True
     assert app._highlight_probe == "angry.calm"
-    assert "angry.calm" in _msgs(app)
 
     # probe → surprise
     app.action_cycle_highlight_mode()
     assert app._highlighting is True
     assert app._highlight_probe == SURPRISE_PROBE
-    assert "surprise" in _msgs(app)
 
     # surprise → off
     app.action_cycle_highlight_mode()
     assert app._highlighting is False
-    assert "Highlight off" in _msgs(app)
 
 
 def test_highlight_cycle_backward_walks_reverse():
-    """Ctrl+Shift+H walks the cycle backward from any state."""
+    """Ctrl+Shift+Y walks the cycle backward from any state."""
     from saklas.tui.chat_panel import SURPRISE_PROBE
 
     app = _make_app()
@@ -1209,6 +1200,31 @@ def test_highlight_cycle_backward_walks_reverse():
     # probe → off (backward)
     app.action_cycle_highlight_mode_back()
     assert app._highlighting is False
+
+
+def test_left_panel_highlight_line_renders():
+    """``LeftPanel.update_highlight`` puts an ``HL`` line in the
+    GENERATION block: ``off`` dimmed, probe names verbatim, long names
+    truncated to the 15-char preview budget."""
+    from saklas.tui.vector_panel import LeftPanel
+
+    panel = LeftPanel(model_info={})
+    captured: list[str] = []
+    panel._gen_config_widget = SimpleNamespace(update=captured.append)
+
+    panel.update_highlight("off")
+    assert "HL" in captured[-1] and "off" in captured[-1]
+
+    panel.update_highlight("angry.calm")
+    assert "angry.calm" in captured[-1]
+
+    panel.update_highlight("surprise")
+    assert "surprise" in captured[-1]
+
+    # Long probe names truncate like the Sys-prompt preview.
+    panel.update_highlight("high_context.low_context")
+    assert "high_context.lo..." in captured[-1]
+    assert "high_context.low_context" not in captured[-1]
 
 
 def test_highlight_cycle_skips_probe_when_none_selectable():

@@ -427,7 +427,6 @@ class SaklasSession:
         compile: bool = True,
         compile_mode: str | None = None,
         cuda_graphs: bool = True,
-        session_id: str | None = None,
         return_top_k: int = 0,
     ) -> "SaklasSession":
         """Load a HF model + tokenizer and return a fully initialized session.
@@ -568,7 +567,6 @@ class SaklasSession:
             projection_metric=projection_metric,
             dls=dls,
             cuda_graphs=cuda_graphs,
-            session_id=session_id,
             return_top_k=return_top_k,
         )
 
@@ -586,7 +584,6 @@ class SaklasSession:
         projection_metric: str = "mahalanobis",
         dls: bool = True,
         cuda_graphs: bool = True,
-        session_id: str | None = None,
         return_top_k: int = 0,
     ):
         self._model = model
@@ -735,91 +732,21 @@ class SaklasSession:
         # ``_gen_state`` is the *generator's*.
         self._gen_phase: GenState = GenState.IDLE
 
-        # Session identity (v2.3, minimal): resolve to the persistent
-        # anonymous default when not passed.  The default-pointer file
-        # at ``~/.saklas/sessions/.default`` survives process restarts
-        # so the tree carries over.  Named sessions, ``saklas session
-        # ls/resume/rm`` verbs, and 30-day auto-prune are v2.4-scope.
-        from saklas.io.session_store import (
-            default_session_id as _default_session_id,
-            load_tree as _load_tree,
-            save_tree as _save_tree,
-        )
-        if session_id is None:
-            try:
-                session_id = _default_session_id()
-            except OSError:
-                # Filesystem unavailable (read-only $HOME, sandboxed
-                # tests) — fall back to an in-memory id so the rest of
-                # the session still works; persistence becomes a no-op.
-                session_id = ""
-        self.session_id: str = session_id
-
         # Conversation state lives in a :class:`LoomTree` (v2.3).  The
         # active path through the tree is what the model sees as context;
         # ``self.history`` is a derived property over ``tree.active_path``
         # for backward-compatibility with v2.2 callers that read the flat
         # list directly.  Generation routes through ``tree.add_user_turn``
-        # / ``tree.begin_assistant`` / ``tree.finalize_assistant``.
-        loaded_tree: "LoomTree | None" = None
-        if self.session_id:
-            try:
-                loaded_tree = _load_tree(self.session_id)
-            except Exception:
-                loaded_tree = None
-        if loaded_tree is not None:
-            # Rewire the loaded tree onto this session: it was loaded
-            # without an event bus and without the conflict-check hook,
-            # so we attach both here.  Carrying the persisted ``rev`` /
-            # ``active_node_id`` is the entire point of resume.
-            loaded_tree.attach_events(self.events)
-            loaded_tree.set_conflict_check(self._loom_conflict_check)
-            loaded_tree.session_id = self.session_id
-            # ``model_id`` from the file wins when present — that's
-            # the cross-session-resume identity check the v2.3
-            # persistence spec describes.  When the loaded id mismatches
-            # the live model, the surfaces are responsible for the
-            # warn-and-refuse (deferred to v2.4 surface plumbing).
-            if loaded_tree.model_id is None:
-                loaded_tree.model_id = getattr(
-                    self._model_info, "model_id", None,
-                )
-            self.tree: LoomTree = loaded_tree
-        else:
-            self.tree = LoomTree(
-                events=self.events,
-                model_id=getattr(self._model_info, "model_id", None),
-                session_id=self.session_id or None,
-                conflict_check=self._loom_conflict_check,
-            )
+        # / ``tree.begin_assistant`` / ``tree.finalize_assistant``.  The
+        # tree is in-memory only — there is no automatic cross-session
+        # persistence; the TUI's ``/save`` and ``/load`` are the explicit
+        # save/restore path (``LoomTree.save`` / ``LoomTree.load``).
+        self.tree = LoomTree(
+            events=self.events,
+            model_id=getattr(self._model_info, "model_id", None),
+            conflict_check=self._loom_conflict_check,
+        )
 
-        # Debounced persistence: every tree mutation bumps ``rev``,
-        # emits a ``LoomMutated`` event, and reschedules a 1s-delayed
-        # save.  The timer thread is independent of the gen thread so
-        # writes never block generation.  On close (or ``__exit__``)
-        # we flush any pending save synchronously.
-        self._persist_timer: "threading.Timer | None" = None
-        self._persist_lock = threading.Lock()
-        if self.session_id:
-            def _on_loom_mutated(event) -> None:
-                # Filter the synchronous bus to mutation events only.
-                # Importing LoomMutated locally avoids cycle risk.
-                from saklas.core.loom import LoomMutated as _LM
-                if not isinstance(event, _LM):
-                    return
-                with self._persist_lock:
-                    if self._persist_timer is not None:
-                        self._persist_timer.cancel()
-                    self._persist_timer = threading.Timer(
-                        1.0, self._flush_persist,
-                    )
-                    self._persist_timer.daemon = True
-                    self._persist_timer.start()
-
-            self._persist_save_fn = _save_tree
-            self.events.subscribe(_on_loom_mutated)
-        else:
-            self._persist_save_fn = None
         # Subtree root reserved by an in-flight generation (the user-parent
         # of the streaming assistant target).  None while idle; set by
         # ``_generate_core`` before token streaming begins, cleared in the
@@ -3995,34 +3922,7 @@ class SaklasSession:
 
     # -- Lifecycle --
 
-    def _flush_persist(self) -> None:
-        """Flush any pending tree save synchronously.
-
-        Cancels the debounce timer (if any) and writes the current
-        ``tree.json`` via :func:`saklas.io.session_store.save_tree`.
-        Persistence errors are swallowed — losing a save on close is
-        recoverable (the prior good file remains atomically on disk),
-        and we don't want a transient IO error to mask the actual
-        shutdown path's exit code.
-        """
-        with self._persist_lock:
-            timer = self._persist_timer
-            self._persist_timer = None
-        if timer is not None:
-            timer.cancel()
-        if self._persist_save_fn is None or not self.session_id:
-            return
-        try:
-            self._persist_save_fn(self.session_id, self.tree)
-        except Exception:
-            # Logged at debug; swallowed otherwise — see docstring.
-            _log.debug(
-                "session-store flush failed for %r", self.session_id,
-                exc_info=True,
-            )
-
     def close(self) -> None:
-        self._flush_persist()
         self._steering.clear_all()
         self._profiles.clear()
 

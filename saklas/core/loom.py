@@ -19,12 +19,12 @@ The five primitives (edit, branch, navigate, delete_subtree, plus
 are all that exist at the engine level.  Surface-level verbs (slash
 commands, keyboard shortcuts, context menus) compose from these.
 
-Per-node token blobs (``tokens`` and ``thinking_tokens``) are owned by
-the tree but persisted side-by-side rather than embedded in the main
-``tree.json`` file — see :mod:`saklas.io.session_store`.  In memory the
-node holds the live token list during streaming; on save the tree's
-``to_dict`` omits the token lists by default (callers persist them
-through the session store).
+Per-node token blobs (``tokens`` and ``thinking_tokens``) are held in
+memory during streaming.  ``LoomTree.to_dict`` omits them by default,
+so ``LoomTree.save`` / ``LoomTree.load`` (the TUI's ``/save`` and
+``/load``) round-trip tree structure and text without the per-token
+score lists.  The tree is otherwise in-memory only — there is no
+automatic cross-session persistence.
 """
 
 from __future__ import annotations
@@ -1121,10 +1121,11 @@ class LoomTree:
         return tree
 
     def save(self, path: Any) -> None:
-        """Atomic write of the main tree file.
+        """Atomic write of the tree to ``path`` as JSON.
 
-        Token blobs are owned by the session store and are not embedded
-        here — see :mod:`saklas.io.session_store`.
+        Per-token score blobs are omitted (``to_dict(include_tokens=
+        False)``) — structure, text, and recipes round-trip; per-token
+        highlight scores do not.
         """
         from pathlib import Path
         from saklas.io.atomic import write_json_atomic
