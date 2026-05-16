@@ -248,7 +248,7 @@ There are three panels: a vector registry on the left, chat in the center, and a
 | `Ctrl+A` | A/B side-by-side (toggle steered + unsteered shadow columns) |
 | `Ctrl+R` | Regenerate last response |
 | `Ctrl+S` | Cycle trait sort mode |
-| `Ctrl+Y` | Per-token probe highlighting |
+| `Ctrl+Y` / `Ctrl+Shift+Y` | Cycle per-token highlight: off → probe → surprise |
 | `[` / `]` | Adjust temperature |
 | `{` / `}` | Adjust top-p |
 | `Escape` | Stop generation |
@@ -273,7 +273,7 @@ There are three panels: a vector registry on the left, chat in the center, and a
 | `/sys <prompt>` | Set system prompt |
 | `/temp <v>` / `/top-p <v>` / `/max <n>` | Sampling defaults |
 | `/seed [n\|clear]` | Default sampling seed |
-| `/save <name>` / `/load <name>` | Snapshot/restore conversation + alphas |
+| `/save <name>` / `/load <name>` | Save/restore the full loom conversation tree |
 | `/export <path>` | JSONL with per-token probe readings |
 | `/model` | Model + device + active state |
 | `/help` | List commands and keybindings |

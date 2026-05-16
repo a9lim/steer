@@ -408,7 +408,7 @@ Bindings on the loom screen:
 
 ### Slash commands on the chat screen
 
-The five core verbs plus extras for fan-out, transcript IO, tree-screen toggle, and decoration:
+The five core verbs plus extras for fan-out, tree save/load, tree-screen toggle, and decoration:
 
 - `/regen [N]` — N siblings of active assistant. Default 1. Bound to `Ctrl+R`.
 - `/edit` — open inline buffer with active-node text; commit replaces in place (no new sibling). Bound to `Ctrl+E`.
@@ -421,8 +421,7 @@ The five core verbs plus extras for fan-out, transcript IO, tree-screen toggle, 
 - `/star`, `/note <text>` — decoration on the active node.
 - `/prune <when-expr>` — set the loom screen's filter highlighting; persists until cleared.
 - `/auto-regen [mode]` — toggle / configure the auto-regen modifier (see phase 5). `Ctrl+A` keeps its current meaning (toggle on/off); the slash command sets the mode.
-- `/transcript export <path>` — export active path as transcript YAML.
-- `/transcript load <path> [--here | --merge] [--strict]` — import a transcript. Default attaches at root; `--here` attaches at the active node; `--merge` finds the deepest matching **user-turn** prefix between the active path and the transcript and attaches the non-matching tail there. `--strict` refuses on probe-hash drift.
+- `/save <name>` / `/load <name>` — explicit loom-tree persistence (see "Persistence" below). `/save` serializes the **whole tree** (every branch) to `~/.saklas/conversations/<name>.json`; `/load` swaps a saved tree in wholesale. **Status note:** these replaced the originally-planned `/transcript export|load` slash commands — `/save`/`/load` round-trip the full tree rather than a single linear path. The `saklas.core.transcript` YAML format survives only behind the CLI `transcript run` replay verb.
 - `/diff <id1> <id2> [--full]` — text diff + readings delta between two assistant nodes. `--full` prints the complete readings table; default prints unified-diff form + top-5 reading deltas.
 - `/diff --siblings` — same as above but across all children of the active user-parent.
 
@@ -505,6 +504,8 @@ Strict generalization of today's A/B. Drops out of the cross-branch-diff infrast
 
 ### Transcript export/import
 
+> **Status note.** The TUI no longer has a `/transcript` slash command — `/save` and `/load` (above) replaced it and operate on the **whole tree**, not a transcript path. The `Transcript` YAML format and its three-mode `import_into` machinery described in this section still exist, but the only surface that drives them is the CLI `saklas transcript run` replay verb (which uses `default` mode) and the webui load drawer. Read the rest of this section as the design of the transcript format + CLI/webui import, not the TUI.
+
 A **transcript** is a saved path through the tree: system prompt + every user turn + every assistant turn's `Recipe` (steering, sampling, seed, probe set, per-probe content hash) + final aggregate readings. Serializes to YAML. The per-node thing remains `Recipe`; the file/export concept is `Transcript` so the doc and CLI stop overloading.
 
 ```yaml
@@ -531,7 +532,7 @@ turns:
     ...
 ```
 
-`saklas transcript run <path>` is the CLI verb — loads, replays, and reports. Inside a loom session, `/transcript load` imports as a new branch.
+`saklas transcript run <path>` is the CLI verb — loads, replays, and reports (using `default` mode).
 
 **Three import modes:**
 
@@ -548,7 +549,7 @@ User-turn-only matching is the load-bearing choice. Assistant outputs are a func
 - **Transcript's probe set differs from current session's** (any name missing) → warn; readings are recorded as-imported for display but won't update on regen unless the user loads the missing probes.
 - **Probe content drift** (probe name present but `sha256` doesn't match) → warn loudly with the diff (which probes drifted); replay proceeds but the user sees that downstream readings may not reproduce. `--strict` refuses the load on any hash mismatch.
 
-The webui surfaces the three modes as radio buttons in the load drawer; the strict flag is a checkbox. The TUI uses the flag form on `/transcript load`.
+The webui surfaces the three modes as radio buttons in the load drawer; the strict flag is a checkbox. (The TUI has no transcript import — its `/load` swaps in a whole saved tree instead.)
 
 This closes the loop: find an interesting steering combo → save the path → share the YAML → another saklas user replays exactly and continues from where you left off. The reproducible-research move.
 
@@ -576,42 +577,36 @@ The fusion: regenerate takes a `recipe_override` parameter (a partial Recipe tha
 
 ## Persistence
 
-> **v2.3 status: minimal.** Single-file persistence shipped:
-> `~/.saklas/sessions/<session_id>/tree.json` via atomic write, plus a
-> persistent anonymous default session id at
-> `~/.saklas/sessions/.default` so the tree survives process restarts
-> without an explicit `--session` name. `SaklasSession(session_id=...)`
-> threads the id through `__init__` / `from_pretrained`; a debounced
-> 1s save fires on every `LoomMutated` event and `session.close()` /
-> `__exit__` flush synchronously. The rest of this section is deferred
-> to v2.4: per-node token blobs split into `tokens/<node_id>.json`,
-> named sessions via `--session <name>`, `saklas session ls/resume/rm`
-> CLI verbs, and 30-day auto-prune of anonymous unstarred sessions.
+> **v2.3 status: explicit-only.** There is no automatic cross-session
+> persistence. The loom tree is in-memory for the life of a session;
+> `/save <name>` and `/load <name>` are the explicit save/restore
+> path. The originally-planned design below — auto-ulid sessions, a
+> debounced session store, named sessions, `saklas session` verbs,
+> 30-day auto-prune — was built (as `saklas/io/session_store.py`,
+> wired into `SaklasSession` via a `session_id` kwarg and a
+> `LoomMutated`-driven debounced save) and then **removed**: implicit
+> autosave was judged the wrong default. What remains is
+> `LoomTree.save` / `LoomTree.load` driven by the two slash commands.
+> The struck-through subsections below are kept as a record of the
+> rejected design, not as a v2.4 roadmap.
 
-### Session identity
+### Save / load
 
-Saklas today has no `session_id` concept — the TUI is one-shot, the Python API is ephemeral, the server has many concurrent sessions but no naming. Loom needs persistence, so:
+`/save <name>` writes the **entire tree** — every branch, not just the active path — to `~/.saklas/conversations/<name>.json` via `LoomTree.save` (`to_dict(include_tokens=False)`). `/load <name>` reads it back with `LoomTree.load`, rewires the deserialized tree's event bus and conflict-check hook, and swaps it into `session.tree` wholesale.
 
-- **Auto-ulid sessions.** Every fresh session gets a `session_id = ulid()` on first mutation (anything that touches the tree). Persists to `~/.saklas/sessions/<session_id>/`.
-- **Named sessions** — `saklas tui --session <name>` and `saklas serve --session <name>` open or create a named session. Names are slugs (`[a-z][a-z0-9._-]*`); collisions resume the existing session.
-- **`saklas session ls / resume / rm`** — listing, resuming (re-attaches to an existing tree by id or name), and explicit deletion verbs.
-- **Auto-prune.** Sessions older than 30 days **with no name and no starred nodes** are GC'd at process startup. Named sessions and sessions containing stars persist indefinitely.
-- **Tree carries `model_id`.** Saved trees record the model they were generated against. Loading a tree against a different model warns and refuses to attach new gens unless `--force` is passed (steering tensors don't transfer). Same guard the transcript-import section uses.
-- **Header carries `saklas_version`** — for future migrations, atomic-write versioning following the pack-format pattern.
+A saved tree records the `model_id` it was generated against; loading against a different live model prints a warning (steering / probe tensors won't transfer) but does not refuse.
+
+### ~~Session identity~~ (rejected)
+
+~~Saklas today has no `session_id` concept — the TUI is one-shot, the Python API is ephemeral, the server has many concurrent sessions but no naming. Loom needs persistence, so: auto-ulid sessions persisting to `~/.saklas/sessions/<session_id>/`; named sessions via `saklas tui --session <name>`; `saklas session ls / resume / rm` verbs; 30-day auto-prune of anonymous unstarred sessions.~~ The `model_id` guard (saved trees record their model; a mismatch on load warns) is the one piece that survived — it lives on `/load`.
 
 ### File format
 
-`~/.saklas/sessions/<session_id>/tree.json` — atomic write via `saklas.io.atomic.write_json_atomic`. Schema versioned (`tree_format: 1`); future migrations follow the pack-format pattern. Carries `model_id`, `saklas_version`, `session_id`, `name` (when named), and `rev`.
-
-`~/.saklas/sessions/<session_id>/tokens/<node_id>.json` — per-node token-score blobs split out so the main tree file stays small. Lazy-loaded on demand by the surfaces. Streamed-in tokens write through to this file at finalize. Includes `tokens`, `thinking_tokens`, and per-token logprobs when present; everything else (text, recipe, aggregate readings) stays in `tree.json` so navigation doesn't pay the token-blob cost.
-
-The tree file is small (metadata + structure); the token blobs are the bulk. Split lets the tree file land within a single atomic write while the larger token data is per-node and append-only at gen time.
+`~/.saklas/conversations/<name>.json` — atomic write via `saklas.io.atomic.write_json_atomic`. Schema-versioned (`tree_format`); `from_dict` rejects a mismatched version. Carries `model_id`, `saklas_version`, `name`, `rev`, the node list, and `children_of`. Per-token score blobs (`tokens` / `thinking_tokens`) are omitted (`include_tokens=False`) — structure, text, and recipes round-trip; per-token highlight scores do not.
 
 ### Size management
 
-Webui localStorage gets a per-tree size budget (~5MB default). Crossing it surfaces a toast suggesting recipe export + tree clear; doesn't hard-stop. Engine-side `tree.json` has no client-side budget but `tree.prune_dead_branches(min_age_days=30)` is provided as a manual operation; not automatic.
-
-Per-node token blobs are the persistence bulk; the sidebar's "decoration ring" reads from `aggregate_readings` only, not per-token data, so navigating a huge tree doesn't need to load token blobs.
+Webui localStorage gets a per-tree size budget (~5MB default). Crossing it surfaces a toast suggesting recipe export + tree clear; doesn't hard-stop. Engine-side there is no autosave and no size budget — a `/save`d tree file is only as large as the tree the user chose to save, and `to_dict(include_tokens=False)` keeps even large trees small by dropping the per-token score blobs.
 
 ### Engine-side cache, surface-side render
 
@@ -635,7 +630,7 @@ The webui's localStorage stops being authoritative after phase 3. On bootstrap: 
 - `abPair` on `ChatTurn` is removed from the Python type (compat shim possible but loom siblings express it more cleanly). Webui keeps a one-release deprecation period.
 - `SweepDrawer.svelte` and `saklas/tui/commands.py`'s `/sweep` are repointed to fan-out; the table view is deleted from the webui. **Landed in v2.3 (not v2.4 as originally scoped)** — the surface migration was small enough to bundle with the loom PR rather than carve out its own. `/sweep` survives as a deprecation alias that routes to `/fan` and prints a one-line "use /fan" banner so muscle memory still works.
 - `session.config` for sampling defaults still works; per-turn recipe carries the per-call sampling and the session default is the fallback. No change visible to callers.
-- "Recipe" the file format renames to "Transcript" in CLI verbs, slash commands, and YAML preamble (`saklas_transcript: 1`). The per-node `Recipe` dataclass keeps its name. One-release alias on `/recipe load` → `/transcript load` for migration.
+- "Recipe" the file format renames to "Transcript" in the CLI verb and YAML preamble (`saklas_transcript: 1`). The per-node `Recipe` dataclass keeps its name. (No transcript slash command shipped in the TUI — see the Transcript status note — so the planned `/recipe load` → `/transcript load` migration alias was moot.)
 
 ---
 
@@ -675,7 +670,7 @@ These are the forks resolved during planning. New forks belong in this section a
 
 16. **Concurrency: gen reserves its subtree.** The `_gen_lock` holder owns the subtree rooted at the user-parent of its target node. Decoration ops (star, note) and branches are always free; edits and deletes on that reservation refuse with 409. Navigate-away is free — gen continues invisibly; user can navigate back at any time. N-way stop cancels the current sibling and skips the queued remainder; mid-sibling stop trims cleanly.
 
-17. **`Recipe` is per-node; `Transcript` is the export.** The dataclass per-node stays `Recipe` (steering + sampling + seed + probe set + content hashes). The file/export concept renames to `Transcript`. CLI verb: `saklas transcript run`. Slash command: `/transcript load`. Frees `Recipe` of the doubled meaning.
+17. **`Recipe` is per-node; `Transcript` is the export.** The dataclass per-node stays `Recipe` (steering + sampling + seed + probe set + content hashes). The file/export concept renames to `Transcript`. CLI verb: `saklas transcript run`. Frees `Recipe` of the doubled meaning. (The originally-planned `/transcript load` slash command was dropped — the TUI's `/save`/`/load` operate on whole trees, not transcripts.)
 
 18. **Filter grammar is distinct from `@when:`.** Tree-pruning uses `agg:`/`any:`/`last:` prefixes on per-node probe readings. Steering's `@when:` gates on per-step readings during generation. Same probes, different scalars, different evaluators. One grammar would silently change semantics across contexts.
 
@@ -685,4 +680,4 @@ These are the forks resolved during planning. New forks belong in this section a
 
 21. **WS `tree_mutated` carries delta payloads, not just event types.** Each event includes the added / removed / updated node lists plus a monotonic `rev`. Clients apply in-place; full re-fetch is the missed-event fallback (detected via `rev` gap).
 
-22. **Session identity is auto-ulid'd, optionally named.** Fresh sessions get `ulid()` on first tree mutation; `--session <name>` opens or creates a named one. `saklas session ls / resume / rm` are the verbs. Anonymous sessions older than 30 days with no stars are auto-pruned at startup; named or starred sessions persist indefinitely. Trees carry `model_id` and refuse to attach new gens on a mismatched session unless `--force`.
+22. **~~Session identity is auto-ulid'd, optionally named.~~** *Rejected — see Persistence.* The planned auto-ulid sessions, `--session <name>` naming, `saklas session ls/resume/rm` verbs, and 30-day auto-prune were built (`saklas/io/session_store.py` + a debounced autosave) and then removed: implicit cross-session persistence was judged the wrong default. The loom tree is in-memory; `/save <name>` / `/load <name>` are the explicit save/restore path. Trees still carry `model_id`, and `/load` warns on a mismatch against the live model.

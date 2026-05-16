@@ -52,10 +52,13 @@ source-of-truth discipline.
 - **Phase 3**: `surprise` highlight mode for Chat.svelte token tinting
   via `-logprob / (1 - logprob)` mapping through the existing
   `scoreToRgb` ramp (Decisions 4 + 5).  `compare-two` also accepts
-  surprise as the B stripe.  TUI parity: new `/surprise` slash command
-  + `SURPRISE_PROBE` sentinel on `chat_panel`'s markup-cache path; per-
-  token `event.logprob` rides through the `_ui_token_queue` (the
-  trailing `is_shadow` flag shifts to tuple index 7).
+  surprise as the B stripe.  TUI parity: a three-state highlight-mode
+  cycle on `Ctrl+Y` / `Ctrl+Shift+Y` (`off → probe → surprise`) plus
+  the `SURPRISE_PROBE` sentinel on `chat_panel`'s markup-cache path;
+  per-token `event.logprob` rides through the `_ui_token_queue` (the
+  trailing `is_shadow` flag shifts to tuple index 7).  (Phase 3 first
+  shipped this as a `/surprise` slash command — see the deviations
+  note below.)
 - **Phase 4**: Loom edge weighting + sibling sort + filter help.
   `loomUiState.weightMode` (`"none"|"confidence"|"surprise"`) drives
   `LoomEdge`'s stroke-width / opacity scaling; `LoomNode` gains a
@@ -81,12 +84,17 @@ source-of-truth discipline.
   setup is a separate scope.  Type safety is enforced via
   `svelte-check` (zero new errors); the only failures are two pre-
   existing `string | null` typing issues unrelated to this work.
-- **TUI parity is `/surprise`-shaped, not a mode cycle.** The TUI's
-  highlight surface is a binary toggle (`Ctrl+Y`) over a single probe
-  name — there's no existing mode-cycle infrastructure for `surprise`
-  to slot into.  Shipped a new `/surprise [off]` slash command that
-  flips `_highlight_probe` to the `SURPRISE_PROBE` sentinel and turns
-  highlighting on.  Cursor-token + status-footer `lp=-2.34` readout
+- **TUI surprise mode: `/surprise` → highlight-mode cycle.** Phase 3
+  first shipped a `/surprise [off]` slash command — the TUI's
+  highlight surface was then a binary `Ctrl+Y` toggle over a single
+  probe name, with no mode-cycle infrastructure for `surprise` to slot
+  into.  A later pass added the three-state highlight-mode cycle
+  (`off → probe → surprise` on `Ctrl+Y` forward / `Ctrl+Shift+Y`
+  backward), folded the binary toggle into it, and **removed
+  `/surprise`** — the cycle is now the sole entry to surprise mode.
+  (`Ctrl+H`, the originally-natural chord, is unusable: terminals send
+  `0x08` for it, which Textual maps to `backspace` before binding
+  resolution.)  Cursor-token + status-footer `lp=-2.34` readout
   deferred — the TUI has no cursor-token concept and building one is
   separate scope.
 - **`sort:` grammar is client-side.** The server filter grammar
@@ -404,7 +412,10 @@ mapping over the TUI's existing 256-color rich-text scale (whichever
 of the diverging palettes maps cleanest to a `[0, 1]` input —
 implementation detail, but the shape mirrors the webui's
 `scoreToRgb` reuse). Tooltip-on-hover doesn't apply in the TUI; the
-status footer gets a `lp=-2.34` readout for the cursor-token instead.
+status footer was to get a `lp=-2.34` readout for the cursor-token
+instead (deferred — see the deviations note: the TUI has no
+cursor-token concept). The surprise mode is reached through the
+three-state highlight cycle (`Ctrl+Y` / `Ctrl+Shift+Y`).
 
 The drilldown / fan / NodeCompare / loom-edge polish is webui-only
 in this pass — the TUI's loom screen and compare drawer are simpler
