@@ -29,6 +29,11 @@
      *  value only when ``loomUiState.weightMode !== "none"`` so the
      *  default render shape is unchanged. */
     weightBadge?: number | null;
+    /** Steering-delta label for the edge into this node (e.g.
+     *  ``0.45 angry.calm``).  Rendered as a trailing chip — it used to
+     *  be an absolutely-positioned label on the edge column that
+     *  overlapped this node's text.  Null suppresses it. */
+    steerLabel?: string | null;
   }
 
   let {
@@ -41,6 +46,7 @@
     oncontextmenu,
     ring = null,
     weightBadge = null,
+    steerLabel = null,
   }: Props = $props();
 
   const PREVIEW_CHARS = 40;
@@ -96,6 +102,9 @@
     <span class="star" title="starred" aria-hidden="true">★</span>
   {/if}
   <span class="preview">{preview}</span>
+  {#if steerLabel}
+    <span class="steer" title="steering delta from parent">{steerLabel}</span>
+  {/if}
   {#if weightBadge != null}
     <span class="weight" title="mean chosen-token logprob (response span)">
       {weightBadge.toFixed(2)}
@@ -109,10 +118,10 @@
 <style>
   .node {
     display: grid;
-    /* Columns: glyph · ring? · star? · preview (1fr) · weight? · note? .
-     * Optional cells get ``auto`` slots; absent items collapse to zero
-     * width.  Five explicit slots is enough for the full render. */
-    grid-template-columns: auto auto auto 1fr auto auto;
+    /* Columns: glyph · ring? · star? · preview (1fr) · steer? · weight? ·
+     * note? .  Optional cells get ``auto`` slots; absent items collapse
+     * to zero width. */
+    grid-template-columns: auto auto auto 1fr auto auto auto;
     align-items: center;
     gap: 0.4em;
     padding: 0.2em 0.5em;
@@ -137,7 +146,7 @@
     outline-offset: -1px;
   }
   .node.focused {
-    background: rgba(88, 166, 255, 0.12);
+    background: rgba(72, 138, 203, 0.12);
     outline: 1px solid var(--accent-blue);
     outline-offset: -1px;
   }
@@ -189,6 +198,21 @@
   .star {
     color: var(--accent-yellow);
     font-size: var(--font-size-tiny);
+  }
+  /* Steering-delta chip — trailing, truncated so a long delta can't
+   * blow out the row or collide with the preview text. */
+  .steer {
+    color: var(--accent-yellow);
+    font-size: var(--font-size-tiny);
+    font-variant-numeric: tabular-nums;
+    background: var(--bg-alt);
+    border: 1px solid var(--border-dim);
+    padding: 0 0.3em;
+    border-radius: 2px;
+    max-width: 11ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .note-mark {
     color: var(--accent-purple);

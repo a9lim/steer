@@ -26,6 +26,8 @@
     patchSessionDefaults,
     openDrawer,
   } from "../lib/stores.svelte";
+  import Segmented from "../lib/Segmented.svelte";
+  import Slider from "../lib/Slider.svelte";
 
   // ------------------------------------------------------------------- consts
 
@@ -105,14 +107,12 @@
     }
   }
 
-  function onTemp(ev: Event): void {
-    const v = Number((ev.currentTarget as HTMLInputElement).value);
+  function onTemp(v: number): void {
     setSampling("temperature", v);
     if (!samplingState.oneShotOverride) void persistDefault({ temperature: v });
   }
 
-  function onTopP(ev: Event): void {
-    const v = Number((ev.currentTarget as HTMLInputElement).value);
+  function onTopP(v: number): void {
     setSampling("top_p", v);
     if (!samplingState.oneShotOverride) void persistDefault({ top_p: v });
   }
@@ -173,12 +173,34 @@
     setSampling("return_top_k", v ? ALTS_K : 0);
   }
 
-  function setOneShot(oneShot: boolean): void {
-    setSampling("oneShotOverride", oneShot);
+  // Apply-mode segmented control — "default" persists to the session,
+  // "oneshot" scopes a change to the next message only.
+  const MODE_OPTIONS = [
+    {
+      value: "default",
+      label: "session default",
+      title: "Persist changes to the session defaults",
+    },
+    {
+      value: "oneshot",
+      label: "next message only",
+      title: "Apply only to the next message; session defaults untouched",
+    },
+  ];
+  const modeValue = $derived(
+    samplingState.oneShotOverride ? "oneshot" : "default",
+  );
+
+  function onModeChange(v: string): void {
+    setSampling("oneShotOverride", v === "oneshot");
   }
 
   function openSystemPrompt(): void {
     openDrawer("system_prompt");
+  }
+
+  function openAdvanced(): void {
+    openDrawer("advanced_sampling");
   }
 </script>
 
@@ -186,32 +208,34 @@
   <!-- Temperature -->
   <label class="control" title="Sampling temperature (0=greedy, 2=chaos)">
     <span class="label">T</span>
-    <input
-      type="range"
-      min={TEMP_MIN}
-      max={TEMP_MAX}
-      step={TEMP_STEP}
-      value={tempView}
-      disabled={!ready}
-      oninput={onTemp}
-      aria-label="temperature"
-    />
+    <span class="slider-cell">
+      <Slider
+        value={tempView}
+        min={TEMP_MIN}
+        max={TEMP_MAX}
+        step={TEMP_STEP}
+        disabled={!ready}
+        oninput={onTemp}
+        ariaLabel="temperature"
+      />
+    </span>
     <span class="value">{tempView.toFixed(2)}</span>
   </label>
 
   <!-- Top-p -->
   <label class="control" title="Top-p (nucleus) cumulative probability cutoff">
     <span class="label">P</span>
-    <input
-      type="range"
-      min={TOP_P_MIN}
-      max={TOP_P_MAX}
-      step={TOP_P_STEP}
-      value={topPView}
-      disabled={!ready}
-      oninput={onTopP}
-      aria-label="top-p"
-    />
+    <span class="slider-cell">
+      <Slider
+        value={topPView}
+        min={TOP_P_MIN}
+        max={TOP_P_MAX}
+        step={TOP_P_STEP}
+        disabled={!ready}
+        oninput={onTopP}
+        ariaLabel="top-p"
+      />
+    </span>
     <span class="value">{topPView.toFixed(2)}</span>
   </label>
 
@@ -304,7 +328,7 @@
        tab + the inline surprise highlight mode.  K=8 per Decision 1. -->
   <label
     class="control toggle"
-    title="Capture top-{ALTS_K} alternative tokens per position (drilldown logits tab + surprise highlight)"
+    title={`Capture top-${ALTS_K} alternative tokens per position (drilldown logits tab + surprise highlight)`}
   >
     <span class="label">alts</span>
     <input
@@ -315,6 +339,16 @@
       aria-label="capture top-K alternatives"
     />
   </label>
+
+  <button
+    type="button"
+    class="sys-btn"
+    disabled={!ready}
+    onclick={openAdvanced}
+    title="Open stop strings, penalties, logit bias, and numeric top-K alternatives"
+  >
+    advanced
+  </button>
 
   <!-- System prompt button -->
   <button
@@ -327,30 +361,16 @@
     <span aria-hidden="true">⚙</span> system prompt
   </button>
 
-  <!-- Mode toggle -->
-  <fieldset class="mode" aria-label="sampling apply mode">
-    <legend class="sr-only">apply mode</legend>
-    <label class="mode-opt" title="Persist changes to the session defaults">
-      <input
-        type="radio"
-        name="sampling-mode"
-        checked={!samplingState.oneShotOverride}
-        disabled={!ready}
-        onchange={() => setOneShot(false)}
-      />
-      <span>session default</span>
-    </label>
-    <label class="mode-opt" title="Apply only to the next message; session defaults untouched">
-      <input
-        type="radio"
-        name="sampling-mode"
-        checked={samplingState.oneShotOverride}
-        disabled={!ready}
-        onchange={() => setOneShot(true)}
-      />
-      <span>next message only</span>
-    </label>
-  </fieldset>
+  <!-- Apply-mode toggle -->
+  <div class="mode">
+    <Segmented
+      options={MODE_OPTIONS}
+      value={modeValue}
+      onChange={onModeChange}
+      disabled={!ready}
+      ariaLabel="sampling apply mode"
+    />
+  </div>
 </section>
 
 <style>
@@ -387,7 +407,7 @@
     color: var(--fg-dim);
     font-size: var(--font-size-tiny);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0;
     min-width: 1.6em;
     text-align: right;
   }
@@ -399,45 +419,10 @@
     text-align: left;
   }
 
-  /* Sliders — GitHub-dark, custom thumb on both webkit and gecko. */
-  input[type="range"] {
-    -webkit-appearance: none;
-    appearance: none;
+  /* Fixed-width host for the shared <Slider> inside the inline strip. */
+  .slider-cell {
+    display: flex;
     width: 8em;
-    height: 4px;
-    background: var(--bg-elev);
-    border-radius: 2px;
-    border: 1px solid var(--border-dim);
-    cursor: pointer;
-    margin: 0;
-  }
-  input[type="range"]:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--accent-blue);
-    border: 1px solid var(--bg-deep);
-    cursor: pointer;
-  }
-  input[type="range"]::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--accent-blue);
-    border: 1px solid var(--bg-deep);
-    cursor: pointer;
-  }
-  input[type="range"]:disabled::-webkit-slider-thumb {
-    background: var(--fg-muted);
-  }
-  input[type="range"]:disabled::-moz-range-thumb {
-    background: var(--fg-muted);
   }
 
   /* Number inputs */
@@ -445,7 +430,7 @@
     background: var(--bg);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.15em 0.35em;
     font-family: var(--font-mono);
     font-size: var(--font-size-small);
@@ -486,7 +471,7 @@
     background: transparent;
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.05em 0.4em;
     font-size: var(--font-size-small);
     line-height: 1.2;
@@ -505,7 +490,7 @@
     background: transparent;
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.2em 0.6em;
     font-family: var(--font-mono);
     font-size: var(--font-size-small);
@@ -522,46 +507,12 @@
     cursor: not-allowed;
   }
 
-  /* Mode radio set — pulled to the right end of the strip on desktop, wraps
-   * back to row 2 on narrow viewports along with the rest of the controls. */
+  /* Apply-mode segmented control — pulled to the right end of the strip on
+   * desktop, wraps back to row 2 on narrow viewports. */
   .mode {
     display: inline-flex;
     align-items: center;
-    gap: 0.6em;
     margin-left: auto;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 0.15em 0.5em;
-    background: var(--bg);
-  }
-  .mode-opt {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3em;
-    color: var(--fg-dim);
-    cursor: pointer;
-  }
-  .mode-opt input[type="radio"] {
-    accent-color: var(--accent-green);
-    cursor: pointer;
-  }
-  .mode-opt input[type="radio"]:checked + span {
-    color: var(--accent-green);
-  }
-  .mode-opt input[type="radio"]:disabled {
-    cursor: not-allowed;
-  }
-
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
   }
 
   /* Narrow viewports — strip wraps to two rows; the mode radio drops below
@@ -573,7 +524,7 @@
     .mode {
       margin-left: 0;
     }
-    input[type="range"] {
+    .slider-cell {
       width: 6em;
     }
   }

@@ -69,6 +69,9 @@
     void pickAndActivate(row.name);
   }
 
+  // ``recommendedAlpha`` is irrelevant for a probe — a probe observes, it
+  // doesn't steer — so the second ``onPick`` arg is dropped here.
+
   function gotoPack(): void {
     openDrawer("pack");
   }
@@ -93,12 +96,12 @@
     {/if}
 
     <SearchableConceptList
-      placeholder="filter local concepts…"
-      actionLabel="activate"
-      allowExtractFly={false}
-      emptyHint="install a pack via Tools › Packs"
-      busy={busy}
-      onPick={onPick}
+      placeholder="search concepts to watch…"
+      actionLabel="watch"
+      showStrength={false}
+      emptyHint="install a pack via the rail › session › packs"
+      {busy}
+      {onPick}
     />
   </div>
 
@@ -132,7 +135,7 @@
   .title {
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .close {
     background: transparent;
@@ -192,7 +195,7 @@
     font-family: var(--font-mono);
     font-size: var(--font-size-small);
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: var(--radius);
   }
   .btn:hover:not(:disabled) {
     background: var(--bg-elev);
@@ -203,6 +206,6 @@
     border-color: var(--accent-blue);
   }
   .btn.primary:hover:not(:disabled) {
-    background: rgba(88, 166, 255, 0.1);
+    background: rgba(72, 138, 203, 0.12);
   }
 </style>

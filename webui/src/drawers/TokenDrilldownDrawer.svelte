@@ -20,8 +20,11 @@
     drawerState,
     closeDrawer,
     chatLog,
+    loomTree,
+    refreshLoomTree,
     samplingState,
   } from "../lib/stores.svelte";
+  import { apiTree } from "../lib/api";
   import type { ChatTurn, TokenAltJSON, TokenScore } from "../lib/types";
   import HeatmapCell from "../lib/charts/HeatmapCell.svelte";
   import { HIGHLIGHT_SAT } from "../lib/tokens";
@@ -55,6 +58,8 @@
    * a "comparison has no overlap" narrowing error. */
   type Branch = "primary" | "shadow";
   let branch: Branch = $state<Branch>("primary");
+  let branchingRank: number | null = $state(null);
+  let branchError: string | null = $state(null);
 
   /** Reset the branch when the click target changes — opening the drawer
    * on a new token should always start on the primary side. */
@@ -84,6 +89,19 @@
   const token = $derived<TokenScore | null>(
     tokenIdx >= 0 && tokenIdx < tokenList.length ? tokenList[tokenIdx] : null,
   );
+
+  const loomNodeId = $derived.by(() => {
+    if (branch === "shadow") {
+      return inspected?.nodeId ?? null;
+    }
+    if (turn?.nodeId) return turn.nodeId;
+    if (turnIdx < 0 || loomTree.activePath.length === 0) return null;
+    const visible = loomTree.activePath
+      .map((id) => loomTree.nodes.get(id))
+      .filter(Boolean)
+      .filter((n) => !(n!.parent_id === null && n!.role === "system" && !n!.text));
+    return visible[turnIdx]?.id ?? null;
+  });
 
   // ---- per-layer × per-probe grid --------------------------------------
 
@@ -227,6 +245,33 @@
   function enableAlts(): void {
     if (samplingState.return_top_k === 0) {
       samplingState.return_top_k = 8;
+    }
+  }
+
+  async function branchFromAlt(row: RankRow): Promise<void> {
+    branchError = null;
+    if (isThinking) {
+      branchError = "thinking-token branches are not supported";
+      return;
+    }
+    const nodeId = loomNodeId;
+    const source = inspected?.tokens ?? [];
+    if (!nodeId || source.length === 0 || tokenIdx < 0) {
+      branchError = "no loom assistant node is available for this token";
+      return;
+    }
+    const text = source
+      .map((t, i) => (i === tokenIdx ? row.text : t.text))
+      .join("");
+    branchingRank = row.rank;
+    try {
+      await apiTree.branch(nodeId, text);
+      await refreshLoomTree();
+      closeDrawer();
+    } catch (e) {
+      branchError = e instanceof Error ? e.message : String(e);
+    } finally {
+      branchingRank = null;
     }
   }
 
@@ -384,6 +429,7 @@
                 <th class="num">logprob</th>
                 <th class="num">p</th>
                 <th class="num">Δ from rank 1</th>
+                <th class="num">branch</th>
               </tr>
             </thead>
             <tbody>
@@ -398,11 +444,25 @@
                   <td class="num">{fmtLogprob(row.logprob)}</td>
                   <td class="num">{fmtProb(row.p)}</td>
                   <td class="num">{fmtDelta(row.delta, row.rank)}</td>
+                  <td class="num">
+                    <button
+                      type="button"
+                      class="mini"
+                      disabled={row.chosen || branchingRank !== null}
+                      onclick={() => branchFromAlt(row)}
+                      title="Create a sibling assistant branch with this token substituted"
+                    >
+                      {branchingRank === row.rank ? "…" : "fork"}
+                    </button>
+                  </td>
                 </tr>
               {/each}
             </tbody>
           </table>
         </div>
+        {#if branchError}
+          <p class="branch-error">{branchError}</p>
+        {/if}
       {:else if token.logprob != null}
         <div class="empty">
           <p>
@@ -492,7 +552,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
   }
   .tok-text {
     color: var(--fg-strong);
@@ -548,7 +608,7 @@
   .branch-toggle button.active {
     color: var(--accent-blue);
     border-color: var(--accent-blue);
-    background: rgba(88, 166, 255, 0.08);
+    background: rgba(72, 138, 203, 0.10);
   }
 
   /* View tab strip — same shape as the branch toggle but lives on its
@@ -577,7 +637,7 @@
   .tab-strip button.active {
     color: var(--accent-blue);
     border-color: var(--accent-blue);
-    background: rgba(88, 166, 255, 0.08);
+    background: rgba(72, 138, 203, 0.10);
   }
 
   .body {
@@ -700,7 +760,7 @@
     font-weight: normal;
     font-size: var(--font-size-tiny);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
     border-bottom: 1px solid var(--border);
   }
   .logits-table td.num,
@@ -718,8 +778,31 @@
      glance.  Reuses the same accent-blue rationale as the branch toggle's
      active state. */
   .logits-table tr.chosen td {
-    background: rgba(88, 166, 255, 0.08);
+    background: rgba(72, 138, 203, 0.10);
     color: var(--fg-strong);
+  }
+  .mini {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--accent);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-tiny);
+    padding: 0.15em 0.45em;
+  }
+  .mini:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+  .mini:disabled {
+    color: var(--fg-muted);
+    cursor: not-allowed;
+  }
+  .branch-error {
+    color: var(--accent-error);
+    font-size: var(--font-size-small);
+    margin: 0.6em 0 0;
   }
   .link-btn {
     background: transparent;

@@ -26,6 +26,7 @@
     clearNodeSelection,
     clearTreeFilter,
     currentRecipeOverride,
+    edgeLabelCache,
     filterState,
     highlightState,
     loomRegenerateFromUser,
@@ -165,6 +166,15 @@
     if (loomUiState.weightMode === "none") return null;
     const v = node.mean_logprob;
     return typeof v === "number" && Number.isFinite(v) ? v : null;
+  }
+
+  /** Steering-delta label for the edge into ``node`` — read from the
+   *  cache LoomEdge populates.  Rendered as a trailing chip on the node
+   *  (it used to be an absolutely-positioned edge label that overlapped
+   *  the node text). */
+  function steerLabelFor(node: LoomNodeJSON): string | null {
+    if (!node.parent_id) return null;
+    return edgeLabelCache.get(`${node.parent_id}|${node.id}`) ?? null;
   }
 
   /** Logit-pass: per-edge weight is the child's ``mean_logprob``.  The
@@ -964,6 +974,7 @@
             streaming={loomTree.pendingNodeId === row.node.id}
             ring={ringFor(row.node)}
             weightBadge={weightBadgeFor(row.node)}
+            steerLabel={steerLabelFor(row.node)}
             onclick={(ev) => onNodeClick(row.node, ev)}
             oncontextmenu={(ev) => openMenu(ev, row.node.id)}
           />
@@ -1251,7 +1262,7 @@
   }
   .weight-label {
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0;
   }
   .weight-select {
     background: var(--bg-alt);
@@ -1269,7 +1280,7 @@
     gap: 0.5em;
     padding: 0.3em 0.5em;
     border-bottom: 1px solid var(--border-dim);
-    background: rgba(88, 166, 255, 0.08);
+    background: rgba(72, 138, 203, 0.10);
     color: var(--accent-blue);
     font-size: var(--font-size-tiny);
   }
@@ -1304,7 +1315,7 @@
   .title {
     color: var(--accent-green);
     font-weight: bold;
-    letter-spacing: 0.05em;
+    letter-spacing: 0;
     text-transform: lowercase;
     flex: 0 0 auto;
   }
@@ -1414,7 +1425,7 @@
     z-index: var(--z-modal);
     background: var(--bg-alt);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     padding: 0.25em 0;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
     min-width: 180px;
@@ -1469,7 +1480,7 @@
     z-index: calc(var(--z-modal) + 1);
     background: var(--bg-alt);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
     min-width: 420px;
     max-width: min(640px, 90vw);
@@ -1487,7 +1498,7 @@
     border-bottom: 1px solid var(--border-dim);
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .modal-body {
     padding: 1em;

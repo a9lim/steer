@@ -718,7 +718,7 @@
   .title {
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     flex: 0 0 auto;
   }
   .header-controls {
@@ -860,7 +860,7 @@
     color: var(--accent-blue);
     font-size: var(--font-size-tiny);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     display: block;
     margin-bottom: 0.2em;
   }
@@ -930,7 +930,7 @@
   .ss-label {
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     font-size: var(--font-size-tiny);
   }
   .ss-foot {
@@ -953,7 +953,7 @@
   .ss-table thead th {
     color: var(--fg-muted);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0;
     font-weight: normal;
   }
   .ss-table td.ss-num,
@@ -975,7 +975,7 @@
     white-space: nowrap;
   }
   .ss-table tr.anchor td {
-    background: rgba(88, 166, 255, 0.08);
+    background: rgba(72, 138, 203, 0.10);
   }
   .ss-table tr.anchor td.ss-tag {
     color: var(--accent-blue);
@@ -999,7 +999,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .joint-summary {
     color: var(--fg-dim);
@@ -1027,7 +1027,7 @@
     color: var(--fg-muted);
     font-weight: normal;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0;
     background: var(--bg-deep);
   }
   .lp-table td.lp-num,
@@ -1075,7 +1075,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .readings-grid {
     display: flex;

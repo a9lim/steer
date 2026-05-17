@@ -1,40 +1,75 @@
-/* Centralized design tokens.  Imported once from App.svelte (later phase);
- * every panel and drawer reads these custom properties instead of hardcoding
- * the GitHub-dark palette inline.  Swap palette = edit this file. */
+/* Centralized design tokens.
+ *
+ * Visual language is ported from a9l.im's "volcanic glass": obsidian
+ * surfaces, thin HUD glass, a primary magma accent, and a secondary
+ * blue for data/status work.
+ *
+ * Source of truth: a9lim.github.io/shared-tokens.js (the `dark` block
+ * and `extended` palette) plus shared-base.css (motion tokens). The
+ * webui is dark-only, so the values below are the site's dark-mode
+ * resolution hand-mirrored here — when the site palette changes, the
+ * propagation path is: shared-tokens.js dark block → these vars.
+ */
 
 :root {
-  /* Surfaces */
-  --bg: #0d1117;
-  --bg-alt: #161b22;
-  --bg-deep: #010409;
-  --bg-elev: #21262d;
+  --radius: 2px;
 
-  /* Text */
-  --fg: #e6edf3;
-  --fg-strong: #c9d1d9;
-  --fg-dim: #8b949e;
-  --fg-muted: #6e7681;
-  --fg-subtle: #7d8590;
+  /* Surfaces — site dark: canvas / panelSolid / elevated */
+  --bg: #06070b;
+  --bg-alt: #0e0f14;
+  --bg-deep: #030407;
+  --bg-elev: #191a1f;
+  --surface: rgba(14, 15, 20, 0.76);
+  --surface-strong: #191a1f;
+  /* Glass nav surface — site --bg-panel (dark panelSolid @ 0.35), paired
+   * with a backdrop blur the way shared-base.css's `.glass` is. */
+  --bg-panel: rgba(14, 15, 20, 0.35);
+  --grid-line: rgba(244, 245, 249, 0.08);
+  --bg-hover: rgba(244, 245, 249, 0.051); /* site --bg-hover, text @ 0.051 */
 
-  /* Lines */
-  --border: #30363d;
-  --border-dim: #21262d;
+  /* Text — site dark: text / textSecondary / textMuted */
+  --fg: #f4f5f9;
+  --fg-strong: #d8dbe0;
+  --fg-dim: #bfc1c6;
+  --fg-muted: #8f929b;
+  --fg-subtle: #a7aab1;
+  --text-on-accent: #fdfdff; /* white on the magma accent — kept for contrast */
 
-  /* Accents */
-  --accent-green: #7ee787;
-  --accent-blue: #58a6ff;
-  --accent-red: #f85149;
-  --accent-yellow: #d29922;
-  --accent-error: #ff7b72;
-  --accent-purple: #d2a8ff;
+  /* Lines — site dark: border-strong / border, text @ 0.122 / 0.059 */
+  --border: rgba(244, 245, 249, 0.12);
+  --border-dim: rgba(244, 245, 249, 0.06);
+
+  /* Accents — site `accent` / `secondary` / `extended.*` */
+  --accent: #e11107; /* primary magma accent (site --accent) */
+  --accent-light: #e95142;
+  --accent-blue: #488acb;
+  --accent-amber: #ca6800;
+  --accent-green: #009f68;
+  --accent-red: #da534f;
+  --accent-yellow: #998700;
+  --accent-error: #da534f;
+  --accent-purple: #9769dc;
+  --accent-subtle: rgba(225, 17, 7, 0.078); /* site --accent-subtle, accent @ 0.078 */
+  --accent-glow: rgba(225, 17, 7, 0.18); /* site --accent-glow, accent @ 0.18 — focus rings */
+  --secondary-subtle: rgba(72, 138, 203, 0.13);
+  --shadow-hover: 0 2px 4px #00000033, 0 4px 16px #0000003d, 0 8px 32px #00000028;
 
   /* Highlight palette — driven by tokens.ts ``scoreToRgb`` at runtime,
    * but kept here as named handles for future skin overrides. */
   --highlight-pos: #00ff00;
   --highlight-neg: #ff0000;
 
+  /* Motion — ported verbatim from a9l.im/shared-base.css */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-smooth: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --dur-fast: 0.12s;
+  --dur: 0.2s;
+  --dur-slow: 0.3s;
+
   /* Typography */
-  --font-mono: -apple-system, "SF Mono", Menlo, Consolas, monospace;
+  --font-ui: "Recursive", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-mono: "Recursive", "SF Mono", Menlo, Consolas, monospace;
   --font-size-base: 13px;
   --font-size-small: 11px;
   --font-size-tiny: 10px;

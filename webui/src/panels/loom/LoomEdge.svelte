@@ -4,11 +4,7 @@
   // steering-delta label lazily from the server (cached in the store
   // per `parent|child` key) and render it inline.
 
-  import {
-    edgeLabelCache,
-    fetchEdgeLabel,
-    loomTree,
-  } from "../../lib/stores.svelte";
+  import { fetchEdgeLabel, loomTree } from "../../lib/stores.svelte";
 
   interface Props {
     /** Active-path membership — bold the line so the user can trace
@@ -71,6 +67,12 @@
   // gets invalidated, so we need to re-request).  Skip when the
   // caller already passed an explicit ``label`` or when either
   // endpoint is missing.
+  //
+  // The fetched steering-delta label is *rendered by LoomNode* (as a
+  // trailing chip in the node row) — not here.  An absolutely-positioned
+  // label on this 1ch-wide edge column overlapped the node text.  This
+  // component still owns the fetch so the cache stays populated; the
+  // sidebar reads ``edgeLabelCache`` and forwards the label to the node.
   $effect(() => {
     void loomTree.rev;
     if (label !== null) return;
@@ -80,13 +82,6 @@
     const siblings = loomTree.children_of.get(parentId) ?? [];
     if (siblings.length < 2) return;
     fetchEdgeLabel(parentId, childId);
-  });
-
-  const resolvedLabel = $derived.by(() => {
-    if (label !== null) return label;
-    if (!parentId || !childId) return null;
-    const key = `${parentId}|${childId}`;
-    return edgeLabelCache.get(key) ?? null;
   });
 </script>
 
@@ -98,9 +93,6 @@
   aria-hidden="true"
 >
   <span class="line" style={lineStyle}></span>
-  {#if resolvedLabel}
-    <span class="label" title="steering delta">{resolvedLabel}</span>
-  {/if}
 </div>
 
 <style>
@@ -124,15 +116,5 @@
   }
   .edge.dead {
     opacity: 0.3;
-  }
-  .label {
-    position: absolute;
-    left: 1.2ch;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: var(--font-size-tiny);
-    color: var(--accent-yellow);
-    white-space: nowrap;
-    pointer-events: auto;
   }
 </style>

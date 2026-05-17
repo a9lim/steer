@@ -1,20 +1,16 @@
 <script lang="ts">
-  // saklas v1.7 layout shell.  Two-column main (chat / control rack) with
-  // a topbar above and status footer below.  Drawer host slides in from
-  // the right over the rack zone when ``drawerState.open !== null``.
-  //
-  // Wave-3 panels are stubbed with placeholder boxes — the visual frame
-  // is the deliverable here, content swaps in via /panels/*.svelte
-  // imports in later phases.
+  // saklas workbench shell.  The primary frame is a desktop research
+  // cockpit: rail navigation, optional loom tree, central chat/canvas,
+  // right-side inspector, and a wide drawer host for deep tools.
 
   import { onMount } from "svelte";
 
   import Topbar from "./panels/Topbar.svelte";
   import StatusFooter from "./panels/StatusFooter.svelte";
+  import WorkspaceRail from "./panels/WorkspaceRail.svelte";
+  import InspectorPanel from "./panels/InspectorPanel.svelte";
+  import BranchCanvas from "./panels/BranchCanvas.svelte";
   import Chat from "./panels/Chat.svelte";
-  import SamplingStrip from "./panels/SamplingStrip.svelte";
-  import SteeringRack from "./panels/SteeringRack.svelte";
-  import ProbeRack from "./panels/ProbeRack.svelte";
   import LoomSidebar from "./panels/loom/LoomSidebar.svelte";
   import Toaster from "./lib/Toaster.svelte";
 
@@ -36,6 +32,21 @@
     loomRegenerateActive,
     requestLoomModal,
   } from "./lib/stores.svelte";
+
+  import type { DrawerName } from "./lib/types";
+
+  // Content-driven drawer sizing — forms and pickers get a narrow panel,
+  // analysis views keep the wide one (docs/plans/webui-overhaul.md §8).
+  const NARROW_DRAWERS: ReadonlySet<DrawerName> = new Set<DrawerName>([
+    "vector_picker",
+    "probe_picker",
+    "load",
+    "merge",
+    "clone",
+    "system_prompt",
+    "save_conversation",
+    "load_conversation",
+  ]);
 
   type BootStatus = "loading" | "ready" | "failed";
   let bootStatus: BootStatus = $state("loading");
@@ -171,6 +182,10 @@
     <Topbar />
 
     <main class="layout" class:loom-open={loomUiState.sidebarOpen && !loomTree.unavailable}>
+      <section class="rail-zone" aria-label="Workspace navigation">
+        <WorkspaceRail />
+      </section>
+
       {#if loomUiState.sidebarOpen && !loomTree.unavailable}
         <section class="loom-zone" aria-label="Loom sidebar">
           <LoomSidebar />
@@ -178,13 +193,12 @@
       {/if}
 
       <section class="chat-zone" aria-label="Chat">
+        <BranchCanvas />
         <Chat />
-        <SamplingStrip />
       </section>
 
       <section class="rack-zone" aria-label="Control rack">
-        <SteeringRack />
-        <ProbeRack />
+        <InspectorPanel />
       </section>
 
       {#if drawerState.open !== null}
@@ -198,10 +212,12 @@
             if (ev.key === "Enter" || ev.key === " ") closeDrawer();
           }}
         ></div>
-        <aside class="drawer" aria-label="{drawerState.open} drawer">
-          {#if drawerState.open === "extract"}
-            <Drawers.Extract params={drawerState.params} />
-          {:else if drawerState.open === "load"}
+        <aside
+          class="drawer"
+          class:narrow={NARROW_DRAWERS.has(drawerState.open)}
+          aria-label="{drawerState.open} drawer"
+        >
+          {#if drawerState.open === "load"}
             <Drawers.Load params={drawerState.params} />
           {:else if drawerState.open === "vector_picker"}
             <Drawers.VectorPicker params={drawerState.params} />
@@ -233,6 +249,18 @@
             <Drawers.Correlation params={drawerState.params} />
           {:else if drawerState.open === "layer_norms"}
             <Drawers.LayerNorms params={drawerState.params} />
+          {:else if drawerState.open === "experiment_lab"}
+            <Drawers.ExperimentLab params={drawerState.params} />
+          {:else if drawerState.open === "activation_atlas"}
+            <Drawers.ActivationAtlas params={drawerState.params} />
+          {:else if drawerState.open === "recipe_builder"}
+            <Drawers.RecipeBuilder params={drawerState.params} />
+          {:else if drawerState.open === "advanced_sampling"}
+            <Drawers.AdvancedSampling params={drawerState.params} />
+          {:else if drawerState.open === "health"}
+            <Drawers.Health params={drawerState.params} />
+          {:else if drawerState.open === "session_admin"}
+            <Drawers.SessionAdmin params={drawerState.params} />
           {:else if drawerState.open === "node_compare"}
             <Drawers.NodeCompare params={drawerState.params} />
           {:else if drawerState.open === "transcript"}
@@ -279,11 +307,11 @@
   }
   .layout {
     display: grid;
-    grid-template-columns: 55fr 45fr;
+    grid-template-columns: 64px minmax(0, 1fr) minmax(400px, 0.46fr);
     grid-template-rows: 1fr;
     min-height: 0; /* let children scroll inside */
     position: relative; /* drawer sits over rack-zone via absolute pos */
-    background: var(--border);
+    background: var(--grid-line);
     gap: 1px;
     /* Clip the drawer's translateX(100%) entry — without this the
      * offscreen-right starting position extends the page's horizontal
@@ -296,7 +324,12 @@
    * comfortable: 280 + chat + rack still fits ≥ 1000 across the two
    * existing zones. */
   .layout.loom-open {
-    grid-template-columns: 280px 55fr 45fr;
+    grid-template-columns: 64px 310px minmax(0, 1fr) minmax(420px, 0.46fr);
+  }
+  .rail-zone {
+    background: var(--bg-deep);
+    overflow: hidden;
+    min-height: 0;
   }
   .loom-zone {
     background: var(--bg-alt);
@@ -307,12 +340,12 @@
   .rack-zone {
     background: var(--bg);
     overflow: hidden;
-    padding: var(--panel-pad);
     min-height: 0;
   }
   .chat-zone {
     display: flex;
     flex-direction: column;
+    padding: 0.75rem;
   }
   /* Two-row grid: steering rack and probe rack.  Reference views
    * (correlation N×N, per-name layer norms) live in drawer overlays
@@ -320,9 +353,6 @@
    * zone gives both racks the full vertical budget.  Each rack handles
    * its own internal scroll so its actions row stays anchored. */
   .rack-zone {
-    display: grid;
-    grid-template-rows: 1fr 1fr;
-    gap: 0.6em;
     min-height: 0;
     overflow: hidden;
   }
@@ -342,14 +372,19 @@
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(640px, 60%);
+    width: min(980px, 78%);
     background: var(--bg-alt);
     border-left: 1px solid var(--border);
     z-index: calc(var(--z-drawer) + 1);
     display: flex;
     flex-direction: column;
     box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
-    animation: drawer-in 160ms ease-out;
+    animation: drawer-in 200ms var(--ease-out);
+  }
+  /* Forms / pickers — sized to their content rather than the wide
+   * analysis panel. */
+  .drawer.narrow {
+    width: min(480px, 92%);
   }
   @keyframes drawer-in {
     from {
@@ -370,7 +405,7 @@
     color: var(--accent-blue);
     font-size: 0.95em;
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .drawer-close {
     background: transparent;
@@ -429,7 +464,7 @@
   .boot-failed code {
     background: var(--bg-elev);
     padding: 0.1em 0.35em;
-    border-radius: 3px;
+    border-radius: var(--radius);
     color: var(--accent-blue);
   }
   .retry {
@@ -438,10 +473,10 @@
     color: var(--accent-blue);
     border: 1px solid var(--accent-blue);
     padding: 0.4em 1em;
-    border-radius: 3px;
+    border-radius: var(--radius);
     font-size: 0.9em;
   }
   .retry:hover {
-    background: rgba(88, 166, 255, 0.12);
+    background: rgba(72, 138, 203, 0.12);
   }
 </style>

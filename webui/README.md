@@ -1,6 +1,6 @@
 # saklas web UI
 
-Svelte 5 + Vite source tree for the v2.0 interpretability cockpit. The build emits to `../saklas/web/dist/`, which the Python package `saklas.web` mounts at `/` on every `saklas serve` (pass `--no-web` to skip).
+Svelte 5 + Vite source tree for the saklas interpretability cockpit. The build emits to `../saklas/web/dist/`, which the Python package `saklas.web` mounts at `/` on every `saklas serve` (pass `--no-web` to skip).
 
 ## Development
 
@@ -21,38 +21,60 @@ npm run build
 
 Wipes `../saklas/web/dist/` and writes the compiled bundle there. The committed bundle ships in the wheel, so please commit the regenerated bundle alongside any source changes you make. The CI job that would diff the source tree against the committed bundle is stubbed in `.github/workflows/ci.yml` and disabled by default.
 
+## Product shape
+
+This is a desktop research cockpit, not a landing page and not a thin chat wrapper. The first viewport should answer five questions without mode-switching: which branch am I on, what prompt/sampling state will run next, what steering recipe is active, what probes are reading, and where do I open deeper analysis. The fixed shell is:
+
+- far-left workspace rail — a loom-sidebar toggle plus three category icons (vectors / analysis / session) that open fly-out tool lists; this is the single home for the ~19 tool drawers
+- optional loom sidebar for tree navigation and filtering
+- center branch canvas plus chat/token surface — the chat panel header carries a ⋮ menu for the live conversation actions (clear / rewind / transcript / auto-regen) and the input row carries send / stop / regen
+- right inspector with runtime meters, sampling controls, steering rack, and probe rack
+- a thin topbar holding only the brand, session status, and the pending-actions badge
+- drawer overlays for tools that need width or dense tables — sized narrow (~480px) for forms and pickers, wide (~980px) for analysis views
+
+The visual language is ported from a9l.im's "volcanic glass": flat obsidian surfaces, sharp 2px geometry, magma-red primary affordances, blue data/status accents, Recursive-family monospace, and subtle grain. Tokens, motion curves, and the segmented control come from `shared-tokens.js` / `shared-base.css`; dark mode only. Keep the interface information-rich, but keep controls visible and directly operable with the mouse.
+
 ## Layout
 
 ```
 src/
   main.ts                # bootstrap: mounts <App /> via Svelte 5's mount()
-  App.svelte             # shell — topbar / two-column main / status footer / drawer host
+  App.svelte             # shell: topbar / rail / loom / chat-canvas / inspector / footer / drawers
   lib/
     api.ts               # typed REST + WS + SSE clients for /saklas/v1/*
     stores.svelte.ts     # shared state barrel + WS/tree coordination
     stores/              # split slices: drawers, inputHistory, toasts
     types.ts             # every shared interface (DrawerName, ChatTurn, …)
     expression.ts        # parse/serialize the steering-expression grammar
+    concepts.ts          # concept-catalog helpers — category + bipolar poles
     tokens.ts            # per-token highlight RGB mapping (mirrors TUI)
     charts.ts            # bucketize() port of saklas.core.histogram
     charts/              # SVG primitives — Bar, Sparkline, Histogram, HeatmapCell
+    Segmented.svelte     # shared segmented control (animated indicator)
+    Slider.svelte        # shared range slider — one thumb/track everywhere
     style/               # tokens.css (design tokens) + global.css (resets)
   panels/
-    Topbar.svelte                # model · device · clear/rewind/regen · tools · stop
+    Topbar.svelte                # thin strip: brand · session status · pending-actions badge
+    WorkspaceRail.svelte         # left rail: loom toggle + vectors/analysis/session fly-outs
+    BranchCanvas.svelte          # active path + sibling/child lanes + fan/compare actions
+    InspectorPanel.svelte        # runtime meters + sampling + steering/probe racks
     StatusFooter.svelte          # ● gen N/M [bar] · t/s · elapsed · ppl
-    Chat.svelte                  # thinking-collapsible + probe-tinted tokens + auto-regen/pin split
-    SamplingStrip.svelte         # T / P / K / max / seed / thinking
-    SteeringRack.svelte          # vector strips + canonical EXPR + "+ steer"
-    VectorStrip.svelte           # ●/○ enable + α slider + α display + trigger / variant / ⋮ menu / ✕ + inline projection modal
-    ProbeRack.svelte             # highlight + compare-two + sort + "+ probe"
+    Chat.svelte                  # thinking-collapsible + live probe-tinted tokens + ⋮ actions menu + auto-regen/pinned split
+    SamplingStrip.svelte         # T / P / K / max / seed / thinking + segmented apply-mode
+    SteeringRack.svelte          # vector strips + "+ add steering" + canonical expression
+    VectorStrip.svelte           # ●/○ enable + pole-framed α slider + α display + trigger / variant menu / ⋮ menu / ✕ + inline projection modal
+    ProbeRack.svelte             # sort + "+ add probe"
     ProbeStrip.svelte            # ●/○ select (whole-row click) + name + right-aligned sparkline + bar + value + ✕ + per-layer cells
+    loom/                        # LoomSidebar + LoomNode + LoomEdge
   drawers/
-    Extract / Load / Compare / SystemPrompt / ModelInfo / Help / Export
+    Load / Compare / SystemPrompt / ModelInfo / Help / Export
     SaveConversation / LoadConversation
     VectorPicker / ProbePicker
     Pack / Merge / Clone
-    TokenDrilldown / Correlation / LayerNorms
-    _SearchableConceptList.svelte
+    ExperimentLab / ActivationAtlas / RecipeBuilder / AdvancedSampling
+    Health / SessionAdmin / TokenDrilldown / Correlation / LayerNorms
+    NodeCompare / Transcript
+    _SearchableConceptList.svelte  # shared categorized catalog for both pickers
     index.ts             # barrel re-exports for App.svelte's drawer switch
 ```
 
@@ -66,8 +88,9 @@ src/
 ## Adding a drawer
 
 1. New `src/drawers/FooDrawer.svelte`. Take `params: unknown` via `$props()` — the host forwards `drawerState.params`.
-2. Add the name to the `DrawerName` union in `lib/types.ts`.
-3. Add a branch to `App.svelte`'s drawer switch and (optionally) re-export from `drawers/index.ts` to ship through the topbar tools menu.
+2. Add the name to the `DrawerName` union in `lib/types.ts`; add it to `NARROW_DRAWERS` in `App.svelte` if it is a form/picker rather than an analysis view.
+3. Add a branch to `App.svelte`'s drawer switch and re-export from `drawers/index.ts` when the host references it through the barrel.
+4. Decide how users reach it: add it to the matching category in `WorkspaceRail.svelte`'s fly-out lists, or an inline button in the panel that owns the workflow.
 
 ## Reactivity gotcha
 
@@ -86,7 +109,11 @@ The dashboard speaks the existing `/saklas/v1/*` native API:
 * `POST /saklas/v1/sessions/default/experiments/fan` — alpha grid as loom siblings
 * `POST /saklas/v1/sessions/default/vectors/{merge,clone}` — register a derived vector
 * `GET /saklas/v1/packs[/search]`, `POST /saklas/v1/packs` — pack browse + install
-* `WS /saklas/v1/sessions/default/stream` — token + probe co-stream; the `token` event carries optional `per_layer_scores` and the `done` event carries `per_token_probes`
+* `GET /saklas/v1/sessions/default/tree` and `/tree/active` — full loom tree or active path
+* `POST /saklas/v1/sessions/default/tree/{navigate,edit,branch,star,note,reset}` and `DELETE /tree/{node_id}` — loom mutations
+* `GET /saklas/v1/sessions/default/tree/{edge_label,filter}` — branch labels and search/filter support
+* `POST /saklas/v1/sessions/default/tree/{diff,joint_logprobs,transcript,transcript/load}` — compare branches and import/export transcripts
+* `WS /saklas/v1/sessions/default/stream` — token + probe co-stream; the `token` event carries optional `scores` (magnitude-weighted aggregate, drives the live inline highlight) + `per_layer_scores` (per-layer heatmap for the drilldown), and the `done` event carries `per_token_probes`
 * `GET /saklas/v1/sessions/default/traits/stream` — live per-token probe SSE
 
 See `saklas/server/saklas_api.py` for the Python side.

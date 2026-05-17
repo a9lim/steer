@@ -2130,12 +2130,19 @@ async def _ws_handle_generate(
                         {"id": int(a.id), "text": a.text, "logprob": float(a.logprob)}
                         for a in top_alts
                     ]
-                # Per-layer × per-probe heatmap data for the inspector
-                # panel.  Computed inline only when probes are loaded
-                # (covers the cost of N matmul + N CPU syncs against the
-                # latest captured hidden state).  Falls through silently
-                # when no capture exists yet (e.g. extremely short
-                # generations where the hook never fires).
+                # Inline probe scores for the live inspector + chat
+                # highlight.  Computed only when probes are loaded (covers
+                # the cost of N matmul + N CPU syncs against the latest
+                # captured hidden state).  Falls through silently when no
+                # capture exists yet (e.g. extremely short generations
+                # where the hook never fires).
+                #
+                # ``scores`` is the magnitude-weighted aggregate per probe
+                # (same value ``score_single_token`` feeds the TUI's live
+                # highlight) — the webui tints tokens with this so live
+                # highlighting matches the post-generation pass.
+                # ``per_layer_scores`` is the per-layer heatmap the token
+                # drilldown drawer needs.
                 try:
                     monitor = session._monitor
                     if monitor.probe_names:
@@ -2145,6 +2152,11 @@ async def _ws_handle_generate(
                             if bucket
                         }
                         if latest_hidden:
+                            agg = monitor.score_single_token(latest_hidden)
+                            if agg:
+                                event["scores"] = {
+                                    p: round(float(v), 6) for p, v in agg.items()
+                                }
                             per_layer = monitor.score_single_token_per_layer(latest_hidden)
                             if per_layer:
                                 event["per_layer_scores"] = {

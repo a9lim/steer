@@ -17,6 +17,7 @@
     currentSteeringExpression,
     openDrawer,
   } from "../lib/stores.svelte";
+  import { pushToast } from "../lib/stores/toasts.svelte";
   import {
     parseExpression,
     ExpressionParseError,
@@ -51,10 +52,11 @@
         copyTimer = null;
       }, 1200);
     } catch {
-      // Some browsers block clipboard from non-HTTPS / non-gesture; fall
-      // back to a select-all-style affordance via prompt() so the user
-      // can copy manually.
-      window.prompt("Copy expression:", expression);
+      // Some browsers block clipboard from non-HTTPS / non-gesture
+      // contexts — surface an in-app toast rather than a native prompt.
+      pushToast("clipboard blocked — select the expression to copy", {
+        kind: "warning",
+      });
     }
   }
 
@@ -149,35 +151,53 @@
 
 <section class="rack" aria-label="Steering rack">
   <header class="header">
-    <span class="title">STEERING</span>
+    <div class="header-text">
+      <span class="title">STEERING</span>
+      <span class="subtitle">shape the response</span>
+    </div>
     <span class="count" aria-live="polite">
       {count} vector{count === 1 ? "" : "s"}
     </span>
   </header>
 
-  <div class="strips">
-    {#each sortedEntries as [name, entry] (name)}
-      <VectorStrip {name} {entry} />
-    {/each}
+  <div class="strips" class:is-empty={count === 0}>
     {#if count === 0}
-      <div class="empty">no vectors loaded — extract or load one below</div>
+      <div class="empty">
+        <p class="empty-copy">
+          Steering shapes how the model responds.
+          Add a concept to begin.
+        </p>
+        <button
+          type="button"
+          class="add-steering"
+          onclick={() => openDrawer("vector_picker")}
+        >
+          + add steering
+        </button>
+      </div>
+    {:else}
+      {#each sortedEntries as [name, entry] (name)}
+        <VectorStrip {name} {entry} />
+      {/each}
     {/if}
   </div>
 
-  <div class="actions">
-    <button
-      type="button"
-      class="action primary"
-      onclick={() => openDrawer("vector_picker")}
-      title="Pick a concept to steer with — TUI-style /steer"
-    >
-      + steer
-    </button>
-  </div>
+  {#if count > 0}
+    <div class="actions">
+      <button
+        type="button"
+        class="add-steering"
+        onclick={() => openDrawer("vector_picker")}
+        title="Browse the concept catalog or extract a custom vector"
+      >
+        + add steering
+      </button>
+    </div>
+  {/if}
 
   <div class="expression-block">
     <div class="expr-header">
-      <span class="expr-label">expr</span>
+      <span class="expr-label">active steering</span>
       {#if !editing}
         <button
           type="button"
@@ -233,19 +253,21 @@
 </section>
 
 <style>
-  /* Four-row internal grid: header, scrollable strips, actions row,
-   * paste-edit expression block.  The strips row owns the only flexible
-   * track so the actions + expression stay anchored at the bottom even
-   * with 26+ vectors loaded. */
+  /* Fixed chrome + one scrollable middle.  This deliberately uses flex
+   * instead of grid: the generated ``.strips`` element was able to grow
+   * past the rack in some viewport sizes, hiding the apply-vector controls.
+   */
   .rack {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    display: flex;
+    flex-direction: column;
     gap: 0.5em;
     padding: var(--panel-pad);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     background: var(--bg);
+    height: 100%;
     min-height: 0;
+    max-height: 100%;
     overflow: hidden;
   }
 
@@ -257,16 +279,30 @@
     border-bottom: 1px solid var(--border-dim);
     padding-bottom: 0.3em;
   }
+  .header-text {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5em;
+    min-width: 0;
+  }
   .title {
     font-weight: bold;
     color: var(--accent-blue);
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
     font-size: 0.85em;
     text-transform: uppercase;
+  }
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: var(--font-size-small);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .count {
     color: var(--fg-muted);
     font-size: var(--font-size-small);
+    flex: 0 0 auto;
   }
 
   /* Strips own the scroll — overflow at the rack level would push the
@@ -275,52 +311,72 @@
     display: flex;
     flex-direction: column;
     gap: 0.3em;
-    min-height: 0;
+    flex: 1 1 0;
+    min-height: 2.4rem;
+    max-height: 100%;
     overflow-y: auto;
     padding-right: 0.2em;
   }
+  .strips.is-empty {
+    align-items: center;
+    justify-content: center;
+  }
+  /* First-run teaching state — one line of plain copy above the primary
+   * action.  Replaces the bare "no active steering vectors". */
   .empty {
-    color: var(--fg-muted);
-    font-size: 0.85em;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.7em;
+    padding: 1em 0.6em;
     text-align: center;
-    padding: 0.6em 0.4em;
-    border: 1px dashed var(--border-dim);
-    border-radius: 3px;
+  }
+  .empty-copy {
+    margin: 0;
+    color: var(--fg-dim);
+    font-size: 0.9em;
+    line-height: 1.5;
+    max-width: 28ch;
   }
 
   /* Anchored at the bottom of the rack (above the expression block).
    * Border-top mirrors the probe rack's actions row for visual symmetry. */
   .actions {
-    display: flex;
-    gap: 0.4em;
+    flex: 0 0 auto;
     border-top: 1px solid var(--border-dim);
     padding-top: 0.4em;
   }
-  .action {
-    flex: 1 1 100%;
-    background: transparent;
-    color: var(--fg-strong);
-    border: 1px solid var(--border);
-    padding: 0.3em 0.6em;
-    border-radius: 3px;
-    font-size: 0.85em;
-    line-height: 1.3;
+  /* Primary entry point — the one obvious way to add a steering vector. */
+  .add-steering {
+    width: 100%;
+    background: var(--secondary-subtle);
+    color: var(--accent-blue);
+    border: 1px solid var(--accent-blue);
+    min-height: 2.1rem;
+    padding: 0.4em 0.8em;
+    border-radius: var(--radius);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 0.88em;
     cursor: pointer;
+    transition:
+      background var(--dur) var(--ease-out),
+      transform var(--dur-fast) var(--ease-out);
   }
-  .action:hover {
-    background: var(--bg-elev);
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
+  .empty .add-steering {
+    width: auto;
+    min-width: 14em;
   }
-  .action.primary {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
+  .add-steering:hover {
+    background: rgba(72, 138, 203, 0.22);
+    transform: translateY(-1px);
   }
-  .action.primary:hover {
-    background: rgba(88, 166, 255, 0.1);
+  .add-steering:active {
+    transform: translateY(0);
   }
 
   .expression-block {
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 0.3em;
@@ -337,7 +393,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-small);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0;
   }
   .pencil {
     background: transparent;
@@ -362,7 +418,7 @@
     text-align: left;
     background: var(--bg-alt);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.4em 0.6em;
     color: var(--fg-strong);
     font-family: var(--font-mono);
@@ -390,7 +446,7 @@
   .expr-empty {
     background: var(--bg-alt);
     border: 1px dashed var(--border-dim);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.4em 0.6em;
     color: var(--fg-muted);
     font-size: 0.85em;
@@ -405,7 +461,7 @@
     background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--accent-blue);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.4em 0.6em;
     font-family: var(--font-mono);
     font-size: 0.85em;
@@ -445,7 +501,7 @@
     color: var(--accent-error);
     background: rgba(248, 81, 73, 0.08);
     border: 1px solid var(--accent-red);
-    border-radius: 3px;
+    border-radius: var(--radius);
     padding: 0.3em 0.5em;
     font-size: 0.85em;
     font-family: var(--font-mono);

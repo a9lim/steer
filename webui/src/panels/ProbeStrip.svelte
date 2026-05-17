@@ -149,7 +149,7 @@
    * one visual family — same border, radius, background, font-size. */
   .strip {
     border: 1px solid var(--border-dim);
-    border-radius: 3px;
+    border-radius: var(--radius);
     background: var(--bg-alt);
     transition: border-color 0.1s ease;
     font-size: 0.85em;

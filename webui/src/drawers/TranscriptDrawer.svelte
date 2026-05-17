@@ -367,7 +367,7 @@
   .title {
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .tabs {
     display: flex;
@@ -523,6 +523,6 @@
     border-color: var(--accent-blue);
   }
   .btn.primary:hover:not(:disabled) {
-    background: rgba(88, 166, 255, 0.1);
+    background: rgba(72, 138, 203, 0.12);
   }
 </style>

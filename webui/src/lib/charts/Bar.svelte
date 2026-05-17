@@ -1,7 +1,6 @@
 <script lang="ts">
   // Hand-rolled horizontal bar.  Positive = green, negative = red,
-  // mirroring the TUI build_bar shape but in pixel-width SVG (aliased
-  // against the GitHub-dark accent palette in tokens.css).
+  // mirroring the TUI build_bar shape but in pixel-width SVG.
   //
   // ``value`` and ``max`` are unitless; ``width`` is the rendered max
   // width in pixels (defaults to BAR_WIDTH * 6 ≈ the TUI's 24-glyph

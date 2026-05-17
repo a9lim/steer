@@ -178,7 +178,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
   }
   .coord {
     color: var(--fg-dim);

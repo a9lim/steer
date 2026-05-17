@@ -298,7 +298,7 @@
     margin: 0;
     font-size: 1em;
     color: var(--accent-blue);
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     text-transform: lowercase;
   }
   .close {
@@ -333,7 +333,7 @@
     color: var(--fg-dim);
     font-size: var(--font-size-small);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .label em {
     color: var(--fg-muted);
@@ -345,7 +345,7 @@
     background: var(--bg-deep);
     color: var(--fg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     padding: 0.45em 0.6em;
     font-family: var(--font-mono);
     font-size: var(--font-size-base);
@@ -381,7 +381,7 @@
     border: 1px solid var(--border);
     color: var(--fg);
     padding: 0 0.5em;
-    border-radius: 4px;
+    border-radius: var(--radius);
     cursor: pointer;
     font-size: 1em;
   }
@@ -406,7 +406,7 @@
 
   .log {
     border: 1px solid var(--border-dim);
-    border-radius: 4px;
+    border-radius: var(--radius);
     background: var(--bg-deep);
     padding: 0.5em 0.7em;
     max-height: 18em;
@@ -461,7 +461,7 @@
     color: var(--bg-deep);
     border: 1px solid var(--accent-blue);
     padding: 0.35em 1em;
-    border-radius: 3px;
+    border-radius: var(--radius);
     font-family: var(--font-mono);
     font-size: var(--font-size-small);
     cursor: pointer;
@@ -481,7 +481,7 @@
     border: 1px solid var(--border);
     color: var(--fg-dim);
     padding: 0.35em 0.9em;
-    border-radius: 3px;
+    border-radius: var(--radius);
     font-family: var(--font-mono);
     font-size: var(--font-size-small);
     cursor: pointer;

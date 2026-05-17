@@ -543,10 +543,47 @@ function nodeToTurn(n: LoomNodeJSON): ChatTurn {
   return {
     role: n.role,
     text: n.text ?? "",
+    nodeId: n.id,
     appliedSteering: n.applied_steering ?? null,
     aggregateReadings: n.aggregate_readings ?? undefined,
     finishReason: n.finish_reason ?? undefined,
   };
+}
+
+/** Per-node cache of streamed per-token score data.
+ *
+ *  The loom tree (``LoomNodeJSON``) carries no per-token probe scores —
+ *  only aggregate readings.  ``syncChatLogFromTree`` rebuilds
+ *  ``chatLog.turns`` from the tree on every navigation, so without this
+ *  cache the inline highlight tint vanishes the moment you navigate away
+ *  from a branch and back (the rebuilt turn has no ``tokens``).
+ *
+ *  Keyed by node id (ULIDs are unique per node, so a regenerated node
+ *  never collides with a cached predecessor).  Plain Map — it holds the
+ *  same token-array references the turns already use, no reactivity
+ *  needed. */
+const tokenScoreCache = new Map<
+  string,
+  { tokens?: TokenScore[]; thinkingTokens?: TokenScore[] }
+>();
+
+function attachChild(parentId: string | null, childId: string): void {
+  if (parentId === null) return;
+  const siblings = loomTree.children_of.get(parentId) ?? [];
+  if (!siblings.includes(childId)) {
+    loomTree.children_of.set(parentId, [...siblings, childId]);
+  }
+}
+
+function upsertLoomNode(raw: LoomNodeJSON & { children?: string[] }): LoomNodeJSON {
+  const { children: _children, ...node } = raw;
+  loomTree.nodes.set(node.id, node);
+  if (node.parent_id !== null) {
+    attachChild(node.parent_id, node.id);
+  } else {
+    loomTree.root_id = node.id;
+  }
+  return node;
 }
 
 /** Sync ``chatLog.turns`` (and ``chatLog.pendingIndex``) from the tree's
@@ -567,6 +604,21 @@ function syncChatLogFromTree(): void {
     chatLog.pendingIndex = null;
     return;
   }
+  // Harvest per-token score data from the turns we're about to drop, so
+  // navigating away from a branch and back can restore the inline
+  // highlight (the tree itself carries no per-token scores).
+  for (const t of chatLog.turns) {
+    if (
+      t.nodeId &&
+      ((t.tokens?.length ?? 0) > 0 || (t.thinkingTokens?.length ?? 0) > 0)
+    ) {
+      tokenScoreCache.set(t.nodeId, {
+        tokens: t.tokens,
+        thinkingTokens: t.thinkingTokens,
+      });
+    }
+  }
+
   const out: ChatTurn[] = [];
   let pendingIdx: number | null = null;
   for (const nid of path) {
@@ -577,23 +629,51 @@ function syncChatLogFromTree(): void {
     if (node.parent_id === null && node.role === "system" && !node.text) continue;
     // Try to keep the existing turn object if it already represents this
     // node (token-stream preservation for the live target).
-    const prev = chatLog.turns[out.length];
+    const prevByNode = chatLog.turns.find((t) => t.nodeId === nid);
+    const prev = prevByNode ?? chatLog.turns[out.length];
     let turn: ChatTurn;
     if (
       prev &&
       prev.role === node.role &&
-      // Same text or live-stream-of-text on the active in-flight turn.
-      (prev.text === node.text ||
+      (prev.nodeId === nid ||
+        // Same text or live-stream-of-text on the active in-flight turn.
+        prev.text === node.text ||
         (loomTree.pendingNodeId === nid && prev.role === "assistant"))
     ) {
       // Mutate-in-place so the streaming token arrays survive.
-      prev.text = node.text ?? prev.text;
+      prev.nodeId = nid;
+      const nextText = node.text ?? "";
+      if (
+        !(
+          loomTree.pendingNodeId === nid &&
+          prev.role === "assistant" &&
+          nextText === ""
+        )
+      ) {
+        prev.text = nextText;
+      }
       prev.appliedSteering = node.applied_steering ?? prev.appliedSteering ?? null;
       prev.aggregateReadings = node.aggregate_readings ?? prev.aggregateReadings;
       prev.finishReason = node.finish_reason ?? prev.finishReason;
+      // Restore cached per-token scores if this reused turn lost them
+      // (positional fallback from a different node).
+      if ((prev.tokens?.length ?? 0) === 0) {
+        const cached = tokenScoreCache.get(nid);
+        if (cached) {
+          prev.tokens = cached.tokens;
+          prev.thinkingTokens = cached.thinkingTokens;
+        }
+      }
       turn = prev;
     } else {
       turn = nodeToTurn(node);
+      // Re-attach streamed per-token scores cached from a prior visit so
+      // the inline highlight survives branch navigation.
+      const cached = tokenScoreCache.get(nid);
+      if (cached) {
+        turn.tokens = cached.tokens;
+        turn.thinkingTokens = cached.thinkingTokens;
+      }
     }
     if (loomTree.pendingNodeId === nid) pendingIdx = out.length;
     out.push(turn);
@@ -656,18 +736,7 @@ function applyTreeDelta(ev: {
   // (_node_json adds it); strip before storing so the cached node
   // shape stays consistent with the bootstrap fetch.
   for (const raw of ev.added ?? []) {
-    const { children: _children, ...node } = raw as LoomNodeJSON & {
-      children?: string[];
-    };
-    loomTree.nodes.set(node.id, node);
-    if (node.parent_id !== null) {
-      const siblings = loomTree.children_of.get(node.parent_id) ?? [];
-      if (!siblings.includes(node.id)) {
-        loomTree.children_of.set(node.parent_id, [...siblings, node.id]);
-      }
-    } else {
-      loomTree.root_id = node.id;
-    }
+    upsertLoomNode(raw as LoomNodeJSON & { children?: string[] });
   }
   // ``removed``: subtree-drop — caller (server) emits the full list of
   // dropped descendants so we don't need to walk locally.  Defensive
@@ -685,10 +754,7 @@ function applyTreeDelta(ev: {
   }
   // ``updated``: full node replacement.  Same children-strip as added.
   for (const raw of ev.updated ?? []) {
-    const { children: _children, ...node } = raw as LoomNodeJSON & {
-      children?: string[];
-    };
-    loomTree.nodes.set(node.id, node);
+    upsertLoomNode(raw as LoomNodeJSON & { children?: string[] });
   }
   // ``active_node_id`` arrives null whenever the server-side
   // ``LoomMutated`` event leaves it unset (the default for mutations
@@ -749,6 +815,7 @@ function _captureLoomError(op: string, e: unknown): void {
 export async function loomNavigate(node_id: string): Promise<void> {
   try {
     await apiTree.navigate(node_id);
+    await refreshLoomTree();
   } catch (e) {
     _captureLoomError("navigate", e);
   }
@@ -757,6 +824,7 @@ export async function loomNavigate(node_id: string): Promise<void> {
 export async function loomEdit(node_id: string, text: string): Promise<void> {
   try {
     await apiTree.edit(node_id, text);
+    await refreshLoomTree();
   } catch (e) {
     _captureLoomError("edit", e);
   }
@@ -768,6 +836,7 @@ export async function loomBranch(
 ): Promise<string | null> {
   try {
     const r = await apiTree.branch(node_id, text);
+    await refreshLoomTree();
     return r.node_id;
   } catch (e) {
     _captureLoomError("branch", e);
@@ -778,6 +847,7 @@ export async function loomBranch(
 export async function loomDelete(node_id: string): Promise<void> {
   try {
     await apiTree.delete(node_id);
+    await refreshLoomTree();
   } catch (e) {
     _captureLoomError("delete", e);
   }
@@ -786,6 +856,7 @@ export async function loomDelete(node_id: string): Promise<void> {
 export async function loomStar(node_id: string, on: boolean): Promise<void> {
   try {
     await apiTree.star(node_id, on);
+    await refreshLoomTree();
   } catch (e) {
     _captureLoomError("star", e);
   }
@@ -794,6 +865,7 @@ export async function loomStar(node_id: string, on: boolean): Promise<void> {
 export async function loomNote(node_id: string, text: string): Promise<void> {
   try {
     await apiTree.note(node_id, text);
+    await refreshLoomTree();
   } catch (e) {
     _captureLoomError("note", e);
   }
@@ -927,6 +999,12 @@ export interface SamplingState {
   /** ``null`` = use the WS default (no seed sent).  Numeric value pinned. */
   seed: number | null;
   system_prompt: string;
+  /** One per line stop sequences; parsed into SamplingConfig.stop. */
+  stop_sequences: string;
+  /** Raw logit bias map. Accepts JSON {"123": -4} or lines "123: -4". */
+  logit_bias_text: string;
+  presence_penalty: number;
+  frequency_penalty: number;
   /** ``null`` = auto, true/false = explicit override. */
   thinking: boolean | null;
   /** When true, the next generate sends these values as a one-shot
@@ -950,6 +1028,10 @@ export const samplingState: SamplingState = $state({
   max_tokens: 256,
   seed: null,
   system_prompt: "",
+  stop_sequences: "",
+  logit_bias_text: "",
+  presence_penalty: 0,
+  frequency_penalty: 0,
   // Initial thinking state: explicit ``false`` so an unchecked checkbox
   // on first paint actually sends ``thinking: false`` to the server.
   // The previous ``null`` (auto) state silently fell through to whatever
@@ -957,10 +1039,11 @@ export const samplingState: SamplingState = $state({
   // meant the model thought even though the box was visually off.
   thinking: false,
   oneShotOverride: true,
-  // Logit-pass: default off (wire-cost-free for users who don't care).
-  // The SamplingStrip's "alts" toggle flips this between 0 and 8 per
-  // Decision 1 in docs/plans/logit-pass.md.
-  return_top_k: 0,
+  // Logit-pass: top-K alternatives on by default — the drilldown logits
+  // tab and the inline surprise highlight want them.  The SamplingStrip's
+  // "alts" toggle flips this between 0 and 8 (Decision 1 in
+  // docs/plans/logit-pass.md).
+  return_top_k: 8,
 });
 
 export function setSampling<K extends keyof SamplingState>(
@@ -968,6 +1051,72 @@ export function setSampling<K extends keyof SamplingState>(
   value: SamplingState[K],
 ): void {
   samplingState[key] = value;
+}
+
+function parsedStopSequences(): string[] | null {
+  const lines = samplingState.stop_sequences
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines : null;
+}
+
+function parsedLogitBias(): Record<string, number> | null {
+  const raw = samplingState.logit_bias_text.trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        const n = Number(v);
+        if (Number.isFinite(n)) out[String(Number(k))] = n;
+      }
+      return Object.keys(out).length > 0 ? out : null;
+    }
+  } catch {
+    /* fall through to line parser */
+  }
+  const out: Record<string, number> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const m = line.match(/^\s*(-?\d+)\s*[:=,\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (!m) continue;
+    out[String(Number(m[1]))] = Number(m[2]);
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function nonDefaultSamplingOverrides(): Partial<WSSampling> {
+  const stop = parsedStopSequences();
+  const logit_bias = parsedLogitBias();
+  return {
+    ...(stop ? { stop } : {}),
+    ...(logit_bias ? { logit_bias } : {}),
+    ...(samplingState.presence_penalty !== 0
+      ? { presence_penalty: samplingState.presence_penalty }
+      : {}),
+    ...(samplingState.frequency_penalty !== 0
+      ? { frequency_penalty: samplingState.frequency_penalty }
+      : {}),
+    ...(samplingState.return_top_k > 0
+      ? { return_top_k: samplingState.return_top_k }
+      : {}),
+  };
+}
+
+function buildSamplingPayload(): WSSampling | null {
+  const extras = nonDefaultSamplingOverrides();
+  const payload: WSSampling = samplingState.oneShotOverride
+    ? {
+        temperature: samplingState.temperature,
+        top_p: samplingState.top_p,
+        top_k: samplingState.top_k,
+        max_tokens: samplingState.max_tokens,
+        seed: samplingState.seed,
+        ...extras,
+      }
+    : extras;
+  return Object.keys(payload).length > 0 ? payload : null;
 }
 
 // ============================================================ packs ======
@@ -1153,6 +1302,42 @@ function _currentWriteTurn(): ChatTurn | null {
   return null;
 }
 
+/** Bind an in-flight token stream to a concrete loom assistant node.
+ *
+ * The server cannot always include the assistant node id on ``started``:
+ * the node is created inside generation.  ``node_created`` and ``token``
+ * events do carry it, so this reconciles the active path lazily and
+ * ensures the next token has a writable ChatTurn. */
+function adoptStreamingNode(nodeId: string | null | undefined): void {
+  if (!nodeId || abState.processingAb || loomTree.rev <= 0) return;
+  loomTree.pendingNodeId = nodeId;
+  if (!loomTree.nodes.has(nodeId)) {
+    const active = loomTree.active_node_id;
+    const activeNode = active ? loomTree.nodes.get(active) : null;
+    const parentId =
+      activeNode?.role === "user" ? active : (activeNode?.parent_id ?? active ?? null);
+    loomTree.nodes.set(nodeId, {
+      id: nodeId,
+      parent_id: parentId,
+      role: "assistant",
+      text: "",
+    });
+    attachChild(parentId, nodeId);
+  }
+  loomTree.active_node_id = nodeId;
+  recomputeActivePath();
+  syncChatLogFromTree();
+  const idx = chatLog.pendingIndex;
+  if (idx !== null) {
+    const turn = chatLog.turns[idx];
+    if (turn) {
+      turn.nodeId = nodeId;
+      turn.tokens = turn.tokens ?? [];
+      turn.thinkingTokens = turn.thinkingTokens ?? [];
+    }
+  }
+}
+
 /** Default WS message handler — owns the gen-status lifecycle and the
  * live token stream.  External subscribers (panels) layer additional
  * behavior via ``onWsMessage``. */
@@ -1168,17 +1353,17 @@ function handleWsMessage(msg: WSServerMessage): void {
       // Pre-allocate the node so n-way regen render slots exist before
       // token events tagged with this node_id arrive.  The full node
       // body lands via a subsequent ``tree_mutated`` (added) event.
-      if (!loomTree.nodes.has(msg.node_id)) {
-        loomTree.nodes.set(msg.node_id, {
-          id: msg.node_id,
-          parent_id: msg.parent_id,
-          role: msg.role,
-          text: "",
-        });
-        const sibs = loomTree.children_of.get(msg.parent_id) ?? [];
-        if (!sibs.includes(msg.node_id)) {
-          loomTree.children_of.set(msg.parent_id, [...sibs, msg.node_id]);
-        }
+      upsertLoomNode({
+        id: msg.node_id,
+        parent_id: msg.parent_id,
+        role: msg.role,
+        text: loomTree.nodes.get(msg.node_id)?.text ?? "",
+      });
+      if (msg.role === "assistant" && genStatus.active && !abState.processingAb) {
+        adoptStreamingNode(msg.node_id);
+      } else if (loomTree.rev > 0 && loomTree.active_node_id === msg.node_id) {
+        recomputeActivePath();
+        syncChatLogFromTree();
       }
       return;
     }
@@ -1228,6 +1413,14 @@ function handleWsMessage(msg: WSServerMessage): void {
             turn.thinkingTokens = turn.thinkingTokens ?? [];
           }
         }
+      } else if (loomTree.rev > 0) {
+        // Loom path with a lazily-created assistant node: wait for
+        // ``node_created`` or the first tagged ``token`` before allocating
+        // the assistant turn.  Appending a legacy placeholder here creates
+        // a duplicate local assistant and is the source of many branch /
+        // highlight misroutes.
+        chatLog.pendingIndex = null;
+        syncChatLogFromTree();
       } else {
         // Normal (pre-loom) run: append a fresh assistant turn so
         // streamed tokens have a home.
@@ -1240,6 +1433,7 @@ function handleWsMessage(msg: WSServerMessage): void {
       return;
     }
     case "token": {
+      adoptStreamingNode(msg.node_id);
       genStatus.tokensSoFar += 1;
       if (genStatus.startedAt) {
         const elapsed = (performance.now() - genStatus.startedAt) / 1000;
@@ -1250,6 +1444,12 @@ function handleWsMessage(msg: WSServerMessage): void {
         thinking: msg.thinking,
         tokenId: msg.token_id,
         perLayerScores: msg.per_layer_scores,
+        // ``msg.scores`` is the magnitude-weighted aggregate probe row —
+        // the value the TUI tints live tokens with.  Using it (rather
+        // than a single deepest-layer slice) makes the webui's live
+        // highlight match both the TUI and the post-generation projected
+        // pass.  Absent when no probes are loaded.
+        probes: msg.scores,
         // Logit-pass: pipe chosen-token logprob + top-K alternatives onto
         // the per-token row.  Both ride the WS ``token`` event directly
         // from Phase 1's engine capture; absent when ``return_top_k == 0``
@@ -1257,21 +1457,12 @@ function handleWsMessage(msg: WSServerMessage): void {
         logprob: msg.logprob ?? null,
         topAlts: msg.top_alts ?? null,
       };
-      // Pull "best score" from the latest layer's selected probe so
-      // panels rendering a single highlight have something to draw
-      // against immediately.  The canonical projected scores overwrite
-      // these on done.
-      if (msg.per_layer_scores && highlightState.target) {
-        const layers = Object.keys(msg.per_layer_scores);
-        if (layers.length > 0) {
-          const last = layers[layers.length - 1];
-          const score =
-            msg.per_layer_scores[last]?.[highlightState.target];
-          if (typeof score === "number") tokenScore.score = score;
-        }
-        // Cache full per-probe row at the latest layer for tooltip use.
-        const last = layers[layers.length - 1];
-        tokenScore.probes = msg.per_layer_scores[last];
+      // Seed the single-probe ``score`` for the selected highlight so the
+      // inline tint paints immediately as the token streams in.  The
+      // canonical projected scores overwrite this on ``done``.
+      if (msg.scores && highlightState.target) {
+        const s = msg.scores[highlightState.target];
+        if (typeof s === "number") tokenScore.score = s;
       }
       const turn = _currentWriteTurn();
       if (turn) {
@@ -1302,6 +1493,7 @@ function handleWsMessage(msg: WSServerMessage): void {
       return;
     }
     case "done": {
+      adoptStreamingNode(msg.node_id);
       genStatus.active = false;
       genStatus.finishReason = msg.result?.finish_reason ?? "stop";
       const perToken = msg.result?.per_token_probes ?? [];
@@ -1418,6 +1610,7 @@ function handleWsMessage(msg: WSServerMessage): void {
     }
     case "error": {
       genStatus.active = false;
+      adoptStreamingNode(msg.node_id);
       const wasShadow = abState.processingAb;
       // Surface the error inline.  When the steered run errored we don't
       // want to spawn a shadow — clear A/B routing flags so a subsequent
@@ -1478,6 +1671,8 @@ export async function sendGenerate(
   const sock = await ensureWebSocket();
   const steering =
     opts.steering === undefined ? currentSteeringExpression() : opts.steering;
+  const steeringPayload =
+    opts.steering === undefined ? (steering || null) : steering;
   // Build the sampling payload.  ``oneShotOverride`` picks between
   // session-default mode (null payload, server reads its own defaults)
   // and next-message mode (full payload from local state).  Logit-pass:
@@ -1485,18 +1680,7 @@ export async function sendGenerate(
   // toggle works regardless of mode — the server's PATCH endpoint doesn't
   // accept ``return_top_k`` today, so without this branch the toggle
   // would be silently ignored in session-default mode.
-  const sampling: WSSampling | null = samplingState.oneShotOverride
-    ? {
-        temperature: samplingState.temperature,
-        top_p: samplingState.top_p,
-        top_k: samplingState.top_k,
-        max_tokens: samplingState.max_tokens,
-        seed: samplingState.seed,
-        return_top_k: samplingState.return_top_k || null,
-      }
-    : samplingState.return_top_k > 0
-      ? { return_top_k: samplingState.return_top_k }
-      : null;
+  const sampling = buildSamplingPayload();
   // Update genStatus.maxTokens locally so the progress bar widths know
   // their target before the first token lands.
   genStatus.maxTokens = sampling?.max_tokens ?? samplingState.max_tokens;
@@ -1515,7 +1699,7 @@ export async function sendGenerate(
   const payload: WSClientMessage = {
     type: "generate",
     input,
-    steering: steering || null,
+    steering: steeringPayload,
     sampling,
     // Coerce ``null`` (legacy "auto") to explicit ``false`` so the
     // unchecked checkbox really means "no thinking" — the server's
@@ -1638,18 +1822,7 @@ async function _sendShadowGenerate(steeredIdx: number): Promise<void> {
   // ``return_top_k`` opt-in rides shadow / auto-regen runs too (matches
   // the steered turn's wire-shape, keeps logit captures comparable across
   // siblings).
-  const sampling: WSSampling | null = samplingState.oneShotOverride
-    ? {
-        temperature: samplingState.temperature,
-        top_p: samplingState.top_p,
-        top_k: samplingState.top_k,
-        max_tokens: samplingState.max_tokens,
-        seed: samplingState.seed,
-        return_top_k: samplingState.return_top_k || null,
-      }
-    : samplingState.return_top_k > 0
-      ? { return_top_k: samplingState.return_top_k }
-      : null;
+  const sampling = buildSamplingPayload();
   // Mark the WS reception path before the request lands so the
   // ``started`` event routes into the abPair and not a fresh turn.
   abState.pendingTurnIdx = steeredIdx;
@@ -2031,7 +2204,7 @@ export interface LoomUiState {
  *  Persisted in-memory only; collapsed-by-default keeps the first-paint
  *  shape stable for users who don't care about loom. */
 export const loomUiState: LoomUiState = $state({
-  sidebarOpen: false,
+  sidebarOpen: true,
   modalRequest: { seq: 0, kind: null, nodeId: null, text: "", n: 1 },
   weightMode: "none",
   siblingSort: "default",

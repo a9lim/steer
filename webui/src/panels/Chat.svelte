@@ -34,7 +34,14 @@
     inputHistory,
     pushInputHistory,
     navigateInputHistory,
+    clearSessionHistory,
+    rewindSession,
+    enqueuePending,
+    toggleAutoRegen,
+    setAutoRegenMode,
+    setAutoRegenCustom,
   } from "../lib/stores.svelte";
+  import type { AutoRegenMode } from "../lib/stores.svelte";
   import type { ChatTurn, TokenScore } from "../lib/types";
   import {
     scoreToRgb,
@@ -171,6 +178,89 @@
     toggleCompareTwo();
   }
 
+  // -------------------------------------------------- conversation actions --
+  //
+  // clear / rewind / regen / transcript / auto-regen used to live on the
+  // Topbar; they act on the conversation, so they belong here.  The
+  // mutating ones route through ``enqueuePending`` so clicking them mid-
+  // gen queues rather than racing the WS.
+
+  const AUTO_REGEN_MODES: { value: AutoRegenMode; label: string }[] = [
+    { value: "unsteered", label: "unsteered" },
+    { value: "inverted", label: "inverted" },
+    { value: "reseed", label: "reseed" },
+    { value: "cool", label: "cool" },
+    { value: "hot", label: "hot" },
+    { value: "custom", label: "custom…" },
+  ];
+
+  /** Last user input — used by regen to re-issue the message. */
+  function lastUserInput(): string | null {
+    for (let i = chatLog.turns.length - 1; i >= 0; i--) {
+      if (chatLog.turns[i].role === "user") return chatLog.turns[i].text;
+    }
+    return null;
+  }
+
+  /** Rewind one user→assistant pair then re-send the captured input —
+   * without the rewind the new gen lands as an appended duplicate. */
+  async function regen(input: string): Promise<void> {
+    await rewindSession();
+    void sendGenerate(input);
+  }
+
+  function clearChat(): void {
+    actionsMenuOpen = false;
+    if (genStatus.active) {
+      enqueuePending({ label: "clear", apply: () => void clearSessionHistory() });
+    } else {
+      void clearSessionHistory();
+    }
+  }
+
+  function rewindChat(): void {
+    actionsMenuOpen = false;
+    if (genStatus.active) {
+      enqueuePending({ label: "rewind", apply: () => void rewindSession() });
+    } else {
+      void rewindSession();
+    }
+  }
+
+  function regenAction(): void {
+    // Capture the input now — a queued action fires later, by which point
+    // the local log may have shifted.
+    const input = lastUserInput();
+    if (input === null) return;
+    if (genStatus.active) {
+      enqueuePending({ label: "regen", apply: () => void regen(input) });
+    } else {
+      void regen(input);
+    }
+  }
+
+  const canRegen = $derived(lastUserInput() !== null);
+
+  // ----- actions (⋮) menu -----
+
+  let actionsMenuOpen = $state(false);
+  let actionsMenuRef: HTMLDivElement | null = $state(null);
+
+  function onDocClick(ev: MouseEvent): void {
+    if (!actionsMenuOpen) return;
+    if (actionsMenuRef && !actionsMenuRef.contains(ev.target as Node)) {
+      actionsMenuOpen = false;
+    }
+  }
+  function onDocKey(ev: KeyboardEvent): void {
+    if (ev.key === "Escape" && actionsMenuOpen) actionsMenuOpen = false;
+  }
+
+  function openTranscript(): void {
+    actionsMenuOpen = false;
+    openDrawer("transcript");
+  }
+
   // ------------------------------------------------------------- A/B split --
 
   /** v2.3: the standalone A/B toggle is gone.  The right column renders
@@ -207,6 +297,7 @@
         out.push({
           role: node.role,
           text: node.text ?? "",
+          nodeId: node.id,
           appliedSteering: node.applied_steering ?? null,
           aggregateReadings: node.aggregate_readings ?? undefined,
           finishReason: node.finish_reason ?? undefined,
@@ -298,6 +389,12 @@
     autosize();
     scrollToBottom();
     textareaRef?.focus();
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onDocKey);
+    return () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onDocKey);
+    };
   });
 
   // ----------------------------------------------------------- token render --
@@ -307,17 +404,22 @@
    * by routing to ``surpriseScore``; for real probe names, reads
    * ``t.probes`` first and falls back to the cached single-probe
    * ``score`` field (live tokens before done). */
+  function latestLayerScores(
+    t: TokenScore,
+  ): Record<string, number> | undefined {
+    const pls = t.perLayerScores;
+    if (!pls) return undefined;
+    const layers = Object.keys(pls).sort((a, b) => Number(a) - Number(b));
+    const last = layers[layers.length - 1];
+    return last === undefined ? undefined : pls[last];
+  }
+
   function pickScore(t: TokenScore, target: string | null): number | undefined {
     if (!target) return undefined;
     if (target === SURPRISE_TARGET) return surpriseScore(t.logprob);
     if (t.probes && target in t.probes) return t.probes[target];
-    // The store's ``handleWsMessage`` sets ``t.score`` against the
-    // current highlight target, so it's safe to use as a hot-path fall-
-    // back when the per-probe map hasn't been recorded yet.  Only valid
-    // when the cached score matches the selected probe — when the
-    // dropdown switches probes mid-stream, this branch can return a
-    // stale value for the old probe; the rendering converges once
-    // ``done`` lands with the full per-probe map.
+    const latest = latestLayerScores(t);
+    if (latest && target in latest) return latest[target];
     return t.score;
   }
 
@@ -400,6 +502,8 @@
       return probeTip ? `${probeTip}\n${sup}` : sup;
     }
     if (t.probes) return formatScoreTooltip(t.probes);
+    const latest = latestLayerScores(t);
+    if (latest) return formatScoreTooltip(latest);
     if (t.score !== undefined && highlightState.target) {
       return `${highlightState.target} ${
         t.score >= 0 ? "+" : ""
@@ -412,10 +516,18 @@
    * tokens from the head of the response so the gap below ``</think>``
    * goes away in plain-text mode too.  Returns the surviving slice
    * starting at the first non-whitespace token. */
-  function stripLeadingWhitespace(tokens: TokenScore[]): TokenScore[] {
+  interface VisibleToken {
+    tok: TokenScore;
+    originalIdx: number;
+  }
+
+  function visibleResponseTokens(tokens: TokenScore[]): VisibleToken[] {
     let i = 0;
     while (i < tokens.length && !tokens[i].text.trim()) i++;
-    return i === 0 ? tokens : tokens.slice(i);
+    return tokens.slice(i).map((tok, offset) => ({
+      tok,
+      originalIdx: i + offset,
+    }));
   }
 
   function tokenClicked(
@@ -441,8 +553,8 @@
       // unset (extremely early in a stream, or for non-streamed loads).
       return (turn.text ?? "").replace(/^\s+/, "");
     }
-    return stripLeadingWhitespace(turn.tokens)
-      .map((t) => t.text)
+    return visibleResponseTokens(turn.tokens)
+      .map(({ tok }) => tok.text)
       .join("");
   }
 </script>
@@ -504,6 +616,71 @@
       </label>
     {/if}
 
+    <!-- Conversation actions — clear / rewind / transcript / auto-regen
+         collapse into one ⋮ menu so the panel header stays quiet. -->
+    <div class="header-actions" bind:this={actionsMenuRef}>
+      <button
+        type="button"
+        class="kebab"
+        class:on={actionsMenuOpen}
+        aria-haspopup="menu"
+        aria-expanded={actionsMenuOpen}
+        aria-label="Conversation actions"
+        title="Conversation actions"
+        onclick={() => (actionsMenuOpen = !actionsMenuOpen)}
+      >⋮</button>
+      {#if actionsMenuOpen}
+        <div class="actions-menu" role="menu">
+          <button type="button" role="menuitem" onclick={clearChat}>
+            clear chat
+          </button>
+          <button type="button" role="menuitem" onclick={rewindChat}>
+            rewind last turn
+          </button>
+          <button type="button" role="menuitem" onclick={openTranscript}>
+            transcript…
+          </button>
+          <hr />
+          <label class="menu-check">
+            <input
+              type="checkbox"
+              checked={autoRegenState.enabled}
+              onchange={toggleAutoRegen}
+            />
+            <span>auto-regen</span>
+          </label>
+          {#if autoRegenState.enabled}
+            <label class="menu-row">
+              <span>mode</span>
+              <select
+                value={autoRegenState.mode}
+                onchange={(ev) =>
+                  setAutoRegenMode(
+                    (ev.currentTarget as HTMLSelectElement)
+                      .value as AutoRegenMode,
+                  )}
+              >
+                {#each AUTO_REGEN_MODES as opt (opt.value)}
+                  <option value={opt.value}>{opt.label}</option>
+                {/each}
+              </select>
+            </label>
+            {#if autoRegenState.mode === "custom"}
+              <input
+                type="text"
+                class="menu-input"
+                value={autoRegenState.custom}
+                oninput={(ev) =>
+                  setAutoRegenCustom(
+                    (ev.currentTarget as HTMLInputElement).value,
+                  )}
+                placeholder="seed=42, temperature=1.5"
+              />
+            {/if}
+          {/if}
+        </div>
+      {/if}
+    </div>
   </header>
 
   <div
@@ -595,6 +772,13 @@
         disabled={!genStatus.active}
         title="Esc"
       >stop</button>
+      <button
+        type="button"
+        class="regen"
+        onclick={regenAction}
+        disabled={!canRegen}
+        title="Rewind and re-issue the last user message"
+      >regen</button>
     </div>
   </form>
 </div>
@@ -652,18 +836,18 @@
 
       <div class="response-body">
         {#if (turn.tokens?.length ?? 0) > 0}
-          {#each stripLeadingWhitespace(turn.tokens ?? []) as tok, tokenIdx (tokenIdx)}
+          {#each visibleResponseTokens(turn.tokens ?? []) as { tok, originalIdx } (originalIdx)}
             <span
               class="tok"
               class:tinted={highlightState.target !== null}
               style={styleString(tokenStyle(tok))}
               title={tooltipFor(tok)}
-              onclick={(ev) => tokenClicked(turnIdx, tokenIdx, ev, false)}
+              onclick={(ev) => tokenClicked(turnIdx, originalIdx, ev, false)}
               onkeydown={(ev) => {
                 if (ev.key === "Enter" || ev.key === " ") {
                   ev.preventDefault();
                   ev.stopPropagation();
-                  openDrawer("token_drilldown", { turnIdx, tokenIdx });
+                  openDrawer("token_drilldown", { turnIdx, tokenIdx: originalIdx });
                 }
               }}
               role="button"
@@ -714,7 +898,7 @@
   .ctl-label {
     color: var(--fg-muted);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .ctl-select {
     background: var(--bg-alt);
@@ -727,6 +911,121 @@
   .ctl-select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  /* Conversation-actions ⋮ menu — pushed to the right of the header. */
+  .header-actions {
+    position: relative;
+    margin-left: auto;
+  }
+  .kebab {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg-dim);
+    padding: 0.1em 0.5em;
+    font: inherit;
+    font-family: var(--font-mono);
+    line-height: 1.4;
+    cursor: pointer;
+    transition:
+      background var(--dur) var(--ease-out),
+      border-color var(--dur) var(--ease-out),
+      color var(--dur) var(--ease-out);
+  }
+  .kebab:hover,
+  .kebab.on {
+    background: var(--bg-elev);
+    border-color: var(--fg-muted);
+    color: var(--fg-strong);
+  }
+  .actions-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    min-width: 200px;
+    background: var(--surface-strong);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.25em 0;
+    z-index: var(--z-modal);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 0.1em;
+    animation: menu-in var(--dur) var(--ease-out);
+  }
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .actions-menu button[role="menuitem"] {
+    background: transparent;
+    border: 0;
+    text-align: left;
+    padding: 0.4em 0.8em;
+    color: var(--fg-strong);
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+    cursor: pointer;
+    transition: background var(--dur-fast) var(--ease-out);
+  }
+  .actions-menu button[role="menuitem"]:hover {
+    background: var(--bg-elev);
+    color: var(--accent-blue);
+  }
+  .actions-menu hr {
+    border: 0;
+    border-top: 1px solid var(--border-dim);
+    margin: 0.2em 0;
+  }
+  .menu-check,
+  .menu-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.35em 0.8em;
+    color: var(--fg-dim);
+    font-size: var(--font-size-small);
+  }
+  .menu-check {
+    cursor: pointer;
+  }
+  .menu-check input {
+    accent-color: var(--accent-blue);
+  }
+  .menu-row select {
+    flex: 1 1 auto;
+    background: var(--bg-alt);
+    color: var(--fg-strong);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.1em 0.35em;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+  }
+  .menu-input {
+    margin: 0 0.8em 0.4em;
+    background: var(--bg-deep);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.25em 0.45em;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-small);
+  }
+  .menu-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
   }
 
   .log {
@@ -764,14 +1063,14 @@
     padding: 0.3em 0.5em;
     background: rgba(167, 139, 250, 0.10);
     border: 1px solid var(--accent-purple);
-    border-radius: 3px;
+    border-radius: var(--radius);
     color: var(--accent-purple);
     font-size: var(--font-size-tiny);
     margin-bottom: 0.4em;
   }
   .pin-tag {
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .pin-id {
     color: var(--accent-yellow);
@@ -808,7 +1107,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: lowercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
   }
   .msg.user {
     border-left-color: var(--accent-blue);
@@ -959,6 +1258,9 @@
   }
   .input-actions .stop {
     color: var(--accent-red);
+  }
+  .input-actions .regen {
+    color: var(--accent-blue);
   }
   .input-actions .stateless {
     color: var(--fg-dim);

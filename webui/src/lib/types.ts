@@ -78,6 +78,10 @@ export interface ExtractRequest {
    * or a {pairs: [{positive, negative}, ...]} bundle. */
   source?: unknown;
   baseline?: string | null;
+  method?: "dim" | "pca" | null;
+  dls?: boolean | null;
+  sae?: string | null;
+  sae_revision?: string | null;
   register?: boolean;
 }
 
@@ -258,6 +262,7 @@ export interface WSSampling {
   max_tokens?: number | null;
   seed?: number | null;
   stop?: string[] | null;
+  logit_bias?: Record<string, number> | null;
   presence_penalty?: number;
   frequency_penalty?: number;
   /** Logit-pass: opt in to top-K alternatives + chosen-token logprob on
@@ -299,7 +304,7 @@ export interface WSStartedEvent {
   generation_id: string;
   /** Loom: node id receiving this gen's tokens.  Optional for backward
    * compat with the pre-phase-2 single-path server. */
-  node_id?: string;
+  node_id?: string | null;
 }
 
 /** Logit-pass (v2.3): one alternative the model considered at this
@@ -318,8 +323,14 @@ export interface WSTokenEvent {
   text: string;
   thinking: boolean;
   token_id: number | null;
+  /** Magnitude-weighted aggregate probe score per probe, populated only
+   * when probes are loaded.  Same value the TUI tints live tokens with;
+   * the webui's inline highlight reads this so live highlighting matches
+   * the post-generation pass. */
+  scores?: Record<string, number>;
   /** Per-layer × per-probe map populated only when probes are loaded.
-   * Keys: layer-index strings → probe names → cosine-sim score. */
+   * Keys: layer-index strings → probe names → cosine-sim score.  Drives
+   * the token drilldown heatmap, not the inline tint. */
   per_layer_scores?: Record<string, Record<string, number>>;
   /** Logit-pass: chosen-token logprob under the post-sampler distribution.
    *  Populated whenever the engine's log_softmax ran (any ``on_token``
@@ -333,7 +344,7 @@ export interface WSTokenEvent {
   top_alts?: TokenAltJSON[] | null;
   /** Loom: node id this token belongs to.  Routes the token to the right
    * sibling render during n-way regen.  Optional. */
-  node_id?: string;
+  node_id?: string | null;
 }
 
 export interface WSDoneResultPerToken {
@@ -361,7 +372,7 @@ export interface WSDoneEvent {
   type: "done";
   result: WSDoneResult;
   /** Loom: node id this gen finalised. */
-  node_id?: string;
+  node_id?: string | null;
 }
 
 export interface WSErrorEvent {
@@ -579,7 +590,7 @@ export interface WSTreeMutatedEvent {
 export interface WSNodeCreatedEvent {
   type: "node_created";
   node_id: string;
-  parent_id: string;
+  parent_id: string | null;
   role: "user" | "assistant" | "system";
   rev: number;
 }
@@ -623,6 +634,8 @@ export interface TokenScore {
 export interface ChatTurn {
   role: "user" | "assistant" | "system";
   text: string;
+  /** Loom node backing this turn, when the server tree is active. */
+  nodeId?: string | null;
   /** True iff any thinking content was emitted. */
   thinking?: boolean;
   /** Visible response tokens with score data. */
@@ -726,7 +739,6 @@ export interface PendingAction {
 // ----------------------------------------------------- drawers --
 
 export type DrawerName =
-  | "extract"
   | "load"
   | "vector_picker"
   | "probe_picker"
@@ -741,6 +753,12 @@ export type DrawerName =
   | "token_drilldown"
   | "correlation"
   | "layer_norms"
+  | "experiment_lab"
+  | "activation_atlas"
+  | "recipe_builder"
+  | "advanced_sampling"
+  | "health"
+  | "session_admin"
   | "export"
   | "help"
   /** Cross-branch diff drawer — phase 5.  ``params`` carries the

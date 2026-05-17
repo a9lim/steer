@@ -173,7 +173,7 @@ variant  := raw | sae | sae-<release>
   .title {
     color: var(--accent-blue);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .close {
     background: transparent;
@@ -199,7 +199,7 @@ variant  := raw | sae | sae-<release>
     color: var(--accent-green);
     font-size: var(--font-size-base);
     text-transform: lowercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
   }
   .kb {
     border-collapse: collapse;
@@ -274,6 +274,6 @@ variant  := raw | sae | sae-<release>
     border-color: var(--accent-blue);
   }
   .btn.primary:hover {
-    background: rgba(88, 166, 255, 0.1);
+    background: rgba(72, 138, 203, 0.12);
   }
 </style>

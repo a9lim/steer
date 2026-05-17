@@ -24,15 +24,15 @@ The Svelte 5 + Vite source lives at the repo's `webui/` directory (peer of `sakl
 
 ## What the dashboard is
 
-v2.0 reframed the dashboard from "chat with diagnostics on the side" to a mouse-first interpretability cockpit. Three concerns must be answerable at any moment without leaving the main view: what am I telling the model (input + system prompt + sampling), how am I steering it (vector rack), what is it doing internally (probe rack + per-token tinting + correlation + layer norms + ppl).
+The dashboard is a mouse-first interpretability cockpit. Four concerns must be answerable at any moment without leaving the main view: what conversation branch am I on (loom sidebar + branch canvas), what am I telling the model (input + system prompt + sampling), how am I steering it (steering rack + recipe builder), and what is it doing internally (probe rack + per-token tinting + activation atlas + correlation + layer norms + ppl).
 
-Per-token highlighting now lives on the chat tokens themselves, driven by a single highlight-probe dropdown with an optional two-stripe compare-two mode. The v1.6 always-on per-token × per-layer × per-probe heatmap is gone; the deep drilldown is opt-in via clicking a single token (`token_drilldown` drawer).
+Per-token highlighting lives on the chat tokens themselves, driven by a single highlight-probe dropdown in the chat header with an optional two-stripe compare-two mode. It tints **live** as tokens stream — the WS `token` event's `scores` aggregate feeds the same `scoreToRgb` ramp the post-generation pass uses, so streaming and finalized tints match (and match the TUI). The v1.6 always-on per-token × per-layer × per-probe heatmap is gone; the deep drilldown is opt-in via clicking a single token (`token_drilldown` drawer).
 
 ## Wire protocol
 
-The dashboard speaks the existing `/saklas/v1/*` native API plus six routes added in v2.0:
+The dashboard speaks the existing `/saklas/v1/*` native API plus web-focused routes:
 
-1. **WS `/saklas/v1/sessions/{id}/stream`** — token + probe co-stream. The `token` event carries optional `per_layer_scores` (`dict[str, dict[str, float]]`, string-keyed) when probes are loaded; `done` carries `per_token_probes` assembled from `session._last_per_token_scores`. Drives chat tinting + click-token drilldown.
+1. **WS `/saklas/v1/sessions/{id}/stream`** — token + probe co-stream. When probes are loaded the `token` event carries `scores` (`dict[str, float]` — the magnitude-weighted `score_single_token` aggregate, the same value the TUI tints live tokens with; the webui's inline highlight reads this so live highlighting matches the post-generation pass) and `per_layer_scores` (`dict[str, dict[str, float]]`, string-keyed — the per-layer heatmap the token drilldown drawer consumes). `done` carries `per_token_probes` assembled from `session._last_per_token_scores`. Drives chat tinting + click-token drilldown.
 2. **GET `/saklas/v1/sessions/{id}/correlation[?names=…]`** — N×N magnitude-weighted cosine matrix. Default pool unions registered steering vectors AND active probes (deduplicated by name). Drives the correlation drawer overlay.
 3. **GET `/saklas/v1/sessions/{id}/vectors/{name}/diagnostics`** — 16-bucket layer-magnitude histogram + per-layer magnitudes + (optional) probe-quality metrics. Falls back to `session._monitor.profiles` when the name is a probe rather than a registered steering vector. Drives the layer-norms drawer overlay (and `saklas vector why` from the CLI).
 4. **GET `/saklas/v1/packs`** — locally installed packs, JSON shape. Drives the vector picker and probe picker.
@@ -41,6 +41,7 @@ The dashboard speaks the existing `/saklas/v1/*` native API plus six routes adde
 7. **POST `/saklas/v1/sessions/{id}/vectors/merge`** — register a merged-expression vector.
 8. **POST `/saklas/v1/sessions/{id}/vectors/clone`** — corpus-based clone, SSE progress branch on `Accept: text/event-stream`.
 9. **POST `/saklas/v1/sessions/{id}/experiments/fan`** — alpha grid as loom siblings, JSON `RunSet` summary.
+10. **Loom tree routes under `/saklas/v1/sessions/{id}/tree`** — full tree + active path GETs, navigate/edit/branch/delete/star/note/reset mutations, `edge_label`, `filter`, `diff`, `joint_logprobs`, and transcript export/import. These power the sidebar, branch canvas, node compare drawer, transcript drawer, and experiment fan navigation.
 
 `traits/stream` remains the live per-token probe SSE. The old alpha-grid `/sweep` SSE route is gone.
 
@@ -49,32 +50,40 @@ The dashboard speaks the existing `/saklas/v1/*` native API plus six routes adde
 ```
 webui/src/
   main.ts                     # bootstrap: mounts <App /> via Svelte 5 mount()
-  App.svelte                  # shell — topbar / two-column main / status footer / drawer host
+  App.svelte                  # shell: topbar / rail / loom / branch canvas + chat / inspector / footer / drawers; NARROW_DRAWERS size class
   lib/
     api.ts                    # typed REST + WS + SSE clients
     stores.svelte.ts          # Svelte 5 runes-based shared state barrel + cross-cutting WS/tree state
     stores/                   # split independent slices: drawers, inputHistory, toasts
     types.ts                  # every shared interface
     expression.ts             # parse/serialize the steering grammar
+    concepts.ts               # concept-catalog helpers — category + bipolar poles + recommended α
     tokens.ts                 # HIGHLIGHT_SAT + scoreToRgb + twoStripeStyle
     charts.ts                 # bucketize() port of saklas.core.histogram
     charts/{Bar,Sparkline,Histogram,HeatmapCell}.svelte
+    Segmented.svelte          # shared segmented control (animated indicator bar)
+    Slider.svelte             # shared range slider — one thumb/track across the webui
     style/{tokens.css,global.css}
   panels/
-    Topbar.svelte             # model + device + clear/rewind/regen + tools menu + stop
+    Topbar.svelte             # thin strip: brand + session status + pending-actions badge
+    WorkspaceRail.svelte      # left rail: loom toggle + vectors/analysis/session category fly-outs
+    BranchCanvas.svelte       # active path + sibling/child lanes + fan/compare controls
+    InspectorPanel.svelte     # runtime meters + sampling + steering/probe racks
     StatusFooter.svelte       # ● gen N/M [bar] · t/s · elapsed · ppl
-    Chat.svelte               # thinking-collapsible, probe-tinted tokens, auto-regen / pin split
-    SamplingStrip.svelte      # T / P / K / max / seed / thinking / session-vs-one-shot
-    SteeringRack.svelte       # one strip per loaded vector + canonical EXPR + "+ steer"
-    VectorStrip.svelte        # ●/○ enable + α slider + α display + trigger pill + variant chip + ⋮ menu + ✕ + inline projection modal
-    ProbeRack.svelte          # highlight + compare-two dropdowns + sort + "+ probe"
+    Chat.svelte               # thinking-collapsible, live probe-tinted tokens, ⋮ actions menu, auto-regen / pin split
+    SamplingStrip.svelte      # T / P / K / max / seed / thinking + segmented apply-mode
+    SteeringRack.svelte       # one strip per loaded vector + "+ add steering" + canonical expression
+    VectorStrip.svelte        # ●/○ enable + pole-framed α slider + α display + trigger word + variant menu + ⋮ menu + ✕ + inline projection modal
+    ProbeRack.svelte          # header subtitle + sort + "+ add probe"
     ProbeStrip.svelte         # ●/○ select-for-highlight (whole-row click target) + name + right-aligned sparkline + value bar + α display + ✕ + always-visible per-layer reading strip
+    loom/{LoomSidebar,LoomNode,LoomEdge}.svelte
   drawers/
-    {Extract,Load,SaveConversation,LoadConversation,Compare,
+    {Load,SaveConversation,LoadConversation,Compare,
      SystemPrompt,ModelInfo,Help,Export,Pack,Merge,Clone,
-     VectorPicker,ProbePicker,TokenDrilldown,
-     Correlation,LayerNorms,NodeCompare,Transcript}Drawer.svelte
-    _SearchableConceptList.svelte  # shared between picker drawers
+     VectorPicker,ProbePicker,TokenDrilldown,ExperimentLab,
+     ActivationAtlas,RecipeBuilder,AdvancedSampling,Health,
+     SessionAdmin,Correlation,LayerNorms,NodeCompare,Transcript}Drawer.svelte
+    _SearchableConceptList.svelte  # shared categorized catalog for both picker drawers
     index.ts                  # barrel re-exports for App.svelte's switch
 ```
 
@@ -83,7 +92,7 @@ TUI `/sweep` alias, and the server `/sweep` SSE route are gone. Alpha
 grids now land as loom siblings through `/fan` in the TUI and
 `POST /experiments/fan` on the native API.
 
-Adding a panel: write the .svelte file, wire new state into the smallest matching module under `lib/stores/` (or `stores.svelte.ts` only for cross-cutting WS/tree/chat state), mount from App.svelte's grid, `npm run build`, commit the regenerated `saklas/web/dist/`. Adding a drawer: write the .svelte file under `drawers/`, add the name to the `DrawerName` union in `lib/types.ts`, add a branch to App.svelte's drawer switch, re-export from `drawers/index.ts` if it should ship in the topbar tools menu.
+Adding a panel: write the .svelte file, wire new state into the smallest matching module under `lib/stores/` (or `stores.svelte.ts` only for cross-cutting WS/tree/chat state), mount from App.svelte's grid, `npm run build`, commit the regenerated `saklas/web/dist/`. Adding a drawer: write the .svelte file under `drawers/`, add the name to the `DrawerName` union in `lib/types.ts` (and to `NARROW_DRAWERS` in App.svelte for forms/pickers), add a branch to App.svelte's drawer switch, re-export from `drawers/index.ts`, and add it to the matching category fly-out list in `WorkspaceRail.svelte` so users can reach it.
 
 ## Reactivity gotcha
 
@@ -93,17 +102,21 @@ Svelte 5's `$state` does NOT track plain `Map.set` / `Set.add` / inner-object pr
 
 ## Persistence
 
-`chatLog.turns` and `highlightState` (target / compareTarget / compareTwo) persist to `localStorage` under `saklas.chat.v2.<model_id>` (v2 is the loom-tree shape; v1 single-branch logs auto-migrate via `hydrateV1ChatAsLinearTree`). Saves debounced via `$effect.root` ~250 ms after mutations so token streams don't beat the disk. Restored after `refreshSession()` in `bootstrap` so the storage key resolves.
+The server loom tree is authoritative. The browser keeps a first-paint cache of the latest `LoomTreeJSON` plus `highlightState` (target / compareTarget / compareTwo) in `localStorage` under `saklas.chat.v2.<model_id>`; v1 flat `ChatTurn[]` logs auto-migrate via `hydrateV1ChatAsLinearTree`. Saves are debounced via `$effect.root` ~250 ms after mutations so token streams don't beat the disk. Restored after `refreshSession()` in `bootstrap` so the storage key resolves, then reconciled against the server tree.
 
 **Size budget toast.** `schedulePersist` measures `JSON.stringify(payload).length` against `_LOCALSTORAGE_SOFT_BUDGET = 5 MB` per Decision 18 in `docs/plans/loom.md`. Above the threshold, `pushToast` fires a once-per-session advisory suggesting transcript export + tree clear. Write isn't hard-stopped; `_sizeWarned` guards against re-firing on every subsequent save. `Toaster.svelte` is the host (bottom-right, TTL-dismissed), mounted alongside `StatusFooter` in `App.svelte`.
 
-Server-restart guard: if the persisted snapshot has user turns but the fresh session reports `history_length === 0`, drop the snapshot. Replaying would lie about generation context (next gen would see empty server-side history).
+The old server-restart guard is gone. v2 cache hydration is only a temporary first-paint path; `refreshLoomTree()` overwrites it with the server state once the native tree endpoint responds.
 
 `pendingIndex` is force-cleared on restore so an in-flight turn from a killed tab doesn't ghost the UI.
 
 ## Steering / probe pickers
 
-The picker drawers (`VectorPickerDrawer`, `ProbePickerDrawer`) mirror the TUI's `/steer 0.5 honest` ergonomics: the user picks a concept name from `GET /packs`, the server's extract endpoint short-circuits to the cached profile when the model already has it, the rack lands. `addVectorToRack` defaults α to 0.5 (matches `DEFAULT_COEFF` in `saklas.core.steering_expr`). The picker's footer keeps the advanced affordances — extract from pos/neg, load from disk path.
+`SteeringRack.svelte`'s one entry point is the primary `+ add steering` button (and the empty-state copy above it on first run); it opens `VectorPickerDrawer`. The old quick text field is gone — the expression block's `✎ edit` affordance is the expert paste-edit path.
+
+`VectorPickerDrawer` is a categorized menu: `_SearchableConceptList.svelte` groups `GET /packs` rows into the seven fixed categories (`concepts.ts::categoryOf` matches a category-valued tag; misses land in "other"), and each row is framed as its bipolar axis — negative pole, an interactive `Slider`, positive pole, an α readout — so the user sets the strength *before* clicking `add`. Monopolar concepts (`agentic`, `manipulative`) render one pole and a `0…+1` slider. `concepts.ts::polesOf` splits the canonical name on `BIPOLAR_SEP`; `recommendedAlpha` reads the pack's `recommended_alpha` (default 0.5). Custom extraction is inlined as the drawer's last section — the same SSE `/extract` flow; a search query that matches no catalog row seeds the custom `name` field. `ProbePickerDrawer` reuses the shared list with `showStrength={false}` (a probe observes, it has no steering strength). The drawer's footer keeps `load from disk`.
+
+The picker mirrors the TUI's `/steer 0.5 honest` ergonomics: the server's extract endpoint short-circuits to the cached profile when the model already has it, then `addVectorToRack` lands it at the row's α. Standalone `ExtractDrawer` is retired — the form inlines into the picker.
 
 ## Click semantics
 
@@ -119,7 +132,7 @@ Shell-style history on the chat textarea. Every line submitted via `doSend` land
 
 ## Auto-regen (replaces A/B in v2.3)
 
-The standalone A/B button is gone — Decision 13's "Ctrl+A toggles auto-regen" landed end-to-end. `Topbar.svelte`'s auto-regen toggle is the canonical entry, with a ⚙ popover for mode selection (`unsteered` / `inverted` / `reseed` / `cool` / `hot` / `custom: <partial recipe>`). `mode="unsteered"` is bit-identical to the old A/B flow.
+The standalone A/B button is gone — Decision 13's "Ctrl+A toggles auto-regen" landed end-to-end. The auto-regen toggle + mode picker (`unsteered` / `inverted` / `reseed` / `cool` / `hot` / `custom: <partial recipe>`) live in `Chat.svelte`'s ⋮ actions menu (the webui overhaul moved the conversation actions off the topbar). `mode="unsteered"` is bit-identical to the old A/B flow.
 
 `Chat.svelte`'s `twoColumns` derived OR-folds `pinnedActive || autoRegenActive` — pin generalizes the right column and auto-regen drives it when nothing is pinned. The WS `done` handler in `stores.svelte.ts` branches by mode: `unsteered` → `_sendShadowGenerate(steeredIdx)` (legacy shadow path, untouched); any other override → `loomRegenerateActive(mode)` + auto-pin to the new sibling. `toggleAutoRegen` retroactively fires a shadow for the most recent assistant turn when flipped on with `mode === "unsteered"` (mirrors the old A/B retroactive fire).
 
@@ -156,10 +169,10 @@ Esc inside the sidebar defocuses the active element (search input / context menu
 
 `drawers/NodeCompareDrawer.svelte` renders per-token spans by iterating `diff.per_token` directly — each entry carries `{a_text, b_text, a_index, b_index, reading_deltas}` from the server's real model tokenization, so reading-delta tooltips and cross-pane hover highlight (`hoveredAnchorIdx` ↔ `aligned?.a_index`) align exactly with token boundaries. The earlier word-split-via-`/(\s+)/` shape mis-indexed alignment maps; the whitespace split is retained only as a fallback for nodes loaded without tokens (transcripts). Multi-select renders N columns with per-pair diffs; cross-pane highlight is gated `diffIdx === 0` (B-vs-A only) since N>2 pairings don't fit one hover target.
 
-## Out of scope (v2.0)
+## Out of scope (current)
 
-- Multi-session UI (server URL-paths support it; the client assumes `default`).
-- Auth UI for `SAKLAS_API_KEY` — the underlying Bearer middleware applies; no dedicated UI surface.
+- True multi-session switching (server URL-paths support it; the client still assumes `default`). `SessionAdminDrawer` can inspect the collection and set an in-memory bearer key, but it is not a full session router.
+- Persistent credential management. The session/auth drawer keeps a bearer key only in memory for the current page session; it deliberately does not write API keys to `localStorage`.
 - Mobile / touch-first responsive layout. Saklas is a desktop research tool; min-width 1280px.
 - Combobox autocomplete on the projection-target picker — the modal takes a free-form name; no live name-completion against the loaded-vector list.
 - Pagination on HF pack search (capped at 20 results).

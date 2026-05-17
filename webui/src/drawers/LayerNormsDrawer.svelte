@@ -210,7 +210,7 @@
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
   }
   .coord {
     color: var(--fg-dim);
@@ -264,7 +264,7 @@
   .stoplight {
     font-size: var(--font-size-tiny);
     text-transform: lowercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
     padding: 0.1em 0.5em;
     border: 1px solid var(--border);
     border-radius: 2px;
