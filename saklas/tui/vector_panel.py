@@ -57,7 +57,7 @@ class LeftPanel(Widget):
                       id="vectors-header", classes="section-header")
         yield VerticalScroll(Static("", id="vector-content"), id="vector-scroll")
         yield Static(
-            "[dim]⌫ remove · ↩ toggle · ←/→ alpha[/]",
+            "[dim]⌫ remove · ↩ toggle · ←/→ alpha · ⇧←/→ coarse[/]",
             id="vector-hints",
         )
         # Generation section
@@ -68,6 +68,9 @@ class LeftPanel(Widget):
         yield Static(
             "[dim]⇥ focus panels · ⎋ stop gen\n"
             "⌃R regen · ⌃A A/B · ⌃T think\n"
+            "⌃Y highlight · ⌃L loom\n"
+            "⌃B branch · ⌃N nav · ⌃D delete\n"
+            "/fan grid · /diff compare · /prune filter\n"
             "⌃Q quit\n"
             "── ⇥ to side panel first ──\n"
             "↑/↓ navigate\n"
