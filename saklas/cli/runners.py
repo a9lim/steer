@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
-from saklas.cli.parsers import _PACK_VERBS, _VECTOR_VERBS
+from saklas.cli.parsers import _EXPERIMENT_VERBS, _PACK_VERBS, _VECTOR_VERBS
 from saklas.core.errors import SaklasError
 
 if TYPE_CHECKING:
@@ -1447,23 +1447,97 @@ def _run_vector(args: argparse.Namespace) -> None:
 
 
 @_saklas_error_exit
-def _run_transcript(args: argparse.Namespace) -> None:
-    """Dispatch ``saklas transcript <verb>``.
+def _run_experiment(args: argparse.Namespace) -> None:
+    """Dispatch ``saklas experiment <verb>``."""
+    cmd = getattr(args, "experiment_cmd", None)
+    if cmd is None:
+        print("usage: saklas experiment <verb> [...]")
+        print()
+        width = max(len(v) for v, _ in _EXPERIMENT_VERBS)
+        for v, desc in _EXPERIMENT_VERBS:
+            print(f"  {v:<{width}}  {desc}")
+        sys.exit(0)
+    if cmd == "fan":
+        _run_experiment_fan(args)
+        return
+    if cmd == "transcript":
+        _run_experiment_transcript(args)
+        return
+    print(f"unknown experiment verb {cmd!r}", file=sys.stderr)
+    sys.exit(2)
 
-    Phase 5 ships ``run`` only — ``saklas transcript run <path>`` loads
-    the YAML, replays each user turn, and reports readings deltas.
-    """
+
+def _run_experiment_transcript(args: argparse.Namespace) -> None:
+    """Dispatch ``saklas experiment transcript <verb>``."""
     cmd = getattr(args, "transcript_cmd", None)
     if cmd is None:
-        print("usage: saklas transcript <verb> [...]")
+        print("usage: saklas experiment transcript <verb> [...]")
         print()
         print("  run  Replay a transcript on the current session")
         sys.exit(0)
     if cmd == "run":
         _run_transcript_run(args)
         return
-    print(f"unknown transcript verb {cmd!r}", file=sys.stderr)
+    print(f"unknown experiment transcript verb {cmd!r}", file=sys.stderr)
     sys.exit(2)
+
+
+def _parse_grid_terms(raw_terms: list[str]) -> dict[str, list[float]]:
+    from saklas.tui.loom_helpers import AlphaListError, parse_alpha_list
+
+    grid: dict[str, list[float]] = {}
+    for raw in raw_terms:
+        if "=" not in raw:
+            print(
+                f"experiment fan: grid term must be CONCEPT=ALPHAS, got {raw!r}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        name, alpha_text = raw.split("=", 1)
+        name = name.strip()
+        if not name:
+            print("experiment fan: grid concept cannot be empty", file=sys.stderr)
+            sys.exit(2)
+        try:
+            alphas = parse_alpha_list(alpha_text)
+        except AlphaListError as e:
+            print(f"experiment fan: {name}: {e}", file=sys.stderr)
+            sys.exit(2)
+        if not alphas:
+            print(f"experiment fan: {name}: alpha list is empty", file=sys.stderr)
+            sys.exit(2)
+        grid[name] = [float(a) for a in alphas]
+    return grid
+
+
+def _run_experiment_fan(args: argparse.Namespace) -> None:
+    import json as _json
+
+    _load_effective_config(args)
+    _print_startup(args)
+    session = _make_session(args)
+    _print_model_info(session)
+
+    grid = _parse_grid_terms(args.grid)
+    runset = session.generate_sweep(
+        args.prompt,
+        grid,
+        base_steering=args.base_steering,
+        stateless=False,
+    )
+    if args.json_output:
+        print(_json.dumps(runset.to_dict(), indent=2))
+        return
+    print(f"experiment fan: {len(runset)} run(s)")
+    for idx, result in enumerate(runset):
+        node_id = runset.node_ids[idx] if idx < len(runset.node_ids) else None
+        row = runset.grid[idx] if idx < len(runset.grid) else {}
+        row_str = ", ".join(f"{k}={v:+.3f}" for k, v in row.items())
+        node_str = f" node={node_id[:8]}" if node_id else ""
+        print(
+            f"{idx:>3}: {row_str}{node_str} "
+            f"tokens={result.token_count} finish={result.finish_reason}"
+        )
 
 
 def _run_transcript_run(args: argparse.Namespace) -> None:
@@ -1541,7 +1615,7 @@ def _run_transcript_run(args: argparse.Namespace) -> None:
                 actual_v = actual.get(name, 0.0)
                 deltas.append((name, actual_v - expected_v, expected_v, actual_v))
             deltas.sort(key=lambda x: abs(x[1]), reverse=True)
-            print(f"  readings drift (top 5):")
+            print("  readings drift (top 5):")
             for name, d, ev, av in deltas[:5]:
                 print(f"    {name:<32}  Δ {d:+.4f}  (expected {ev:+.4f} → got {av:+.4f})")
         print()
@@ -1553,5 +1627,5 @@ _COMMAND_RUNNERS = {
     "pack":       _run_pack,
     "vector":     _run_vector,
     "config":     _run_config,
-    "transcript": _run_transcript,
+    "experiment": _run_experiment,
 }

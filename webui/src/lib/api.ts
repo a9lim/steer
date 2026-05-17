@@ -10,6 +10,8 @@ import type {
   CloneVectorRequest,
   CloneVectorResponse,
   CorrelationData,
+  ExperimentFanRequest,
+  ExperimentFanResponse,
   ExtractRequest,
   ExtractResponse,
   FilterMatchesJSON,
@@ -30,8 +32,6 @@ import type {
   ScoreProbeRequest,
   ScoreProbeResponse,
   SessionInfo,
-  SweepEvent,
-  SweepRequest,
   TraitsEvent,
   TranscriptLoadResponseJSON,
   VectorDiagnosticsResponse,
@@ -48,6 +48,8 @@ export type {
   CloneVectorRequest,
   CloneVectorResponse,
   CorrelationData,
+  ExperimentFanRequest,
+  ExperimentFanResponse,
   ExtractRequest,
   ExtractResponse,
   FilterMatchesJSON,
@@ -68,8 +70,6 @@ export type {
   ScoreProbeRequest,
   ScoreProbeResponse,
   SessionInfo,
-  SweepEvent,
-  SweepRequest,
   TraitsEvent,
   TranscriptLoadResponseJSON,
   VectorDiagnosticsResponse,
@@ -355,29 +355,6 @@ export const apiPacks = {
   },
 };
 
-// ============================================================== sweep ==
-
-export const apiSweep = {
-  /** Returns the SSE Response — call ``consumeSse`` on ``response.body``
-   * to iterate events.  Sweep is always SSE because the JSON branch
-   * doesn't exist server-side. */
-  async start(req: SweepRequest, id: string = SESSION): Promise<Response> {
-    const r = await fetch(`${SESSION_BASE(id)}/sweep`, {
-      method: "POST",
-      headers: authHeaders({
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      }),
-      body: JSON.stringify(req),
-    });
-    if (!r.ok) {
-      const { text, json } = await parseBody(r);
-      throw new ApiError(r.status, `${SESSION_BASE(id)}/sweep`, text, json);
-    }
-    return r;
-  },
-};
-
 // ============================================================ extract ==
 
 /** Streaming extract — pass ``onEvent`` to receive each SSE frame as it
@@ -633,6 +610,20 @@ export const apiTree = {
   },
 };
 
+// ======================================================= experiments ==
+
+export const apiExperiments = {
+  fan(
+    body: ExperimentFanRequest,
+    id: string = SESSION,
+  ): Promise<ExperimentFanResponse> {
+    return request(
+      `${SESSION_BASE(id)}/experiments/fan`,
+      jsonBody(body),
+    );
+  },
+};
+
 // =========================================================== traits ====
 
 /** Open the live traits SSE stream.  Returns the underlying ``Response``
@@ -652,7 +643,7 @@ export async function apiTraitsStream(id: string = SESSION): Promise<Response> {
 
 export interface SseEvent {
   /** SSE ``event:`` field — defaults to ``"message"`` per the spec when
-   * absent (which is also the wire format the sweep / traits endpoints use). */
+   * absent (which is also the wire format traits streaming uses). */
   event: string;
   /** Parsed JSON if the data line was JSON, otherwise the raw string. */
   data: unknown;
@@ -666,8 +657,7 @@ export interface SseEvent {
  * ``Response`` — the latter is the more ergonomic call site.  Yields one
  * event per blank-line-delimited frame; tolerates missing ``event:`` lines
  * by defaulting to ``"message"``; tries ``JSON.parse(data)`` and falls
- * back to the raw string on failure (the sweep stream uses bare ``data:``
- * frames with JSON inside, the extract stream uses named events). */
+ * back to the raw string on failure. */
 export async function* consumeSse(
   source: Response | ReadableStream<Uint8Array>,
 ): AsyncGenerator<SseEvent, void, void> {

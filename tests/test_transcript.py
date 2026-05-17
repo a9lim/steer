@@ -358,9 +358,12 @@ def test_cli_verb_registered():
     from saklas.cli.runners import _COMMAND_RUNNERS
 
     parser = _build_root_parser()
-    # ``transcript`` is a valid top-level verb.
-    ns = parser.parse_args(["transcript", "run", "/tmp/x.yaml", "m1"])
-    assert ns.command == "transcript"
+    ns = parser.parse_args([
+        "experiment", "transcript", "run", "/tmp/x.yaml", "m1",
+    ])
+    assert ns.command == "experiment"
+    assert ns.experiment_cmd == "transcript"
     assert ns.transcript_cmd == "run"
     assert ns.path == "/tmp/x.yaml"
-    assert "transcript" in _COMMAND_RUNNERS
+    assert "experiment" in _COMMAND_RUNNERS
+    assert "transcript" not in _COMMAND_RUNNERS

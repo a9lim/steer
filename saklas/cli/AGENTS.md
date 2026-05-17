@@ -1,6 +1,6 @@
 # cli/
 
-Five-verb root parser (`tui`/`serve`/`pack`/`vector`/`config`) split across:
+Six-verb root parser (`tui`/`serve`/`pack`/`vector`/`experiment`/`config`) split across:
 - `cli/main.py` — entry point, `_build_root_parser`, `_load_effective_config`, `_warmup_session`
 - `cli/parsers.py` — every `_build_X_parser`
 - `cli/runners.py` — every `_run_X`
@@ -10,6 +10,7 @@ Five-verb root parser (`tui`/`serve`/`pack`/`vector`/`config`) split across:
 
 - `pack` = distribution (install/refresh/clear/rm/ls/search/push/export) via `_PACK_BUILDERS` / `_PACK_RUNNERS` tables
 - `vector` = computation (extract/merge/clone/compare/why) via `_VECTOR_BUILDERS` / `_VECTOR_RUNNERS`
+- `experiment` = repeatable research runs (`fan`, `transcript run`) via `_EXPERIMENT_BUILDERS` / `_EXPERIMENT_RUNNERS`
 - `config` = show / validate
 
 ## Config loading
@@ -27,6 +28,8 @@ Five-verb root parser (`tui`/`serve`/`pack`/`vector`/`config`) split across:
 - `vector extract`: `--method {dim,pca}` (default `dim`) selects the per-layer extractor. Tensor filenames diverge: `--method dim` writes to `<safe_model>.safetensors` (canonical); `--method pca` writes to `<safe_model>_pca.safetensors` (legacy). Both can coexist on disk; the steering grammar's `:pca` variant addresses the legacy tensor.
 - `vector compare`: `--metric {euclidean,mahalanobis}` (default `mahalanobis` since v2.1). Mahalanobis path requires `~/.saklas/models/<id>/{layer_means,neutral_activations}.safetensors` to exist on disk; `LayerWhitener.from_cache(model_id)` raises a `WhitenerError` with a populating-command hint when the cache is missing (this is fatal — `compare --metric mahalanobis` doesn't silently fall back to Euclidean since that would hide the missing cache). `--ridge-scale FLOAT` (default 1.0) tunes the ridge multiplier on the regularized covariance.
 - `vector merge`: positional `expression` argument — a steering expression such as `"0.3 ns/a + 0.4 ns/b"` or `"0.5 ns/a~ns/b"` for projection-removal. The comma-separated legacy form is gone.
+- `experiment fan <model> <prompt> -g concept=0,0.5,1`: runs an alpha grid through `session.generate_sweep` and prints a compact RunSet summary. Repeat `-g/--grid` for a Cartesian product. JSON mode returns `RunSet.to_dict()`.
+- `experiment transcript run <path.yaml> [model]`: replays a saved transcript. `transcript` is not a top-level verb.
 - `--no-dls` (v2.1): disables the discriminative-layer-selection mask at extraction time. `--legacy` already implies this; passing both errors out at parse time. The mask itself lives in `saklas.core.vectors.compute_dls_mask` and is evaluated against the cached `layer_means`; without `layer_means` (e.g. `probes=[]` sessions whose neutrals haven't been computed yet) the helper silently keeps all layers. See `saklas/core/AGENTS.md` for the algorithm.
 - `--legacy` (v2.0 backcompat preset): on `tui`/`serve` flips `injection_mode="additive"`, `extraction_method="pca"`, `projection_metric="euclidean"`, and `dls=False` (all passed through to `SaklasSession.from_pretrained`); on `vector extract` flips `--method pca`; on `vector compare` flips `--metric euclidean` (overriding the v2.1 mahalanobis default). Mutually exclusive with the per-flag controls on the same verb (combination errors at parse time before model load — `--legacy + --steer-mode`, `--legacy + --projection-metric`, `--legacy + --no-dls`, `--legacy + --method`, `--legacy + --metric` all reject). `_resolve_legacy_method(args)` (in `runners.py`) is the shared helper for the conflict check on `vector extract`.
 - `pack ls` is local-only; `pack search` is the HF-remote verb.

@@ -480,9 +480,8 @@
 
   // ----------------------------------------- alpha-list parser ------
 
-  /** Parse a sweep alpha string (comma list / ``linspace(a, b, n)`` /
-   *  ``start:stop:step``) into ``number[]``.  Mirrors the legacy
-   *  SweepDrawer parser. */
+  /** Parse a fan-out alpha string (comma list / ``linspace(a, b, n)`` /
+   *  ``start:stop:step``) into ``number[]``. */
   function parseAlphaList(raw: string): number[] {
     const trimmed = raw.trim();
     if (!trimmed) return [];

@@ -301,6 +301,7 @@ with SaklasSession.from_pretrained("google/gemma-3-4b-it", device="auto") as ses
         steering=f"0.2 {name}",
         sampling=SamplingConfig(temperature=0.7, max_tokens=256, seed=42),
     )
+    # generate() returns a RunSet. Single-run attributes delegate to .first.
     print(result.text)
     print(result.readings)                          # live probe readings
     print(result.applied_steering)                  # canonical expression receipt
@@ -319,7 +320,7 @@ with SaklasSession.from_pretrained("google/gemma-3-4b-it", device="auto") as ses
     for alpha in [-0.2, -0.1, 0, 0.1, 0.2]:
         session.clear_history()
         r = session.generate("Describe a sunset.", steering=f"{alpha} {name}")
-        collector.add(r, alpha=alpha)
+        collector.add(r.first, alpha=alpha)
     collector.to_csv("sweep.csv")
 ```
 
@@ -428,7 +429,7 @@ from saklas.notebook import plot_alpha_sweep, plot_probe_correlation, plot_layer
 
 with SaklasSession.from_pretrained("google/gemma-3-4b-it") as s:
     results = s.generate_sweep("Describe a sunset.", sweep={"happy.sad": [-0.4, 0.0, 0.4]})
-    plot_alpha_sweep(ResultCollector.from_results(results)).show()
+    plot_alpha_sweep(results.to_collector()).show()
 ```
 
 Four plotly figure builders: `plot_alpha_sweep`, `plot_probe_correlation`, `plot_layer_norms`, and `plot_trait_history`. Each accepts the structured types saklas already returns (`ResultCollector`, `dict[str, Profile]`, `Profile`, `dict[str, ProbeReadings]`) and returns a plotly `Figure` you can render inline, export to HTML via `.write_html()`, or save as PNG via `.write_image()`. The `to_dataframe(...)` helper coerces results into pandas DataFrames for ad-hoc analysis.
@@ -440,7 +441,7 @@ results = session.generate_batch(["What's a good day?", "Describe a sunset.", "T
 sweep = session.generate_sweep("Describe a rainy day.", sweep={"happy.sad": [-0.4, 0.0, 0.4]})
 ```
 
-Both run under one steering setup and return an ordered `list[GenerationResult]`. The HTTP server exposes `POST /saklas/v1/sessions/{id}/sweep` as an SSE stream for the same shape, which is useful when you want to drive a sweep over the network without repeatedly re-tokenizing.
+Both return `RunSet`: an ordered, list-like result set with `node_ids`, `grid`, `.first`, `.to_collector()`, and `.to_dataframe()`. The native HTTP route for the same shape is `POST /saklas/v1/sessions/{id}/experiments/fan`, with body `{prompt, grid, base_steering?, sampling?, thinking?, raw?}`.
 
 ## API server
 

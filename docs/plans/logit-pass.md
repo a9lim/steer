@@ -277,7 +277,7 @@ needed (additive).
 REST `GET /saklas/v1/sessions/{id}/tree/{node_id}` returns the full
 node payload including new fields, same shape.
 
-REST `POST /saklas/v1/sessions/{id}/sweep` (and the SSE stream) extend
+REST `POST /saklas/v1/sessions/{id}/experiments/fan` extends
 result rows with `mean_logprob`, `kl_from_baseline`, `n_rank1_changed`
 (see Phase 6).
 

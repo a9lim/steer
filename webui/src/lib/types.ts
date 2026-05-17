@@ -231,55 +231,6 @@ export interface InstallPackResponse {
   statements_only: boolean;
 }
 
-// ----------------------------------------------------- sweep --
-
-export interface SweepRequest {
-  prompt: unknown;
-  /** ``{concept_name: [alpha, ...], ...}``.  Cartesian product across
-   * concepts becomes one generation per row. */
-  sweep: Record<string, number[]>;
-  base_steering?: string | null;
-  sampling?: WSSampling | null;
-  thinking?: boolean | null;
-  stateless?: boolean;
-  raw?: boolean;
-}
-
-export interface SweepRowReadings {
-  [probe: string]: number;
-}
-
-export interface SweepRowResult {
-  text: string;
-  token_count: number;
-  tok_per_sec: number;
-  elapsed: number;
-  finish_reason: string;
-  applied_steering: string | null;
-  readings: SweepRowReadings;
-}
-
-export type SweepEvent =
-  | { type: "started"; sweep_id: string; total: number }
-  | {
-      type: "result";
-      idx: number;
-      alpha_values: Record<string, number>;
-      result: SweepRowResult;
-    }
-  | {
-      type: "done";
-      sweep_id: string;
-      summary: {
-        completed: number;
-        total: number;
-        total_tokens: number;
-        tok_per_sec: number;
-        elapsed: number;
-      };
-    }
-  | { type: "error"; message: string };
-
 // ----------------------------------------------------- traits SSE --
 
 export type TraitsEvent =
@@ -558,6 +509,40 @@ export interface TranscriptLoadResponseJSON {
   leaf_id: string;
   rev: number;
   guards: string[];
+}
+
+// ----------------------------------------------------- experiments --
+
+export interface ExperimentFanRequest {
+  prompt: unknown;
+  /** concept name -> alpha grid */
+  grid: Record<string, number[]>;
+  base_steering?: string | null;
+  sampling?: WSSampling | null;
+  thinking?: boolean | null;
+  raw?: boolean;
+}
+
+export interface ExperimentFanRow {
+  idx: number;
+  alpha_values: Record<string, number>;
+  node_id: string | null;
+  result: {
+    text: string;
+    token_count: number;
+    tok_per_sec: number;
+    elapsed: number;
+    finish_reason: string;
+    applied_steering: string | null;
+    readings: Record<string, number>;
+  };
+}
+
+export interface ExperimentFanResponse {
+  kind: "fan" | string;
+  total: number;
+  node_ids: Array<string | null>;
+  rows: ExperimentFanRow[];
 }
 
 /** Per-op delta sent on every tree mutation.  Clients apply in-place

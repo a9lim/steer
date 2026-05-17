@@ -29,15 +29,12 @@ import type {
   LoomNodeJSON,
   LoomTreeJSON,
   SessionInfo,
-  SweepEvent,
   VectorInfo,
   WSClientMessage,
   WSServerMessage,
 } from "./api";
 import type {
   ChatTurn,
-  DrawerName,
-  DrawerState,
   GenStatus,
   PendingAction,
   ProbeRackEntry,
@@ -50,6 +47,11 @@ import type {
   WSSampling,
 } from "./types";
 import { serializeExpression } from "./expression";
+import { pushToast } from "./stores/toasts.svelte";
+
+export * from "./stores/drawers.svelte";
+export * from "./stores/inputHistory.svelte";
+export { dismissToast, pushToast, toasts } from "./stores/toasts.svelte";
 
 // =========================================================== session ====
 
@@ -849,91 +851,6 @@ export async function loomRegenerateFromUser(
   }
 }
 
-// ============================================================ input history ===
-
-/** Cap on the recall ring.  Same order of magnitude as readline's
- *  default ``HISTSIZE`` and the TUI's ``_INPUT_HISTORY_MAX``. */
-export const INPUT_HISTORY_MAX = 200;
-
-export interface InputHistoryState {
-  /** Submitted lines, oldest first.  Capped at ``INPUT_HISTORY_MAX`` —
-   *  oldest entries get dropped when the cap is exceeded. */
-  entries: string[];
-  /** Cursor into ``entries`` while ↑/↓ recall is in flight.  ``null``
-   *  means "live slot" — the textarea reflects whatever the user is
-   *  actively composing. */
-  index: number | null;
-  /** Whatever the user was typing the moment they first hit ↑.
-   *  ↓ past the newest entry restores it. */
-  stash: string;
-}
-
-/** In-memory only by design (per the user's chosen policy).  Reload
- *  drops history; matches the TUI's process-scoped shape and avoids
- *  leaking command lines into ``localStorage``. */
-export const inputHistory: InputHistoryState = $state({
-  entries: [],
-  index: null,
-  stash: "",
-});
-
-/** Append a freshly-submitted line.  De-dupes against the immediately
- *  preceding entry (readline / bash semantics — ping-pong A→B→A still
- *  records both A's, but A→A→A collapses to one).  Resets the recall
- *  cursor so the next ↑ starts at the bottom of the ring. */
-export function pushInputHistory(text: string): void {
-  const trimmed = text.trim();
-  if (!trimmed) return;
-  const entries = inputHistory.entries;
-  const last = entries.length > 0 ? entries[entries.length - 1] : null;
-  if (last !== trimmed) {
-    const next = [...entries, trimmed];
-    inputHistory.entries = next.length > INPUT_HISTORY_MAX
-      ? next.slice(next.length - INPUT_HISTORY_MAX)
-      : next;
-  }
-  inputHistory.index = null;
-  inputHistory.stash = "";
-}
-
-/** Walk the recall ring by ``delta`` (-1 for ↑, +1 for ↓) and return
- *  the string the textarea should now display, or ``null`` to leave
- *  the textarea alone (top/bottom of an empty ring, or ↓ at the live
- *  slot).
- *
- *  ``currentInput`` is what's currently in the textarea; on the first
- *  ↑ it gets stashed so a ↓ past the newest entry can restore it. */
-export function navigateInputHistory(
-  delta: -1 | 1,
-  currentInput: string,
-): string | null {
-  const entries = inputHistory.entries;
-  if (entries.length === 0) return null;
-
-  if (inputHistory.index === null) {
-    if (delta > 0) return null; // ↓ at the live slot is a no-op.
-    inputHistory.stash = currentInput;
-    inputHistory.index = entries.length - 1;
-    return entries[inputHistory.index];
-  }
-
-  const newIdx = inputHistory.index + delta;
-  if (newIdx < 0) {
-    inputHistory.index = 0;
-    return entries[0];
-  }
-  if (newIdx >= entries.length) {
-    // Walked past the newest entry — restore the stash and reset the
-    // cursor so the next ↑ re-stashes fresh input.
-    inputHistory.index = null;
-    const stash = inputHistory.stash;
-    inputHistory.stash = "";
-    return stash;
-  }
-  inputHistory.index = newIdx;
-  return entries[newIdx];
-}
-
 export interface HighlightState {
   /** Probe name selected for primary tinting.  ``null`` disables
    * highlighting entirely (token backgrounds render transparent). */
@@ -1051,23 +968,6 @@ export function setSampling<K extends keyof SamplingState>(
   value: SamplingState[K],
 ): void {
   samplingState[key] = value;
-}
-
-// ============================================================ drawers ====
-
-export const drawerState: DrawerState = $state({
-  open: null,
-  params: null,
-});
-
-export function openDrawer(name: DrawerName, params: unknown = null): void {
-  drawerState.open = name;
-  drawerState.params = params;
-}
-
-export function closeDrawer(): void {
-  drawerState.open = null;
-  drawerState.params = null;
 }
 
 // ============================================================ packs ======
@@ -1648,76 +1548,6 @@ export function sendStop(): void {
   }
 }
 
-// ============================================================ sweep =====
-
-export interface SweepRow {
-  idx: number;
-  alpha_values: Record<string, number>;
-  text: string;
-  token_count: number;
-  tok_per_sec: number;
-  elapsed: number;
-  finish_reason: string;
-  applied_steering: string | null;
-  readings: Record<string, number>;
-}
-
-export interface SweepState {
-  rows: SweepRow[];
-  total: number;
-  completed: number;
-  active: boolean;
-  error: string | null;
-  sweepId: string | null;
-}
-
-export const sweepState: SweepState = $state({
-  rows: [],
-  total: 0,
-  completed: 0,
-  active: false,
-  error: null,
-  sweepId: null,
-});
-
-export function ingestSweepEvent(ev: SweepEvent): void {
-  switch (ev.type) {
-    case "started":
-      sweepState.rows = [];
-      sweepState.completed = 0;
-      sweepState.total = ev.total;
-      sweepState.active = true;
-      sweepState.error = null;
-      sweepState.sweepId = ev.sweep_id;
-      return;
-    case "result":
-      sweepState.rows = [
-        ...sweepState.rows,
-        {
-          idx: ev.idx,
-          alpha_values: ev.alpha_values,
-          text: ev.result.text,
-          token_count: ev.result.token_count,
-          tok_per_sec: ev.result.tok_per_sec,
-          elapsed: ev.result.elapsed,
-          finish_reason: ev.result.finish_reason,
-          applied_steering: ev.result.applied_steering,
-          readings: ev.result.readings,
-        },
-      ];
-      sweepState.completed += 1;
-      return;
-    case "done":
-      sweepState.active = false;
-      sweepState.completed = ev.summary.completed;
-      return;
-    case "error":
-      sweepState.active = false;
-      sweepState.error = ev.message;
-      return;
-  }
-}
-
 // =========================================== A/B compare metadata =======
 
 /** A/B compare state.  ``enabled`` is the user-visible toggle.  The
@@ -1905,46 +1735,6 @@ interface PersistedSnapshotV2 {
     compareTarget: string | null;
     compareTwo: boolean;
   };
-}
-
-// ============================================================ toasts ====
-//
-// Lightweight advisory notifications.  No queueing or stacking story
-// beyond "render the latest few"; toasts are appended and the
-// ``Toaster`` component auto-dismisses each entry after its TTL fires.
-// Used for non-blocking surfaces like the localStorage budget warning;
-// fatal errors still flow through ``boot-failed`` / inline error UI.
-
-export interface Toast {
-  id: number;
-  kind: "info" | "warning" | "error";
-  message: string;
-  ttlMs: number;
-}
-
-export const toasts: { entries: Toast[] } = $state({ entries: [] });
-
-let _toastSeq = 0;
-
-export function pushToast(
-  message: string,
-  opts: { kind?: Toast["kind"]; ttlMs?: number } = {},
-): number {
-  const id = ++_toastSeq;
-  toasts.entries = [
-    ...toasts.entries,
-    {
-      id,
-      kind: opts.kind ?? "info",
-      message,
-      ttlMs: opts.ttlMs ?? 6000,
-    },
-  ];
-  return id;
-}
-
-export function dismissToast(id: number): void {
-  toasts.entries = toasts.entries.filter((t) => t.id !== id);
 }
 
 function safeLocalStorageGet(key: string): string | null {

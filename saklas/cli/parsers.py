@@ -87,6 +87,11 @@ _VECTOR_VERBS: list[tuple[str, str]] = [
     ("transfer",  "Transfer a probe from one model to another via Procrustes"),
 ]
 
+_EXPERIMENT_VERBS: list[tuple[str, str]] = [
+    ("fan",        "Run an alpha grid as one experiment"),
+    ("transcript", "Replay or inspect saved transcript paths"),
+]
+
 
 def _add_injection_args(p: argparse.ArgumentParser) -> None:
     """Steering-injection options shared between ``tui`` and ``serve``.
@@ -478,10 +483,39 @@ def _build_config_parser(parser: argparse.ArgumentParser) -> None:
     validate.add_argument("file", help="Path to YAML config file")
 
 
-# --- transcript subtree --------------------------------------------------
+# --- experiment subtree --------------------------------------------------
 
-def _build_transcript_parser(parser: argparse.ArgumentParser) -> None:
-    """``saklas transcript`` — replay / inspect saved tree paths.
+def _build_experiment_fan(p: argparse.ArgumentParser) -> None:
+    p.add_argument("model", help="HuggingFace model ID or local path")
+    p.add_argument("prompt", help="Prompt to fan out")
+    p.add_argument(
+        "-g", "--grid",
+        action="append",
+        required=True,
+        metavar="CONCEPT=ALPHAS",
+        help=(
+            "Alpha grid term, repeatable. Example: "
+            "happy.sad=-0.4,0,0.4"
+        ),
+    )
+    p.add_argument(
+        "-S", "--base-steering",
+        default=None,
+        metavar="EXPR",
+        help="Fixed steering expression composed under each grid row",
+    )
+    p.add_argument("-q", "--quantize", choices=["4bit", "8bit"], default=None)
+    p.add_argument("-d", "--device", default="auto")
+    p.add_argument("-p", "--probes", nargs="*", default=None)
+    p.add_argument("--max-tokens", type=int, default=256)
+    p.add_argument("-j", "--json", dest="json_output", action="store_true")
+    _add_injection_args(p)
+    _add_logit_args(p)
+    _add_config_args(p)
+
+
+def _build_experiment_transcript_parser(parser: argparse.ArgumentParser) -> None:
+    """``saklas experiment transcript`` — replay saved tree paths.
 
     Phase 5 ships ``run`` only; future verbs (``ls``, ``diff``) compose
     on top of the same schema.
@@ -538,6 +572,19 @@ def _build_transcript_parser(parser: argparse.ArgumentParser) -> None:
     # interpretations share the spirit of the flag.
 
 
+_EXPERIMENT_BUILDERS = {
+    "fan": _build_experiment_fan,
+    "transcript": _build_experiment_transcript_parser,
+}
+
+
+def _build_experiment_parser(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="experiment_cmd", required=False, metavar="VERB")
+    for verb, desc in _EXPERIMENT_VERBS:
+        child = sub.add_parser(verb, help=desc, description=desc)
+        _EXPERIMENT_BUILDERS[verb](child)
+
+
 def _build_root_parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="saklas",
@@ -586,11 +633,11 @@ def _build_root_parser() -> argparse.ArgumentParser:
     )
     _build_config_parser(cfg)
 
-    transcript = sub.add_parser(
-        "transcript",
-        help="Replay / inspect saved tree paths (v2.3 loom)",
-        description="Replay / inspect saved tree paths",
+    experiment = sub.add_parser(
+        "experiment",
+        help="Run and replay experiment trees",
+        description="Run and replay experiment trees",
     )
-    _build_transcript_parser(transcript)
+    _build_experiment_parser(experiment)
 
     return root

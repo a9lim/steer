@@ -435,8 +435,8 @@
       </div>
 
       <!-- Logit-pass Phase 6: per-sibling rollup summary.  Renders for
-           both N=2 and N>2 modes — the table is more useful at N>2 (the
-           old "sweep result table" use case) but it's still a clean
+           both N=2 and N>2 modes — the table is more useful at N>2, but
+           it is still a clean
            at-a-glance read for a single pair.  KL / rank-1 columns
            populate lazily as the joint-logprobs fetches complete. -->
       {#if siblingSummary.length > 0}

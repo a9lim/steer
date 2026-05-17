@@ -445,11 +445,11 @@ When two siblings have different recipes, render the edge with the delta against
 
 Webui: edge labels rendered as small text on the connector lines in `LoomSidebar.svelte`. TUI: node-detail pane shows the delta in a `Recipe` block alongside the full expression.
 
-### Sweep deprecation and `/fan` as the canonical sweep
+### Alpha grids and `/fan`
 
-Per the locked decision, sweep-as-table goes away. The existing `SweepDrawer.svelte` and the TUI's `/sweep` command both become thin wrappers over the new fan-out primitive: pick a user-anchor node, pick a vector, supply an alpha grid, fire as siblings.
+Sweep-as-table is gone. The TUI surface is `/fan`; the server surface is `POST /saklas/v1/sessions/{id}/experiments/fan`. Both run the same `generate_sweep` engine path and land results as assistant siblings under one shared user turn.
 
-The migration: keep the sweep SSE route, repoint the result handler to land siblings instead of table rows. The drawer's table UI is deleted. The `SweepRow` type stays as an internal step but no longer renders.
+The old `/sweep` command, drawer table, `SweepRow` web state, and SSE route were removed rather than kept as aliases.
 
 ### Filter grammar for tree pruning
 
@@ -504,7 +504,7 @@ Strict generalization of today's A/B. Drops out of the cross-branch-diff infrast
 
 ### Transcript export/import
 
-> **Status note.** The TUI no longer has a `/transcript` slash command — `/save` and `/load` (above) replaced it and operate on the **whole tree**, not a transcript path. The `Transcript` YAML format and its three-mode `import_into` machinery described in this section still exist, but the only surface that drives them is the CLI `saklas transcript run` replay verb (which uses `default` mode) and the webui load drawer. Read the rest of this section as the design of the transcript format + CLI/webui import, not the TUI.
+> **Status note.** The TUI no longer has a `/transcript` slash command — `/save` and `/load` (above) replaced it and operate on the **whole tree**, not a transcript path. The `Transcript` YAML format and its three-mode `import_into` machinery described in this section still exist, but the only surface that drives them is the CLI `saklas experiment transcript run` replay verb (which uses `default` mode) and the webui load drawer. Read the rest of this section as the design of the transcript format + CLI/webui import, not the TUI.
 
 A **transcript** is a saved path through the tree: system prompt + every user turn + every assistant turn's `Recipe` (steering, sampling, seed, probe set, per-probe content hash) + final aggregate readings. Serializes to YAML. The per-node thing remains `Recipe`; the file/export concept is `Transcript` so the doc and CLI stop overloading.
 
@@ -532,7 +532,7 @@ turns:
     ...
 ```
 
-`saklas transcript run <path>` is the CLI verb — loads, replays, and reports (using `default` mode).
+`saklas experiment transcript run <path>` is the CLI verb — loads, replays, and reports (using `default` mode).
 
 **Three import modes:**
 
@@ -628,7 +628,7 @@ The webui's localStorage stops being authoritative after phase 3. On bootstrap: 
 ### Hard breaks
 
 - `abPair` on `ChatTurn` is removed from the Python type (compat shim possible but loom siblings express it more cleanly). Webui keeps a one-release deprecation period.
-- `SweepDrawer.svelte` and `saklas/tui/commands.py`'s `/sweep` are repointed to fan-out; the table view is deleted from the webui. **Landed in v2.3 (not v2.4 as originally scoped)** — the surface migration was small enough to bundle with the loom PR rather than carve out its own. `/sweep` survives as a deprecation alias that routes to `/fan` and prints a one-line "use /fan" banner so muscle memory still works.
+- `SweepDrawer.svelte`, the web `SweepRow` state, `saklas/tui/commands.py`'s `/sweep`, and the native `/sweep` SSE route are removed. Alpha grids go through `/fan` or `POST /experiments/fan`.
 - `session.config` for sampling defaults still works; per-turn recipe carries the per-call sampling and the session default is the fallback. No change visible to callers.
 - "Recipe" the file format renames to "Transcript" in the CLI verb and YAML preamble (`saklas_transcript: 1`). The per-node `Recipe` dataclass keeps its name. (No transcript slash command shipped in the TUI — see the Transcript status note — so the planned `/recipe load` → `/transcript load` migration alias was moot.)
 
@@ -670,7 +670,7 @@ These are the forks resolved during planning. New forks belong in this section a
 
 16. **Concurrency: gen reserves its subtree.** The `_gen_lock` holder owns the subtree rooted at the user-parent of its target node. Decoration ops (star, note) and branches are always free; edits and deletes on that reservation refuse with 409. Navigate-away is free — gen continues invisibly; user can navigate back at any time. N-way stop cancels the current sibling and skips the queued remainder; mid-sibling stop trims cleanly.
 
-17. **`Recipe` is per-node; `Transcript` is the export.** The dataclass per-node stays `Recipe` (steering + sampling + seed + probe set + content hashes). The file/export concept renames to `Transcript`. CLI verb: `saklas transcript run`. Frees `Recipe` of the doubled meaning. (The originally-planned `/transcript load` slash command was dropped — the TUI's `/save`/`/load` operate on whole trees, not transcripts.)
+17. **`Recipe` is per-node; `Transcript` is the export.** The dataclass per-node stays `Recipe` (steering + sampling + seed + probe set + content hashes). The file/export concept renames to `Transcript`. CLI verb: `saklas experiment transcript run`. Frees `Recipe` of the doubled meaning. (The originally-planned `/transcript load` slash command was dropped — the TUI's `/save`/`/load` operate on whole trees, not transcripts.)
 
 18. **Filter grammar is distinct from `@when:`.** Tree-pruning uses `agg:`/`any:`/`last:` prefixes on per-node probe readings. Steering's `@when:` gates on per-step readings during generation. Same probes, different scalars, different evaluators. One grammar would silently change semantics across contexts.
 

@@ -14,7 +14,6 @@ MagicMock session, and verify the dispatch routes correctly.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -26,7 +25,6 @@ from saklas.core.loom import LoomTree, Recipe
 from saklas.tui.app import SaklasApp
 from saklas.tui.loom_helpers import (
     AlphaListError,
-    PrefixMatch,
     format_node_detail,
     format_path_summary,
     parse_alpha_list,
@@ -525,7 +523,6 @@ def test_fire_auto_regen_streams_into_shadow_column():
     uses.  Mirrors :meth:`SaklasApp._start_shadow_generation`'s shape.
     """
     import threading
-    import time
     from saklas import TokenEvent
     app = _make_app()
     # Active node has to be an assistant under a user turn so
@@ -605,8 +602,10 @@ def test_diff_unique_prefix_diffs_two_siblings():
     # stays an integration test (MagicMock auto-attrs would mask the
     # rendering shape).
     import saklas
+
     def _real_diff(a_id, b_id):
-        a = tree.get(a_id); b = tree.get(b_id)
+        a = tree.get(a_id)
+        b = tree.get(b_id)
         return saklas.NodeDiff(
             a_id=a_id, b_id=b_id,
             parent_id=a.parent_id if a.parent_id == b.parent_id else None,
@@ -632,11 +631,13 @@ def test_diff_siblings_two_kids_diffs_pair():
     uid = tree.add_user_turn("hi")
     aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest"))
     tree.finalize_assistant(aid, text="A")
-    bid = tree.branch(aid, "B")
+    tree.branch(aid, "B")
 
     import saklas
+
     def _real_diff(a_id, b_id):
-        a = tree.get(a_id); b = tree.get(b_id)
+        a = tree.get(a_id)
+        b = tree.get(b_id)
         return saklas.NodeDiff(
             a_id=a_id, b_id=b_id, parent_id=uid,
             text=saklas.text_diff(a.text or "", b.text or ""),
@@ -839,26 +840,18 @@ def test_help_mentions_loom_commands():
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — `/sweep` deprecation, `/regen N mode`, steering-delta in detail
+# Phase 5 — fan-out, `/regen N mode`, steering-delta in detail
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_emits_deprecation_and_routes_to_fan():
-    """`/sweep` prints a deprecation banner and routes to the fan handler."""
+def test_sweep_command_is_removed():
     app = _make_app()
-    uid, aid = _seed_tree(app._session.tree)
+    _seed_tree(app._session.tree)
     app._last_prompt = "do a thing"
-    captured = {}
-
-    def _intercept(vector, alphas, prompt):
-        captured["vector"] = vector
-        captured["alphas"] = alphas
-    app._run_fan_worker = _intercept
 
     app._handle_command("/sweep angry.calm 0.0, 0.3")
     msg = _msgs(app)
-    assert "deprecated" in msg
-    assert captured.get("vector") == "angry.calm"
+    assert "Unknown command" in msg
 
 
 def test_regen_with_mode_calls_regen_with_modifier():

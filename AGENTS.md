@@ -42,12 +42,14 @@ saklas vector merge <name> <expression> [-m]    # shared steering grammar: "0.3 
 saklas vector clone <corpus> -N NAME [-m MODEL] [-n N_PAIRS] [--seed S] [-f]
 saklas vector compare <concepts...> -m MODEL [-v] [-j]       # cosine similarity between vectors
 saklas vector why <concept> -m MODEL [-j]                    # per-layer ||baked|| as 16-bucket histogram
+saklas experiment fan <model> "<prompt>" -g concept=0,0.5,1  # alpha grid as loom siblings
+saklas experiment transcript run <path.yaml> [model]         # replay a saved transcript
 saklas config show [-c PATH ...] [--no-default] [-m MODEL]
 saklas config validate <file>
 pytest tests/                                   # all; GPU tests gated on CUDA/MPS
 ```
 
-Root parser has exactly five verbs — `tui`, `serve`, `pack`, `vector`, `config`. No `argv[0]` peeking, no top-level verb aliases, no bare-TUI fallback — `saklas google/gemma-2-2b-it` is an argparse error. Bare `saklas`/`saklas pack`/`saklas vector`/`saklas config` print help + exit 0.
+Root parser has exactly six verbs: `tui`, `serve`, `pack`, `vector`, `experiment`, `config`. No `argv[0]` peeking, no top-level verb aliases, no bare-TUI fallback. `saklas google/gemma-2-2b-it` is an argparse error. Bare `saklas`/`saklas pack`/`saklas vector`/`saklas experiment`/`saklas config` print help + exit 0.
 
 Every subcommand that takes `-c/--config` auto-loads `~/.saklas/config.yaml` first, then composes any explicit `-c` files on top (later overrides earlier). `ConfigFile.effective(extras, include_default=...)` is the single entry point. `ConfigFile.vectors` is a steering expression string — parsed lazily through `saklas.core.steering_expr.parse_expr`, which resolves bare poles (`wolf → deer.wolf @ -0.5`) via `cli.selectors.resolve_pole` and produces the canonical `Steering` IR every surface speaks.
 
@@ -188,6 +190,7 @@ with SaklasSession.from_pretrained("google/gemma-3-4b-it", device="auto") as ses
 ```
 
 Hard-break notes vs v1.4:
+- `generate`, `generate_batch`, and `generate_sweep` return `RunSet` in every case. It is list-like, carries `node_ids` and `grid`, and delegates single-run attributes to `.first` so `session.generate(...).text` remains readable. `session.last_result` remains the underlying `GenerationResult`.
 - `generate` / `generate_stream` / `session.steering()` accept `str | Steering | None` only. Dict inputs raise `TypeError`.
 - `extract()` returns `(name, Profile)`, not `(name, dict)`. `Profile` exposes the full mapping interface (`__getitem__`/`__iter__`/`__len__`/`__contains__`/`items`/`keys`/`values`) plus the typed surface (`layers`, `metadata`, `weight_at`, `save`/`load`, `merged`, `projected_away`, `cosine_similarity`), so iteration-style v1 loop code still works.
 - `session.steer(name, profile)` and `session.save_profile(profile, path)` accept `Profile` only — bare dicts are rejected. `session.vectors` returns `dict[str, Profile]`.
@@ -293,7 +296,7 @@ Pair-count note: <n=32 inflates mean PCA scores ~38% (small-sample bias). Share-
 
 ## Package layout
 
-`saklas/{core,io,cli,server,tui}/`. `saklas/__init__.py` pins public re-exports: `SaklasSession`, `SaklasError`, `Profile`, `ProfileError`, `SamplingConfig`, `Steering`, `EventBus` + event dataclasses, `DataSource`, `GenerationResult`, `TokenEvent`, `ProbeReadings`, `ResultCollector`. Consumers doing `from saklas import X` keep working; anything reaching into private submodule paths is expected to break (hard-break refactor).
+`saklas/{core,io,cli,server,tui}/`. `saklas/__init__.py` pins public re-exports: `SaklasSession`, `SaklasError`, `Profile`, `ProfileError`, `SamplingConfig`, `Steering`, `EventBus` + event dataclasses, `DataSource`, `GenerationResult`, `RunSet`, `TokenEvent`, `ProbeReadings`, `ResultCollector`. Consumers doing `from saklas import X` keep working; anything reaching into private submodule paths is expected to break (hard-break refactor).
 
 ## Testing
 

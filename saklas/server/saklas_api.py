@@ -41,7 +41,7 @@ from saklas.core.generation import supports_thinking
 from saklas.io.probes_bootstrap import load_defaults
 from saklas.core.loom import LoomMutated
 from saklas.core.profile import Profile
-from saklas.core.results import GenerationResult
+from saklas.core.results import GenerationResult, RunSet
 from saklas.core.sampling import SamplingConfig
 from saklas.core.session import SaklasSession
 from saklas.core.steering import Steering
@@ -246,21 +246,20 @@ class CloneVectorRequest(BaseModel):
     baseline: str | None = None
 
 
-class SweepRequest(BaseModel):
-    """Body for ``POST /saklas/v1/sessions/{id}/sweep``.
+class ExperimentFanRequest(BaseModel):
+    """Body for ``POST /saklas/v1/sessions/{id}/experiments/fan``.
 
-    ``sweep`` maps concept name → list of alpha values.  Cartesian
-    product across concepts becomes one generation per row.
+    ``grid`` maps concept name to alpha values.  The Cartesian product
+    becomes sibling assistant nodes under one shared user turn.
     ``base_steering`` (optional) is a steering expression string
-    composed underneath each swept term so callers can hold a
+    composed underneath each grid term so callers can hold a
     fixed-alpha context while sweeping another concept.
     """
     prompt: Any
-    sweep: dict[str, list[float]]
+    grid: dict[str, list[float]]
     base_steering: str | None = None
     sampling: WSSamplingParams | None = None
     thinking: bool | None = None
-    stateless: bool = True
     raw: bool = False
 
 
@@ -426,7 +425,7 @@ def _coerce_pair_source(source: Any) -> Any:
     return pairs
 
 
-def _result_to_json(result: GenerationResult | None) -> dict[str, Any]:
+def _result_to_json(result: GenerationResult | RunSet | None) -> dict[str, Any]:
     if result is None:
         return {}
     prompt_tokens = getattr(result, "prompt_tokens", 0) or 0
@@ -1603,179 +1602,60 @@ def register_saklas_routes(app: FastAPI) -> None:
             readings = {k: v for k, v in readings.items() if k in requested}
         return {"readings": {k: float(v) for k, v in readings.items()}}
 
-    # ----- Sweep: alpha grid over a single prompt --------------------------
+    # ----- Experiments ------------------------------------------------------
 
-    @app.post("/saklas/v1/sessions/{session_id}/sweep")
-    async def run_sweep(session_id: str, req: SweepRequest, request: Request):
-        """SSE-streamed alpha sweep.
-
-        One result per Cartesian-product element across ``sweep[concept]``
-        alpha lists.  Held under ``acquire_session_lock`` for the full
-        sweep so concurrent endpoints queue FIFO (the sweep can be
-        long-running, the lock's 5-minute timeout still applies).
-
-        Emits ``data: {"type": "started", "sweep_id", "total"}``,
-        then ``data: {"type": "result", "idx", "alpha_values", "result"}``
-        per completion (result subset: text, finish_reason, usage,
-        applied_steering, readings means), then
-        ``data: {"type": "done", "sweep_id", "summary"}``.
-        """
+    @app.post("/saklas/v1/sessions/{session_id}/experiments/fan")
+    async def run_experiment_fan(session_id: str, req: ExperimentFanRequest):
+        """Run an alpha grid as loom siblings and return a RunSet summary."""
         _resolve_session_id(session, session_id)
 
-        # Pre-validate the sweep dict so the SSE start event reports
-        # ``total`` accurately and so a bad request fails before any
-        # gen acquires the lock.  ``generate_sweep`` would raise the
-        # same way, but the SSE caller never sees the exception cleanly.
-        if not req.sweep:
-            raise HTTPException(400, "sweep dict must be non-empty")
-        for name, alphas in req.sweep.items():
+        if not req.grid:
+            raise HTTPException(400, "grid must be non-empty")
+        for name, alphas in req.grid.items():
             if not alphas:
-                raise HTTPException(400, f"sweep['{name}'] must be non-empty")
-
-        total = 1
-        for alphas in req.sweep.values():
-            total *= len(alphas)
-        sweep_id = uuid.uuid4().hex[:8]
+                raise HTTPException(400, f"grid['{name}'] must be non-empty")
         sampling_cfg = _build_sampling(req.sampling)
 
-        # Drive ``generate_sweep`` in a worker thread; bridge per-result
-        # events to the asyncio queue this handler reads.
-        loop = asyncio.get_running_loop()
-        result_queue: asyncio.Queue[tuple[Any, Any]] = asyncio.Queue()
-        DONE = object()
-        ERROR = object()
-
-        def _emit_result(idx: int, result: Any, alpha_values: dict[str, float]) -> None:
-            # Subset the result to keep SSE payloads small; full hidden
-            # states / per-token logprobs aren't useful for a sweep
-            # consumer and can be reloaded out-of-band by replaying
-            # ``applied_steering``.
+        async with acquire_session_lock(session) as acquired:
+            if not acquired:
+                raise HTTPException(503, "session locked")
+            runset = await asyncio.to_thread(
+                session.generate_sweep,
+                req.prompt,
+                req.grid,
+                base_steering=req.base_steering,
+                sampling=sampling_cfg,
+                thinking=req.thinking,
+                stateless=False,
+                raw=req.raw,
+            )
+        rows = []
+        for idx, result in enumerate(runset):
             readings_summary: dict[str, float] = {}
-            try:
-                for probe_name, r in (getattr(result, "readings", {}) or {}).items():
-                    pg = getattr(r, "per_generation", None)
-                    val = pg[-1] if pg else getattr(r, "mean", 0.0)
-                    readings_summary[probe_name] = round(float(val), 6)
-            except Exception:
-                pass
-            payload = {
+            for probe_name, r in (getattr(result, "readings", {}) or {}).items():
+                pg = getattr(r, "per_generation", None)
+                val = pg[-1] if pg else getattr(r, "mean", 0.0)
+                readings_summary[probe_name] = round(float(val), 6)
+            rows.append({
                 "idx": idx,
-                "alpha_values": {k: float(v) for k, v in alpha_values.items()},
+                "alpha_values": runset.grid[idx] if idx < len(runset.grid) else {},
+                "node_id": runset.node_ids[idx] if idx < len(runset.node_ids) else None,
                 "result": {
-                    "text": getattr(result, "text", ""),
-                    "token_count": int(getattr(result, "token_count", 0)),
-                    "tok_per_sec": float(getattr(result, "tok_per_sec", 0.0)),
-                    "elapsed": float(getattr(result, "elapsed", 0.0)),
-                    "finish_reason": getattr(result, "finish_reason", "stop"),
-                    "applied_steering": getattr(result, "applied_steering", None),
+                    "text": result.text,
+                    "token_count": result.token_count,
+                    "tok_per_sec": result.tok_per_sec,
+                    "elapsed": result.elapsed,
+                    "finish_reason": result.finish_reason,
+                    "applied_steering": result.applied_steering,
                     "readings": readings_summary,
                 },
-            }
-            try:
-                loop.call_soon_threadsafe(result_queue.put_nowait, ("result", payload))
-            except Exception:
-                pass
-
-        def _worker() -> None:
-            # Phase 5: ask the engine for the resulting sibling node ids
-            # so the sweep lands in the loom tree as siblings under a
-            # shared user-parent.  ``return_node_ids=True`` is a no-op
-            # when ``stateless=True`` (the engine doesn't mutate the tree
-            # under stateless).  We force ``stateless=False`` so the
-            # sweep populates the tree; the user's request flag now
-            # gates the legacy *table* path which is deprecated — sweep
-            # results live in the tree from v2.3 onward.
-            try:
-                outcome = session.generate_sweep(
-                    req.prompt,
-                    req.sweep,
-                    base_steering=req.base_steering,
-                    sampling=sampling_cfg,
-                    thinking=req.thinking,
-                    stateless=False,
-                    raw=req.raw,
-                    on_result=_emit_result,
-                    return_node_ids=True,
-                )
-                # ``outcome`` is a (results, node_ids) tuple under
-                # ``return_node_ids=True``; surface the node ids on the
-                # ``done`` frame so the client can highlight the new
-                # siblings (sweep-deprecation per phase 5).
-                node_ids: list[str | None] = []
-                if isinstance(outcome, tuple) and len(outcome) == 2:
-                    node_ids = list(outcome[1])
-                loop.call_soon_threadsafe(
-                    result_queue.put_nowait, (DONE, node_ids),
-                )
-            except Exception as exc:
-                loop.call_soon_threadsafe(result_queue.put_nowait, (ERROR, exc))
-
-        async def event_generator():
-            async with acquire_session_lock(session) as acquired:
-                if not acquired:
-                    yield (
-                        f"data: {json.dumps({'type': 'error', 'message': 'session locked'})}"
-                        "\n\n"
-                    )
-                    return
-
-                yield (
-                    f"data: {json.dumps({'type': 'started', 'sweep_id': sweep_id, 'total': total})}"
-                    "\n\n"
-                )
-
-                fut = asyncio.get_running_loop().run_in_executor(None, _worker)
-                completed = 0
-                start = time.monotonic()
-                total_tokens = 0
-                try:
-                    while True:
-                        if await request.is_disconnected():
-                            session.stop()
-                            break
-                        try:
-                            tag, payload = await asyncio.wait_for(
-                                result_queue.get(), timeout=15.0,
-                            )
-                        except asyncio.TimeoutError:
-                            yield ": heartbeat\n\n"
-                            continue
-                        if tag == "result":
-                            completed += 1
-                            total_tokens += int(payload["result"].get("token_count", 0))
-                            yield (
-                                f"data: {json.dumps({'type': 'result', **payload})}"
-                                "\n\n"
-                            )
-                            continue
-                        if tag is DONE:
-                            elapsed = time.monotonic() - start
-                            tps = (total_tokens / elapsed) if elapsed > 0 else 0.0
-                            sibling_ids = payload if isinstance(payload, list) else []
-                            yield (
-                                f"data: {json.dumps({'type': 'done', 'sweep_id': sweep_id, 'node_ids': sibling_ids, 'summary': {'completed': completed, 'total': total, 'total_tokens': total_tokens, 'tok_per_sec': round(tps, 2), 'elapsed': round(elapsed, 3)}})}"
-                                "\n\n"
-                            )
-                            break
-                        if tag is ERROR:
-                            yield (
-                                f"data: {json.dumps({'type': 'error', 'message': str(payload)})}"
-                                "\n\n"
-                            )
-                            break
-                finally:
-                    # Wait for the worker to fully wind down so the gen
-                    # lock isn't released mid-generation.
-                    try:
-                        await fut
-                    except Exception:
-                        pass
-
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+            })
+        return {
+            "kind": runset.kind,
+            "total": len(runset),
+            "node_ids": runset.node_ids,
+            "rows": rows,
+        }
 
     # ----- Live traits SSE stream ------------------------------------------
 
@@ -2277,7 +2157,7 @@ async def _ws_handle_generate(
                     pass
                 loop.call_soon_threadsafe(token_queue.put_nowait, event)
 
-            result_holder: list[GenerationResult] = []
+            result_holder: list[GenerationResult | RunSet] = []
             error_holder: list[BaseException] = []
 
             # Recipe-override (phase 5): accept either a mode string or a

@@ -40,8 +40,9 @@ The dashboard speaks the existing `/saklas/v1/*` native API plus six routes adde
 6. **POST `/saklas/v1/packs`** — install pack from HF coord or local folder.
 7. **POST `/saklas/v1/sessions/{id}/vectors/merge`** — register a merged-expression vector.
 8. **POST `/saklas/v1/sessions/{id}/vectors/clone`** — corpus-based clone, SSE progress branch on `Accept: text/event-stream`.
+9. **POST `/saklas/v1/sessions/{id}/experiments/fan`** — alpha grid as loom siblings, JSON `RunSet` summary.
 
-POST `/sweep` (the alpha-grid SSE) and the `traits/stream` SSE existed before v2.0 and remain.
+`traits/stream` remains the live per-token probe SSE. The old alpha-grid `/sweep` SSE route is gone.
 
 ## Source layout
 
@@ -51,7 +52,8 @@ webui/src/
   App.svelte                  # shell — topbar / two-column main / status footer / drawer host
   lib/
     api.ts                    # typed REST + WS + SSE clients
-    stores.svelte.ts          # Svelte 5 runes-based shared state (SvelteMap-backed)
+    stores.svelte.ts          # Svelte 5 runes-based shared state barrel + cross-cutting WS/tree state
+    stores/                   # split independent slices: drawers, inputHistory, toasts
     types.ts                  # every shared interface
     expression.ts             # parse/serialize the steering grammar
     tokens.ts                 # HIGHLIGHT_SAT + scoreToRgb + twoStripeStyle
@@ -76,15 +78,12 @@ webui/src/
     index.ts                  # barrel re-exports for App.svelte's switch
 ```
 
-**Sweep deprecation (v2.3).**  `SweepDrawer.svelte` and the standalone
-table view are gone — sweep results land as loom siblings under one
-shared user-turn anchor, viewable in the loom sidebar.  The CLI verb
-`/sweep` still exists as a deprecation alias for `/fan` and prints a
-banner.  Server route `POST /sweep` (SSE) remains; the result handler
-now attaches siblings instead of producing rows.  See
-`docs/plans/loom.md` "Hard breaks" for the v2.3 timing note.
+**Alpha grids.** `SweepDrawer.svelte`, the standalone table view, the
+TUI `/sweep` alias, and the server `/sweep` SSE route are gone. Alpha
+grids now land as loom siblings through `/fan` in the TUI and
+`POST /experiments/fan` on the native API.
 
-Adding a panel: write the .svelte file, wire any new state into `stores.svelte.ts`, mount from App.svelte's grid, `npm run build`, commit the regenerated `saklas/web/dist/`. Adding a drawer: write the .svelte file under `drawers/`, add the name to the `DrawerName` union in `lib/types.ts`, add a branch to App.svelte's drawer switch, re-export from `drawers/index.ts` if it should ship in the topbar tools menu.
+Adding a panel: write the .svelte file, wire new state into the smallest matching module under `lib/stores/` (or `stores.svelte.ts` only for cross-cutting WS/tree/chat state), mount from App.svelte's grid, `npm run build`, commit the regenerated `saklas/web/dist/`. Adding a drawer: write the .svelte file under `drawers/`, add the name to the `DrawerName` union in `lib/types.ts`, add a branch to App.svelte's drawer switch, re-export from `drawers/index.ts` if it should ship in the topbar tools menu.
 
 ## Reactivity gotcha
 

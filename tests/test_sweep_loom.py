@@ -16,7 +16,7 @@ from saklas import (
     SamplingConfig,
     derive_seed_schedule,
 )
-from saklas.core.results import GenerationResult
+from saklas.core.results import GenerationResult, RunSet
 
 
 class _SweepStub:
@@ -97,62 +97,20 @@ def test_sweep_lands_siblings_under_user_turn():
         assert stub.tree.nodes[sid].role == "assistant"
 
 
-def test_sweep_return_node_ids_returns_parallel_lists():
+def test_sweep_runset_carries_parallel_node_ids():
     from saklas.core.session import SaklasSession
 
     stub = _SweepStub()
     sweep = SaklasSession.generate_sweep.__get__(stub, _SweepStub)
     out = sweep(
         "go", sweep={"honest.deceptive": [0.1, 0.2]},
-        stateless=False, return_node_ids=True,
+        stateless=False,
     )
-    assert isinstance(out, tuple)
-    results, node_ids = out
-    assert len(results) == 2
-    assert len(node_ids) == 2
-    for nid in node_ids:
+    assert isinstance(out, RunSet)
+    assert len(out) == 2
+    assert len(out.node_ids) == 2
+    for nid in out.node_ids:
         assert nid in stub.tree.nodes
-
-
-def test_sweep_explicit_return_node_ids_false_warns():
-    """Explicit ``return_node_ids=False`` emits a DeprecationWarning;
-    omitting the kwarg (sentinel default) does NOT.  v2.4 will flip
-    the default to the tuple shape.
-    """
-    import warnings
-
-    from saklas.core.session import SaklasSession
-
-    stub = _SweepStub()
-    sweep = SaklasSession.generate_sweep.__get__(stub, _SweepStub)
-
-    # Explicit False — warn.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = sweep(
-            "go", sweep={"honest.deceptive": [0.1]},
-            stateless=True, return_node_ids=False,
-        )
-    assert any(
-        issubclass(w.category, DeprecationWarning)
-        and "return_node_ids=False" in str(w.message)
-        for w in caught
-    )
-    # Return shape unchanged in v2.3 — bare list, not tuple.
-    assert isinstance(out, list)
-
-    # Default (sentinel) — no warning.
-    stub2 = _SweepStub()
-    sweep2 = SaklasSession.generate_sweep.__get__(stub2, _SweepStub)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out2 = sweep2(
-            "go", sweep={"honest.deceptive": [0.1]}, stateless=True,
-        )
-    assert not any(
-        issubclass(w.category, DeprecationWarning) for w in caught
-    )
-    assert isinstance(out2, list)
 
 
 def test_sweep_seed_schedule_is_deterministic():
@@ -172,7 +130,7 @@ def test_sweep_seed_schedule_is_deterministic():
     assert seeds == rebuilt
 
 
-def test_sweep_default_return_shape_is_results_list():
+def test_sweep_default_return_shape_is_runset():
     from saklas.core.session import SaklasSession
 
     stub = _SweepStub()
@@ -181,6 +139,6 @@ def test_sweep_default_return_shape_is_results_list():
         "x", sweep={"honest.deceptive": [0.0]},
         stateless=False,
     )
-    # Legacy shape: just the result list.
-    assert isinstance(results, list)
+    assert isinstance(results, RunSet)
     assert len(results) == 1
+    assert len(results.node_ids) == 1

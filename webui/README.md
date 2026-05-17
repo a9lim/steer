@@ -29,7 +29,8 @@ src/
   App.svelte             # shell — topbar / two-column main / status footer / drawer host
   lib/
     api.ts               # typed REST + WS + SSE clients for /saklas/v1/*
-    stores.svelte.ts     # Svelte 5 runes-based shared state (SvelteMap-backed)
+    stores.svelte.ts     # shared state barrel + WS/tree coordination
+    stores/              # split slices: drawers, inputHistory, toasts
     types.ts             # every shared interface (DrawerName, ChatTurn, …)
     expression.ts        # parse/serialize the steering-expression grammar
     tokens.ts            # per-token highlight RGB mapping (mirrors TUI)
@@ -39,7 +40,7 @@ src/
   panels/
     Topbar.svelte                # model · device · clear/rewind/regen · tools · stop
     StatusFooter.svelte          # ● gen N/M [bar] · t/s · elapsed · ppl
-    Chat.svelte                  # thinking-collapsible + probe-tinted tokens + A/B
+    Chat.svelte                  # thinking-collapsible + probe-tinted tokens + auto-regen/pin split
     SamplingStrip.svelte         # T / P / K / max / seed / thinking
     SteeringRack.svelte          # vector strips + canonical EXPR + "+ steer"
     VectorStrip.svelte           # ●/○ enable + α slider + α display + trigger / variant / ⋮ menu / ✕ + inline projection modal
@@ -49,7 +50,7 @@ src/
     Extract / Load / Compare / SystemPrompt / ModelInfo / Help / Export
     SaveConversation / LoadConversation
     VectorPicker / ProbePicker
-    Sweep / Pack / Merge / Clone
+    Pack / Merge / Clone
     TokenDrilldown / Correlation / LayerNorms
     _SearchableConceptList.svelte
     index.ts             # barrel re-exports for App.svelte's drawer switch
@@ -58,7 +59,7 @@ src/
 ## Adding a panel
 
 1. New `src/panels/Foo.svelte`.
-2. Wire any new state into `lib/stores.svelte.ts` — Svelte 5 runes (`$state`), exported as a slice. Use `SvelteMap` / `SvelteSet` (not plain `Map` / `Set`) for collections.
+2. Wire any new state into the smallest matching file under `lib/stores/`, or into `lib/stores.svelte.ts` only when it genuinely crosses WS/tree/chat boundaries. Use Svelte 5 runes (`$state`) and `SvelteMap` / `SvelteSet` for collections.
 3. Mount it from `App.svelte`.
 4. `npm run build`, then commit the regenerated `../saklas/web/dist/` so the wheel picks up the new entrypoint.
 
@@ -82,7 +83,7 @@ The dashboard speaks the existing `/saklas/v1/*` native API:
 * `GET /saklas/v1/sessions/default/correlation[?names=a,b]` — N×N cosine
 * `GET/POST/DELETE /saklas/v1/sessions/default/probes[/{name}]` — list / activate / deactivate
 * `POST /saklas/v1/sessions/default/extract` — JSON or SSE-progress when `Accept: text/event-stream`
-* `POST /saklas/v1/sessions/default/sweep` — alpha-grid SSE
+* `POST /saklas/v1/sessions/default/experiments/fan` — alpha grid as loom siblings
 * `POST /saklas/v1/sessions/default/vectors/{merge,clone}` — register a derived vector
 * `GET /saklas/v1/packs[/search]`, `POST /saklas/v1/packs` — pack browse + install
 * `WS /saklas/v1/sessions/default/stream` — token + probe co-stream; the `token` event carries optional `per_layer_scores` and the `done` event carries `per_token_probes`

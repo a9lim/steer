@@ -2,7 +2,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
     import torch
@@ -84,6 +84,86 @@ class GenerationResult:
             "prompt_tokens": self.prompt_tokens,
             "finish_reason": self.finish_reason,
             "applied_steering": self.applied_steering,
+        }
+
+
+class RunSet(list[GenerationResult]):
+    """Ordered set of generation results plus experiment metadata.
+
+    ``RunSet`` is intentionally list-like: existing batch/sweep callers
+    can still iterate, index, and take ``len(...)``.  Single-run callers
+    get one stable shape too, while ``.first`` and the small ``__getattr__``
+    compatibility shim keep common ``session.generate(...).text`` code
+    readable during the transition.
+    """
+
+    def __init__(
+        self,
+        results: Iterable[GenerationResult] = (),
+        *,
+        node_ids: Iterable[str | None] | None = None,
+        grid: Iterable[dict[str, Any]] | None = None,
+        kind: str = "generation",
+    ) -> None:
+        super().__init__(results)
+        self.node_ids: list[str | None] = (
+            list(node_ids) if node_ids is not None else [None] * len(self)
+        )
+        if len(self.node_ids) < len(self):
+            self.node_ids.extend([None] * (len(self) - len(self.node_ids)))
+        self.grid: list[dict[str, Any]] = (
+            [dict(row) for row in grid] if grid is not None else [{} for _ in self]
+        )
+        if len(self.grid) < len(self):
+            self.grid.extend({} for _ in range(len(self) - len(self.grid)))
+        self.kind = kind
+
+    @property
+    def results(self) -> list[GenerationResult]:
+        return list(self)
+
+    @property
+    def first(self) -> GenerationResult:
+        if not self:
+            raise IndexError("RunSet is empty")
+        return self[0]
+
+    @property
+    def node_id(self) -> str | None:
+        return self.node_ids[0] if self.node_ids else None
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate common single-run attribute access to ``.first``.
+
+        This keeps old ``session.generate(...).text`` snippets working
+        while the public shape settles on an always-run-set return.
+        """
+        try:
+            first = self.first
+        except IndexError as e:
+            raise AttributeError(name) from e
+        return getattr(first, name)
+
+    def to_collector(self) -> "ResultCollector":
+        collector = ResultCollector()
+        for idx, result in enumerate(self):
+            tags: dict[str, Any] = {"run_idx": idx}
+            if idx < len(self.node_ids) and self.node_ids[idx] is not None:
+                tags["node_id"] = self.node_ids[idx]
+            if idx < len(self.grid):
+                tags.update(self.grid[idx])
+            collector.add(result, **tags)
+        return collector
+
+    def to_dataframe(self) -> Any:
+        return self.to_collector().to_dataframe()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "node_ids": list(self.node_ids),
+            "grid": [dict(row) for row in self.grid],
+            "results": [result.to_dict() for result in self],
         }
 
 

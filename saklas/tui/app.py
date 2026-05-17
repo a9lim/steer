@@ -569,7 +569,6 @@ class SaklasApp(App[None]):
             "  /star, /note <text>         — decoration\n"
             "  /path                       — active path summary\n"
             "  /fan <vec> <alphas>         — canonical sweep (siblings)\n"
-            "  /sweep <vec> <alphas>       — deprecated alias for /fan\n"
             "  /prune <filter-expr>        — dim non-matching nodes\n"
             "  /auto-regen [on|off|mode]   — sibling regen modifier (Ctrl+A toggles)\n"
             "  /diff <id1> <id2> [--full]  — cross-branch text + readings diff\n"
@@ -2536,14 +2535,10 @@ class SaklasApp(App[None]):
     def _handle_fan(self, arg: str) -> None:
         """`/fan <vector> <alphas>` — N-way regen with per-sibling alpha override.
 
-        Phase-4 shape: keep it minimal — token-split on the first
+        Keep it minimal: token-split on the first
         whitespace, treat everything after as the alpha grid.  The
-        webui sweep-drawer grammar (linspace / range / comma list) is
+        webui fan grammar (linspace / range / comma list) is
         shared via :func:`parse_alpha_list`.
-
-        The sweep deprecation (phase 5) repoints the existing
-        `/sweep`-style table into loom siblings; phase 4 just stands
-        the canonical primitive up.
         """
 
         chat = self._chat_panel
@@ -2571,28 +2566,13 @@ class SaklasApp(App[None]):
         """Called from the loom-screen overlay's fan-out form."""
         self._handle_fan(raw)
 
-    def _handle_sweep_deprecated(self, arg: str) -> None:
-        """`/sweep` — deprecated alias for `/fan` (phase 5).
-
-        Sweep-as-table is gone; the canonical primitive is fan-out,
-        which lands every alpha as a sibling under one shared user-turn
-        anchor.  We accept the old verb so users mid-migration aren't
-        stranded; the banner makes the rename visible.
-        """
-        self._chat_panel.add_system_message(
-            "/sweep is deprecated — use /fan instead."
-        )
-        self._handle_fan(arg)
-
     def _dispatch_loom_fan_alphas(self, vector: str, alphas: list[float]) -> None:
         """Kick off the fan-out generation.
 
-        Phase 4 routes through ``session.generate(input, n=len(alphas),
-        parent_node_id=...)`` per the plan — keeping the structural
-        scaffold while the per-sibling alpha override (recipe_override
-        plumbing) lands in phase 5.  When a generation is already in
-        flight we stash the request as a pending action so it fires
-        after the current worker resolves.
+        Routes through ``session.generate_sweep`` so every alpha row
+        lands as a sibling under one shared user turn. When a
+        generation is already in flight we stash the request as a
+        pending action so it fires after the current worker resolves.
         """
 
         chat = self._chat_panel
@@ -2620,11 +2600,8 @@ class SaklasApp(App[None]):
     ) -> None:
         """Actually kick the engine.
 
-        Phase 5: routes through :meth:`SaklasSession.generate_sweep` with
-        ``return_node_ids=True`` so every sibling lands under one shared
-        user-turn anchor in the loom tree.  The legacy per-α
-        ``session.generate`` loop is gone — sweep is the canonical
-        sibling-shaped primitive.
+        Routes through :meth:`SaklasSession.generate_sweep` so every
+        sibling lands under one shared user-turn anchor in the loom tree.
         """
 
         chat = self._chat_panel
@@ -2663,14 +2640,14 @@ class SaklasApp(App[None]):
                     max_tokens=self._session.config.max_new_tokens,
                     seed=self._default_seed,
                 )
-                results, node_ids = self._session.generate_sweep(
+                runset = self._session.generate_sweep(
                     prompt,
                     {vector: [float(a) for a in alphas]},
                     sampling=sampling,
                     stateless=False,
                     parent_node_id=parent_for_sweep,
-                    return_node_ids=True,
                 )
+                node_ids = runset.node_ids
                 kept = [nid for nid in node_ids if nid]
                 self.call_from_thread(
                     self._chat_panel.add_system_message,
@@ -2699,8 +2676,6 @@ class SaklasApp(App[None]):
         When a gen is already running we defer through
         ``_pending_action`` like every other interrupting slash command.
         """
-
-        chat = self._chat_panel
         if self._session.is_generating or self._ui_gen_active:
             self._pending_action = ("regen_n", n, mode)
             self._session.stop()

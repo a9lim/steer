@@ -44,8 +44,8 @@ v2.3; more elaborate predicates compose programmatically through
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal, Mapping, Sequence
 
 from saklas.core.errors import SaklasError
 

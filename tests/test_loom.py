@@ -495,7 +495,7 @@ def test_d15_engine_check_passes_for_explicit_grandparent():
     u1 = t.add_user_turn("hi")
     a1 = t.begin_assistant(u1)
     t.finalize_assistant(a1, text="hello")
-    u2 = t.add_user_turn("more")
+    t.add_user_turn("more")
     check = _bind_check_user_send_target(t)
     check(a1)  # u2's parent is a1; regen passes a1 explicitly — no raise
 
@@ -657,7 +657,7 @@ def test_navigate_event_carries_active_node():
     seen: list[LoomMutated] = []
     bus.subscribe(lambda e: seen.append(e) if isinstance(e, LoomMutated) else None)
     t = LoomTree(events=bus)
-    u1 = t.add_user_turn("x")
+    t.add_user_turn("x")
     seen.clear()
     t.navigate(t.root_id)
     assert seen and seen[0].op == "navigate"

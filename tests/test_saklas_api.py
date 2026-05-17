@@ -1071,7 +1071,7 @@ def test_session_extract_sae_saves_suffixed_file(tmp_path, monkeypatch):
             pass
 
     handle = StubHandle()
-    pipeline = E.ExtractionPipeline(handle, handle, {}, EventBus())
+    pipeline = E.ExtractionPipeline(handle, handle, EventBus())
     name, profile = pipeline.extract("honest.deceptive", sae="mock-release")
 
     # Return key carries the :sae-<release> suffix
@@ -1156,7 +1156,7 @@ def test_session_extract_raw_path_unchanged(tmp_path, monkeypatch):
             pass
 
     handle = StubHandle()
-    pipeline = E.ExtractionPipeline(handle, handle, {}, EventBus())
+    pipeline = E.ExtractionPipeline(handle, handle, EventBus())
     name, profile = pipeline.extract("honest.deceptive")
 
     # No :sae suffix

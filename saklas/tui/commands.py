@@ -388,19 +388,6 @@ def _build_registry() -> dict[str, SlashCommand]:
             max_args=None,
         ),
         SlashCommand(
-            # Deprecated alias for ``/fan`` — phase 5 collapses sweep into
-            # the canonical fan-out primitive.  Routes through the same
-            # handler with a deprecation banner.
-            name="/sweep",
-            handler=SaklasApp._handle_sweep_deprecated,
-            usage=(
-                "Usage: /sweep <vector> <alphas>  (deprecated — use /fan)\n"
-                "  alphas: '0.0, 0.3, 0.7'  ·  linspace(-1, 1, 5)  ·  0.0:1.0:0.25"
-            ),
-            min_args=2,
-            max_args=None,
-        ),
-        SlashCommand(
             name="/prune",
             handler=SaklasApp._handle_prune,
             usage="Usage: /prune <filter-expr>  (phase 5 evaluates; phase 4 stashes)",

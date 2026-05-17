@@ -40,7 +40,7 @@ from saklas.io.packs import PackFormatError, PackMetadata, hash_folder_files
 from saklas.io.paths import concept_dir
 from saklas.io.probes_bootstrap import bootstrap_probes, bootstrap_layer_means
 from saklas.core.profile import Profile
-from saklas.core.results import GenerationResult, TokenEvent, ProbeReadings
+from saklas.core.results import GenerationResult, RunSet, TokenEvent, ProbeReadings
 from saklas.core.sampling import SamplingConfig
 from saklas.core.steering import Steering
 from saklas.core.steering_expr import AblationTerm
@@ -48,15 +48,6 @@ from saklas.core.triggers import Trigger
 from saklas.core.vectors import load_profile as _load_profile
 
 _log = logging.getLogger(__name__)
-
-# Sentinel used to distinguish "not passed" from explicit ``False`` on
-# ``generate_sweep(return_node_ids=...)``.  Pre-v2.4 the default is
-# preserved as ``False`` (returns bare list of results); v2.4 will
-# flip to always return the tuple.  Explicit ``False`` emits a
-# DeprecationWarning so callers migrate to either the default (which
-# will silently flip) or explicit ``True`` (the v2.4 shape, available
-# today).
-_RETURN_NODE_IDS_UNSET = object()
 
 # Hybrid linear-attention models (qwen3.6-27b, lfm2, etc.) carry a
 # recurrent state (``conv_states`` + ``recurrent_states``) per LA layer
@@ -303,7 +294,7 @@ class ConcurrentExtractionError(RuntimeError, SaklasError):
 # ``(alpha, Trigger)`` tuples; ablation entries are ``AblationTerm``
 # values carrying their own coeff + trigger + target.  The union flows
 # through the stack, ``_flatten``, ``_push``/``_pop``, and is dispatched
-# by type in ``_rebuild_steering_hooks`` and ``_apply_steering``.
+# by type in ``_compose_steering_entries``.
 SteeringStackEntry = tuple[float, Trigger] | AblationTerm
 
 
@@ -861,11 +852,11 @@ class SaklasSession:
 
         # Concept-extraction pipeline.  Constructed once so the session
         # holds a single live instance; the pipeline takes the structural
-        # dependencies it needs (model handle / pack writer / registry /
-        # event bus) instead of a back-reference.  ``self`` satisfies all
-        # three protocols implicitly — see :mod:`saklas.core.extraction`.
+        # dependencies it needs (model handle / pack writer / event bus)
+        # instead of a back-reference.  ``self`` satisfies those protocols
+        # implicitly — see :mod:`saklas.core.extraction`.
         from saklas.core.extraction import ExtractionPipeline as _Pipeline
-        self._extraction = _Pipeline(self, self, self, self.events)
+        self._extraction = _Pipeline(self, self, self.events)
 
     # -- ModelHandle protocol surface (consumed by ExtractionPipeline) --
 
@@ -898,23 +889,6 @@ class SaklasSession:
         consumers (``extract_contrastive``, hooks).
         """
         return self._layers
-
-    # -- VectorRegistry protocol surface --
-    #
-    # ``__contains__`` falls through to ``self._profiles``; ``add`` writes a
-    # ``Profile`` back into the registry as a plain dict so the steering
-    # hook hot path reads tensors without attribute lookups.  ``has_vector``
-    # already covers public membership checks; ``add`` is reserved for the
-    # extraction pipeline's eventual write-back.
-
-    def __contains__(self, name: object) -> bool:
-        if not isinstance(name, str):
-            return False
-        return name in self._profiles
-
-    def add(self, name: str, profile: Profile) -> None:
-        """Register a profile under ``name`` — :class:`VectorRegistry` writeback."""
-        self._profiles[name] = dict(profile.as_dict())
 
     # -- State queries --
 
@@ -2159,62 +2133,11 @@ class SaklasSession:
                 return pm
         return self._projection_metric
 
-    def _rebuild_steering_hooks(self) -> None:
-        """Tear down existing hooks and install from the flattened stack head.
-
-        Called on every push/pop.  When the stack is empty this is a clean
-        ``clear_all``.  One hook installation per active layer regardless
-        of nesting depth — ``SteeringManager.apply_to_model`` composes
-        per-layer vectors internally and groups entries by trigger within
-        each layer.  Dispatches by entry type: plain tuples route to
-        :meth:`SteeringManager.add_vector`, :class:`AblationTerm` values
-        route to :meth:`SteeringManager.add_ablation` using the term's
-        ``target`` as the registry key.
-        """
-        flat = self._flatten_steering_stack()
-        self._steering.clear_all()
-        if not flat:
-            return
-        for name, entry in flat.items():
-            if isinstance(entry, AblationTerm):
-                target = entry.target
-                if target not in self._profiles:
-                    raise VectorNotRegisteredError(
-                        f"No vector registered for ablation target '{target}'"
-                    )
-                self._steering.add_ablation(
-                    target, self._profiles[target],
-                    alpha=entry.coeff, trigger=entry.trigger,
-                    layer_means=self._layer_means,
-                )
-                continue
-            alpha, trigger = entry
-            if name not in self._profiles:
-                raise VectorNotRegisteredError(f"No vector registered for '{name}'")
-            self._steering.add_vector(
-                name, self._profiles[name], alpha, trigger,
-            )
-        eff_mode, eff_theta = self._resolve_steering_override()
-        self._steering.apply_to_model(
-            self._layers, self._device, self._dtype,
-            injection_mode=eff_mode,  # type: ignore[arg-type]
-            theta_max=eff_theta,
-        )
-
-    def _apply_steering(
-        self, entries: dict[str, SteeringStackEntry],
+    def _compose_steering_entries(
+        self,
+        entries: dict[str, SteeringStackEntry],
     ) -> None:
-        """Compose and attach steering hooks for a generation call.
-
-        Must be called inside an active gen span — i.e. ``_gen_phase`` is
-        ``PREAMBLE`` or ``RUNNING``.  The check is defense in depth against
-        a rogue caller re-entering outside a gen span.  Dispatches by entry
-        type — mirrors :meth:`_rebuild_steering_hooks`.
-        """
-        if self._gen_phase not in (GenState.PREAMBLE, GenState.RUNNING):
-            raise ConcurrentGenerationError(
-                "_apply_steering called outside a generation span"
-            )
+        """Load entries into ``SteeringManager`` without installing hooks."""
         self._steering.clear_all()
         for name, entry in entries.items():
             if isinstance(entry, AblationTerm):
@@ -2235,7 +2158,34 @@ class SaklasSession:
             self._steering.add_vector(
                 name, self._profiles[name], alpha, trigger,
             )
-        self._steering.apply_to_model(self._layers, self._device, self._dtype)
+
+    def _install_composed_steering(self) -> None:
+        """Attach the currently-composed steering entries to model layers."""
+        eff_mode, eff_theta = self._resolve_steering_override()
+        self._steering.apply_to_model(
+            self._layers, self._device, self._dtype,
+            injection_mode=eff_mode,  # type: ignore[arg-type]
+            theta_max=eff_theta,
+        )
+
+    def _rebuild_steering_hooks(self) -> None:
+        """Tear down existing hooks and install from the flattened stack head.
+
+        Called on every push/pop.  When the stack is empty this is a clean
+        ``clear_all``.  One hook installation per active layer regardless
+        of nesting depth — ``SteeringManager.apply_to_model`` composes
+        per-layer vectors internally and groups entries by trigger within
+        each layer.  Dispatches by entry type: plain tuples route to
+        :meth:`SteeringManager.add_vector`, :class:`AblationTerm` values
+        route to :meth:`SteeringManager.add_ablation` using the term's
+        ``target`` as the registry key.
+        """
+        flat = self._flatten_steering_stack()
+        if not flat:
+            self._steering.clear_all()
+            return
+        self._compose_steering_entries(flat)
+        self._install_composed_steering()
 
     def _clear_steering(self) -> None:
         """Remove all steering hooks from the model."""
@@ -2510,7 +2460,7 @@ class SaklasSession:
         *,
         base_recipe: "Recipe | None" = None,
         n: int = 1,
-    ) -> "GenerationResult | list[GenerationResult]":
+    ) -> RunSet:
         """Regenerate as a sibling of ``parent_node_id`` under a modifier.
 
         ``mode`` is either a built-in mode string (``"unsteered"``,
@@ -2523,8 +2473,8 @@ class SaklasSession:
         given): None fields fall through to the parent's setting.
 
         Convenience entry point: auto-regen and the manual
-        ``/regen N <mode>`` flow both call this.  Returns whatever
-        :meth:`generate` does for ``n``.
+        ``/regen N <mode>`` flow both call this.  Returns a
+        :class:`RunSet` even when ``n == 1``.
         """
         from saklas.core.loom import Recipe
 
@@ -3110,6 +3060,173 @@ class SaklasSession:
             new_sampling = _replace(base, seed=overlaid.seed)
         return new_steering, new_sampling, new_thinking
 
+    def _prepare_generation_call(
+        self,
+        steering: "str | Steering | None",
+        sampling: SamplingConfig | None,
+        thinking: bool | None,
+    ) -> tuple[
+        Steering | None,
+        bool,
+        GenerationConfig,
+        int | None,
+        int | None,
+        list[str] | None,
+        dict[int, float] | None,
+        float,
+        float,
+        list | None,
+    ]:
+        """Normalize per-call generation controls before model work."""
+        steering_obj = Steering.from_value(steering)
+        if thinking is None:
+            if steering_obj is not None and steering_obj.thinking is not None:
+                use_thinking_req = steering_obj.thinking
+            else:
+                use_thinking_req = supports_thinking(self._tokenizer)
+        else:
+            use_thinking_req = thinking
+
+        gen_config = self._compose_gen_config(sampling)
+        raw_lp = sampling.logprobs if sampling is not None else None
+        raw_top_k = sampling.return_top_k if sampling is not None else 0
+        if raw_top_k == 0:
+            raw_top_k = self._default_return_top_k
+        if raw_top_k > 0:
+            lp_count: int | None = (
+                max(raw_top_k, raw_lp) if raw_lp is not None else raw_top_k
+            )
+        else:
+            lp_count = raw_lp
+
+        seed = sampling.seed if sampling is not None else None
+        stop_tuple = sampling.stop if sampling is not None else None
+        stop_list = list(stop_tuple) if stop_tuple else None
+        logit_bias = sampling.logit_bias if sampling is not None else None
+        presence_penalty = sampling.presence_penalty if sampling is not None else 0.0
+        frequency_penalty = (
+            sampling.frequency_penalty if sampling is not None else 0.0
+        )
+        logprobs_list: list | None = [] if raw_lp is not None else None
+        return (
+            steering_obj,
+            use_thinking_req,
+            gen_config,
+            lp_count,
+            seed,
+            stop_list,
+            logit_bias,
+            presence_penalty,
+            frequency_penalty,
+            logprobs_list,
+        )
+
+    def _snapshot_steering_alphas(self) -> dict[str, float]:
+        """Flatten the active steering stack for ``GenerationResult.vectors``."""
+        snap: dict[str, float] = {}
+        for name, entry in self._flatten_steering_stack().items():
+            if isinstance(entry, AblationTerm):
+                snap[name] = entry.coeff
+                continue
+            snap[name] = entry[0]
+        return snap
+
+    def _start_loom_assistant(
+        self,
+        input,
+        *,
+        stateless: bool,
+        parent_node_id: str | None,
+        sampling: SamplingConfig | None,
+        steering_obj: Steering | None,
+        use_thinking_req: bool,
+    ) -> str | None:
+        """Create the loom user/assistant nodes for a stateful generation."""
+        if stateless:
+            return None
+
+        if isinstance(input, str):
+            self._check_user_send_target(parent_node_id)
+            user_node_id = self.tree.add_user_turn(input, parent_id=parent_node_id)
+        else:
+            user_node_id = parent_node_id or self.tree.active_node_id
+
+        self._active_gen_reservation = user_node_id
+        seed_val = sampling.seed if sampling is not None else None
+        recipe = Recipe(
+            steering=str(steering_obj) if steering_obj is not None else None,
+            sampling=sampling,
+            thinking=use_thinking_req,
+            seed=seed_val,
+            probes=list(self._monitor.probe_names),
+        )
+        recipe = recipe._fill_probe_hashes(self)
+        return self.tree.begin_assistant(user_node_id, recipe=recipe)
+
+    def _run_generation_loop(
+        self,
+        input_ids: torch.Tensor,
+        gen_config: GenerationConfig,
+        *,
+        use_thinking: bool,
+        want_hidden: bool,
+        effective_tap: Callable[..., None] | None,
+        seed: int | None,
+        stop_list: list[str] | None,
+        logit_bias: dict[int, float] | None,
+        presence_penalty: float,
+        frequency_penalty: float,
+        lp_count: int | None,
+    ) -> tuple[list[int], float]:
+        """Run the decode loop once capture and steering are installed."""
+        cached_pkv = None
+        cache_position_offset = 0
+        effective_input_ids = input_ids
+        if (
+            not want_hidden
+            and not use_thinking
+            and not self._steering_stack
+            and self._prefix_cache is not None
+        ):
+            hit = self._try_prefix_cache_hit(input_ids)
+            if hit is not None:
+                suffix_ids, cached_pkv, cache_position_offset = hit
+                effective_input_ids = suffix_ids
+
+        start = time.monotonic()
+        gating_callback = (
+            self._build_gating_score_callback()
+            if self._steering_needs_probe_gating()
+            else None
+        )
+        use_static_cache = (
+            self._cuda_graphs_active
+            and cached_pkv is None
+            and self._steering.all_fast_path()
+        )
+        generated_ids = generate_steered(
+            self._model, self._tokenizer, effective_input_ids,
+            gen_config, self._gen_state, thinking=use_thinking,
+            on_token=effective_tap,
+            seed=seed, stop=stop_list, logit_bias=logit_bias,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            logprobs=lp_count,
+            trigger_ctx=self._steering.ctx,
+            past_key_values=cached_pkv,
+            cache_position_offset=cache_position_offset,
+            score_callback=gating_callback,
+            use_static_cache=use_static_cache,
+        )
+        elapsed = time.monotonic() - start
+
+        if cached_pkv is not None and self._prefix_cache is not None:
+            try:
+                cached_pkv.crop(cache_position_offset)
+            except (AttributeError, TypeError):
+                self._invalidate_prefix_cache()
+        return generated_ids, elapsed
+
     def _generate_core(
         self,
         input,
@@ -3150,60 +3267,18 @@ class SaklasSession:
                 thinking=thinking,
             )
 
-        steering_obj = Steering.from_value(steering)
-        # Effective thinking: explicit kwarg wins; else Steering.thinking;
-        # else auto-detect from tokenizer.
-        if thinking is None:
-            if steering_obj is not None and steering_obj.thinking is not None:
-                use_thinking_req = steering_obj.thinking
-            else:
-                use_thinking_req = supports_thinking(self._tokenizer)
-        else:
-            use_thinking_req = thinking
-
-        gen_config = self._compose_gen_config(sampling)
-        # Compose the effective engine ``logprobs`` knob from two
-        # SamplingConfig sources:
-        #   - ``sampling.logprobs`` (OpenAI-shape: ``None`` = no capture,
-        #     ``0`` = chosen-only, ``>0`` = top-K).  Controls whether
-        #     ``result.logprobs`` gets populated for OpenAI route shape.
-        #   - ``sampling.return_top_k`` (saklas-native: ``0`` = no alts,
-        #     ``>0`` = top-K).  Set by the loom path / webui when the
-        #     "show alts" toggle is on.
-        # Engine semantics merge them under ``max`` so the larger of the
-        # two requested K wins; whichever surface asked for more wins.
-        # ``result.logprobs`` still only populates when ``sampling.logprobs``
-        # was explicitly set (preserves OpenAI-route discipline of not
-        # leaking logprobs into responses that didn't ask for them).
-        raw_lp = sampling.logprobs if sampling is not None else None
-        raw_top_k = sampling.return_top_k if sampling is not None else 0
-        # Inherit session-level default when the per-call value is the
-        # SamplingConfig default of 0. There's no way to *explicitly*
-        # request K=0 over a non-zero session default through this knob —
-        # callers who want to suppress alts on a single call set the
-        # session default to 0 instead, or pass an explicit
-        # ``sampling.logprobs=0`` to capture chosen-logprob only.
-        if raw_top_k == 0:
-            raw_top_k = self._default_return_top_k
-        if raw_top_k > 0:
-            lp_count: int | None = (
-                max(raw_top_k, raw_lp) if raw_lp is not None else raw_top_k
-            )
-        else:
-            lp_count = raw_lp
-        seed = sampling.seed if sampling is not None else None
-        stop_tuple = sampling.stop if sampling is not None else None
-        stop_list = list(stop_tuple) if stop_tuple else None
-        logit_bias = sampling.logit_bias if sampling is not None else None
-        presence_penalty = sampling.presence_penalty if sampling is not None else 0.0
-        frequency_penalty = sampling.frequency_penalty if sampling is not None else 0.0
-
-        # ``logprobs_list`` populates ``GenerationResult.logprobs`` (OpenAI
-        # route shape); only allocate when the user explicitly opted in
-        # via ``sampling.logprobs`` (not when only ``return_top_k`` is set
-        # — the loom path consumes alts off the per-token event, not the
-        # post-hoc result.logprobs blob).
-        logprobs_list: list | None = [] if raw_lp is not None else None
+        (
+            steering_obj,
+            use_thinking_req,
+            gen_config,
+            lp_count,
+            seed,
+            stop_list,
+            logit_bias,
+            presence_penalty,
+            frequency_penalty,
+            logprobs_list,
+        ) = self._prepare_generation_call(steering, sampling, thinking)
         # ``mean_logprob_accum`` averages chosen-token logprobs over the
         # non-thinking response span — surfaced on ``LoomNode.mean_logprob``
         # at finalize-assistant time so the loom sidebar can sort siblings
@@ -3288,64 +3363,20 @@ class SaklasSession:
         if steering_obj is not None and steering_obj.alphas:
             steering_cm = self.steering(steering_obj)
 
-        def _snapshot_alphas() -> dict[str, float]:
-            """Flatten the steering stack to ``{name: alpha}`` — triggers
-            stripped for ``GenerationResult.vectors``.  Ablation entries
-            surface under their ``!<target>`` key with the term's coeff."""
-            snap: dict[str, float] = {}
-            for name, entry in self._flatten_steering_stack().items():
-                if isinstance(entry, AblationTerm):
-                    snap[name] = entry.coeff
-                    continue
-                snap[name] = entry[0]
-            return snap
-
         vector_snapshot: dict[str, float] = (
-            _snapshot_alphas()
+            self._snapshot_steering_alphas()
             if self._steering_stack or steering_cm is not None
             else {}
         )
 
-        # Loom tree wiring — create the user / assistant nodes before
-        # streaming starts so token deltas can route to ``assistant_node_id``
-        # and live readers can see the in-flight assistant node.  Stateless
-        # gens skip tree mutation entirely (matches v2.2 ``stateless``).
-        assistant_node_id: str | None = None
-        if not stateless:
-            if isinstance(input, str):
-                # D15: reject "send a new user turn from a user node" before
-                # ``add_user_turn`` would corrupt the tree shape.  Regen
-                # paths pass ``parent_node_id=<grandparent>`` so this only
-                # fires on the genuinely-wrong shape.
-                self._check_user_send_target(parent_node_id)
-                # ``add_user_turn`` dedups against existing user-children with
-                # identical text — re-sending the same prompt regenerates
-                # under the existing user node rather than spawning a chain.
-                user_node_id = self.tree.add_user_turn(
-                    input, parent_id=parent_node_id,
-                )
-            else:
-                # list[dict] messages: caller is bypassing the tree-as-context
-                # path; attach the assistant under the active node so the
-                # readings still land somewhere coherent.
-                user_node_id = parent_node_id or self.tree.active_node_id
-            # Reserve the subtree rooted at the user node for the gen.
-            # Edits / deletes against this subtree raise during the gen.
-            self._active_gen_reservation = user_node_id
-            seed_val = sampling.seed if sampling is not None else None
-            recipe = Recipe(
-                steering=str(steering_obj) if steering_obj is not None else None,
-                sampling=sampling,
-                thinking=use_thinking_req,
-                seed=seed_val,
-                probes=list(self._monitor.probe_names),
-            )
-            # v2.3 phase 5: stamp probe content hashes so transcript
-            # replay can detect probe drift between save and load.
-            recipe = recipe._fill_probe_hashes(self)
-            assistant_node_id = self.tree.begin_assistant(
-                user_node_id, recipe=recipe,
-            )
+        assistant_node_id = self._start_loom_assistant(
+            input,
+            stateless=stateless,
+            parent_node_id=parent_node_id,
+            sampling=sampling,
+            steering_obj=steering_obj,
+            use_thinking_req=use_thinking_req,
+        )
 
         try:
             if steering_cm is not None:
@@ -3355,7 +3386,7 @@ class SaklasSession:
                 parent_node_id=parent_node_id,
             )
             # Refresh snapshot now that steering is pushed (first-scope case).
-            vector_snapshot = _snapshot_alphas()
+            vector_snapshot = self._snapshot_steering_alphas()
 
             want_hidden = bool(sampling and sampling.return_hidden)
             self.events.emit(GenerationStarted(input=input, stateless=stateless))
@@ -3371,102 +3402,19 @@ class SaklasSession:
                 self._steering.ctx.reset()
                 self._gen_phase = GenState.RUNNING
 
-                # Prefix KV cache lookup. Skipped when the caller asked
-                # for return_hidden — the all-layer dump expects per-token
-                # captures starting from the prefix's last token forward,
-                # which the cached path can't synthesize (the prefix
-                # forward ran with capture suspended).  Skipped under
-                # thinking too: the thinking state machine bookkeeping
-                # gets twitchy when prefill spans multiple tokens of
-                # already-decided content, and the v3 motivating workload
-                # never sets thinking=True. Under steering scopes the
-                # cache was invalidated at scope entry so this path is
-                # naturally a miss; explicit guard keeps that contract
-                # legible. ``cache_position_offset`` is the cached
-                # prefix length — generate_steered widens its prefill
-                # attention mask to cover both prefix + suffix.
-                cached_pkv = None
-                cache_position_offset = 0
-                effective_input_ids = input_ids
-                if (
-                    not want_hidden
-                    and not use_thinking
-                    and not self._steering_stack
-                    and self._prefix_cache is not None
-                ):
-                    hit = self._try_prefix_cache_hit(input_ids)
-                    if hit is not None:
-                        suffix_ids, cached_pkv, cache_position_offset = hit
-                        effective_input_ids = suffix_ids
-
-                start = time.monotonic()
-                # Probe-gate score callback (v2.1): wire only when the
-                # active steering stack carries at least one probe-gated
-                # trigger.  ``_steering_needs_probe_gating`` is a cheap
-                # walk over the flattened head; the closure references
-                # ``self._capture`` and ``self._monitor`` directly so the
-                # generation thread doesn't pay attribute lookups in the
-                # hot path beyond what a single method call costs.  No
-                # gate ⇒ ``None`` ⇒ ``generate_steered`` skips the
-                # callback entirely.
-                gating_callback = (
-                    self._build_gating_score_callback()
-                    if self._steering_needs_probe_gating()
-                    else None
-                )
-
-                # StaticCache eligibility (Phase B, v2.2).  Three gates
-                # have to clear before we route through the static path:
-                #
-                # 1. Session-level support flag — set at __init__ via
-                #    ``is_cuda_graphs_supported``; off on MPS/CPU and on
-                #    architectures whose StaticCache constructor failed.
-                # 2. Prefix cache miss — a hit pre-prefilled a
-                #    DynamicCache, and mixing cache flavors mid-generation
-                #    would corrupt the K/V layout.  Future work: build
-                #    the prefix cache as StaticCache when this is
-                #    active so the prefix-hit path also benefits.
-                # 3. Fast-path-eligible steering — slow-path hooks
-                #    (probe gates, ablation, multi-trigger) read mutable
-                #    ``TriggerContext`` per fire, which CUDA-graph
-                #    capture under ``compile(mode="reduce-overhead")``
-                #    can't track.  ``all_fast_path()`` walks the hook
-                #    map; empty manager returns True (unsteered → safe).
-                use_static_cache = (
-                    self._cuda_graphs_active
-                    and cached_pkv is None
-                    and self._steering.all_fast_path()
-                )
-                generated_ids = generate_steered(
-                    self._model, self._tokenizer, effective_input_ids,
-                    gen_config, self._gen_state, thinking=use_thinking,
-                    on_token=_effective_tap,
-                    seed=seed, stop=stop_list, logit_bias=logit_bias,
+                generated_ids, elapsed = self._run_generation_loop(
+                    input_ids,
+                    gen_config,
+                    use_thinking=use_thinking,
+                    want_hidden=want_hidden,
+                    effective_tap=_effective_tap,
+                    seed=seed,
+                    stop_list=stop_list,
+                    logit_bias=logit_bias,
                     presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty,
-                    logprobs=lp_count,
-                    trigger_ctx=self._steering.ctx,
-                    past_key_values=cached_pkv,
-                    cache_position_offset=cache_position_offset,
-                    score_callback=gating_callback,
-                    use_static_cache=use_static_cache,
+                    lp_count=lp_count,
                 )
-                elapsed = time.monotonic() - start
-
-                # Crop the cache back to prefix_len so the next consumer
-                # gets the same bare-prefix state. HF's DynamicCache.crop
-                # truncates per-layer K/V tensors in-place to a max length;
-                # the appended suffix + generated tokens are dropped.
-                # When the cache was a miss (cached_pkv None) the stored
-                # cache wasn't touched — nothing to crop.
-                if cached_pkv is not None and self._prefix_cache is not None:
-                    try:
-                        cached_pkv.crop(cache_position_offset)
-                    except (AttributeError, TypeError):
-                        # Cache type doesn't support crop (legacy tuple
-                        # format, or HF API drift). Drop rather than risk
-                        # serving a stale cache to the next call.
-                        self._invalidate_prefix_cache()
             finally:
                 self._gen_state.stop_requested.set()
                 self._end_capture()
@@ -3552,6 +3500,69 @@ class SaklasSession:
             self._gen_phase = GenState.IDLE
             self._gen_lock.release()
 
+    def _generate_runset(
+        self,
+        input,
+        *,
+        steering: "str | Steering | None" = None,
+        sampling: SamplingConfig | None = None,
+        stateless: bool = False,
+        raw: bool = False,
+        thinking: bool | None = None,
+        on_token: Callable[..., None] | None = None,
+        parent_node_id: str | None = None,
+        n: int = 1,
+        recipe_override: "Recipe | str | None" = None,
+    ) -> RunSet:
+        """Run one or more sibling generations and return a ``RunSet``."""
+        if n < 1:
+            raise ValueError(f"n must be >= 1, got {n}")
+        if n == 1:
+            result = self._generate_core(
+                input,
+                steering=steering,
+                sampling=sampling,
+                stateless=stateless,
+                raw=raw,
+                thinking=thinking,
+                on_token=on_token,
+                parent_node_id=parent_node_id,
+                recipe_override=recipe_override,
+            )
+            node_id = self.tree.active_node_id if not stateless else None
+            return RunSet([result], node_ids=[node_id], kind="generation")
+
+        # N-way regen: derive per-sibling seeds from the supplied base seed
+        # (or a fresh entropy-derived one). Each iteration runs
+        # ``_generate_core`` independently; ``add_user_turn`` dedups so all
+        # siblings share the same user-parent.
+        base_seed = sampling.seed if sampling is not None else None
+        schedule = derive_seed_schedule(base_seed, n)
+        results: list[GenerationResult] = []
+        node_ids: list[str | None] = []
+        for seed_i in schedule:
+            from dataclasses import replace as _replace
+            si = sampling if sampling is not None else SamplingConfig()
+            si = _replace(si, seed=seed_i)
+            r = self._generate_core(
+                input,
+                steering=steering,
+                sampling=si,
+                stateless=stateless,
+                raw=raw,
+                thinking=thinking,
+                on_token=on_token,
+                parent_node_id=parent_node_id,
+                recipe_override=recipe_override,
+            )
+            results.append(r)
+            node_ids.append(self.tree.active_node_id if not stateless else None)
+            # External stop requested mid-batch: cancel the remainder.
+            # Sibling boundaries are the only valid stop points.
+            if self._gen_state.stop_requested.is_set():
+                break
+        return RunSet(results, node_ids=node_ids, kind="fan")
+
     # -- Generation: blocking --
 
     def generate(
@@ -3567,7 +3578,7 @@ class SaklasSession:
         parent_node_id: str | None = None,
         n: int = 1,
         recipe_override: "Recipe | str | None" = None,
-    ) -> "GenerationResult | list[GenerationResult]":
+    ) -> RunSet:
         """Blocking generation.
 
         Args:
@@ -3593,67 +3604,28 @@ class SaklasSession:
                 top-p renormalization.
             parent_node_id: loom-tree node id to anchor the new turn
                 under.  ``None`` = active node (today's behavior).
-            n: fan-out count.  ``n=1`` (default) returns a single
-                :class:`GenerationResult`; ``n>1`` runs the same prompt
+            n: fan-out count.  ``n=1`` (default) returns a one-result
+                :class:`RunSet`; ``n>1`` runs the same prompt
                 ``n`` times under deterministically-derived per-sibling
                 seeds (see :func:`~saklas.core.loom.derive_seed_schedule`)
-                and returns ``list[GenerationResult]`` in sibling order.
+                and returns a multi-result ``RunSet`` in sibling order.
 
         Returns:
-            A single :class:`GenerationResult` when ``n == 1`` (the
-            default), or a ``list[GenerationResult]`` of sibling
-            results when ``n > 1``.  Callers that branch on shape
-            should check ``isinstance(result, list)``; library helpers
-            wanting one stable shape are encouraged to wrap a single
-            result in a list themselves rather than threading the
-            ``n`` argument through.  Plan-compliant with the v2.3 loom
-            shape ("single result or list of siblings"); the
-            polymorphic return is intentional and stable across v2.3.
+            :class:`RunSet` in every case.  It is list-like for fan-out
+            and exposes ``.first`` for the common single-result case.
         """
-        if n < 1:
-            raise ValueError(f"n must be >= 1, got {n}")
-        if n == 1:
-            return self._generate_core(
-                input,
-                steering=steering,
-                sampling=sampling,
-                stateless=stateless,
-                raw=raw,
-                thinking=thinking,
-                on_token=on_token,
-                parent_node_id=parent_node_id,
-                recipe_override=recipe_override,
-            )
-        # N-way regen — derive per-sibling seeds from the supplied base
-        # seed (or a fresh entropy-derived one).  Each iteration runs
-        # ``_generate_core`` independently; ``add_user_turn`` dedups so
-        # all siblings share the same user-parent.
-        base_seed = sampling.seed if sampling is not None else None
-        schedule = derive_seed_schedule(base_seed, n)
-        results: list[GenerationResult] = []
-        for i, seed_i in enumerate(schedule):
-            from dataclasses import replace as _replace
-            si = sampling if sampling is not None else SamplingConfig()
-            si = _replace(si, seed=seed_i)
-            r = self._generate_core(
-                input,
-                steering=steering,
-                sampling=si,
-                stateless=stateless,
-                raw=raw,
-                thinking=thinking,
-                on_token=on_token,
-                parent_node_id=parent_node_id,
-                recipe_override=recipe_override,
-            )
-            results.append(r)
-            # External stop requested mid-batch: cancel the remainder.
-            # Sibling boundaries are the only valid stop points (matches
-            # phase 1 spec — "stop_requested cancels the currently-
-            # streaming sibling.  Remaining queued siblings are skipped").
-            if self._gen_state.stop_requested.is_set():
-                break
-        return results
+        return self._generate_runset(
+            input,
+            steering=steering,
+            sampling=sampling,
+            stateless=stateless,
+            raw=raw,
+            thinking=thinking,
+            on_token=on_token,
+            parent_node_id=parent_node_id,
+            n=n,
+            recipe_override=recipe_override,
+        )
 
     # -- Generation: streaming --
 
@@ -3754,8 +3726,8 @@ class SaklasSession:
         stateless: bool = True,
         raw: bool = False,
         on_result: Callable[[int, GenerationResult], None] | None = None,
-    ) -> list[GenerationResult]:
-        """Run N prompts under the same steering, return results in order.
+    ) -> RunSet:
+        """Run N prompts under the same steering, return a ``RunSet``.
 
         Wrapper-loop over the existing single-prompt generation path:
         each prompt acquires the gen-lock, runs through ``_generate_core``,
@@ -3769,17 +3741,18 @@ class SaklasSession:
         pass ``stateless=False`` if you genuinely want each prompt to
         accumulate against the running history.
 
-        ``on_result(idx, result)`` fires after each completion — useful
-        for the server's SSE sweep endpoint, which streams per-result
-        events without waiting for the full batch.
+        ``on_result(idx, result)`` fires after each completion for local
+        progress hooks.
 
         Returns:
-            ``list[GenerationResult]`` aligned with ``prompts``.
+            ``RunSet`` aligned with ``prompts``.  ``runset.grid`` records
+            ``{"prompt_index": i}`` for each row.
         """
         if not isinstance(prompts, list) or not prompts:
             raise ValueError("generate_batch: prompts must be a non-empty list")
 
         results: list[GenerationResult] = []
+        node_ids: list[str | None] = []
         for idx, prompt in enumerate(prompts):
             r = self._generate_core(
                 prompt,
@@ -3790,15 +3763,16 @@ class SaklasSession:
                 thinking=thinking,
             )
             results.append(r)
+            node_ids.append(self.tree.active_node_id if not stateless else None)
             if on_result is not None:
                 on_result(idx, r)
-        return results
+        return RunSet(
+            results,
+            node_ids=node_ids,
+            grid=[{"prompt_index": i} for i in range(len(results))],
+            kind="batch",
+        )
 
-    # v2.4 hard break — surface deletion anchor.  The webui's
-    # ``SweepDrawer.svelte`` table view and the TUI's ``/sweep``
-    # command both repoint onto the loom-sibling shape this method
-    # now produces; both surfaces are slated for deletion in v2.4
-    # (decision 5 in ``docs/plans/loom.md``).
     def generate_sweep(
         self,
         prompt,
@@ -3811,9 +3785,8 @@ class SaklasSession:
         raw: bool = False,
         on_result: Callable[[int, GenerationResult, dict[str, float]], None] | None = None,
         parent_node_id: str | None = None,
-        return_node_ids: "bool | object" = _RETURN_NODE_IDS_UNSET,
-    ) -> "list[GenerationResult] | tuple[list[GenerationResult], list[str | None]]":
-        """Sweep a single prompt across a Cartesian product of alpha values.
+    ) -> RunSet:
+        """Fan a single prompt across a Cartesian product of alpha values.
 
         ``sweep`` maps ``concept_name → [alpha_0, alpha_1, ...]``.  The
         function generates one result per element of the product across
@@ -3833,40 +3806,11 @@ class SaklasSession:
         but exposed here so SSE consumers don't have to re-parse the
         expression.
 
-        ``return_node_ids`` toggles the legacy / current return shape.
-        Explicit ``False`` is deprecated: in v2.4 this method will
-        always return the ``(results, sibling_node_ids)`` tuple.
-        Callers that need the bare list today should explicitly opt in
-        via ``return_node_ids=False`` (this call) while updating to the
-        tuple shape; callers that need only the ids should pass
-        ``return_node_ids=True`` (the future-shape opt-in).  The
-        sentinel default keeps today's bare-list return until v2.4
-        flips it.
-
         Returns:
-            When ``return_node_ids`` is unset or ``False`` (v2.3
-            default): a ``list[GenerationResult]`` in iteration order
-            over the product.  When ``return_node_ids=True``: a tuple
-            ``(results, sibling_node_ids)`` where ``sibling_node_ids[i]``
-            is the assistant-node id finalized for ``results[i]`` (or
-            ``None`` under ``stateless=True``).  Each result's
-            ``applied_steering`` carries the canonical expression
-            string for round-trip reproduction.
+            ``RunSet`` in product order.  ``runset.grid[i]`` is the
+            alpha dict for row ``i``; ``runset.node_ids[i]`` is the
+            assistant node id when ``stateless=False``.
         """
-        import warnings
-
-        if return_node_ids is _RETURN_NODE_IDS_UNSET:
-            return_node_ids = False
-        elif return_node_ids is False:
-            warnings.warn(
-                "generate_sweep(return_node_ids=False) is deprecated; "
-                "v2.4 will always return the (results, sibling_node_ids) "
-                "tuple.  Drop the explicit False to get the v2.3 default "
-                "(bare list) for now, or pass True to opt into the "
-                "future-stable tuple shape today.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         if not isinstance(sweep, dict) or not sweep:
             raise ValueError("generate_sweep: sweep dict must be non-empty")
         for name, alphas in sweep.items():
@@ -3920,8 +3864,10 @@ class SaklasSession:
 
         results: list[GenerationResult] = []
         sibling_node_ids: list[str | None] = []
+        grid_rows: list[dict[str, float]] = []
         for idx, combo in enumerate(itertools.product(*alpha_lists)):
             alpha_values = dict(zip(concept_names, combo))
+            alpha_values = {k: float(v) for k, v in alpha_values.items()}
             terms = [f"{alpha} {name}" for name, alpha in alpha_values.items()]
             expr = " + ".join(terms)
             if base_str:
@@ -3946,12 +3892,16 @@ class SaklasSession:
             # it active so the path-walker view stays coherent.
             sib_id = self.tree.active_node_id if not stateless else None
             sibling_node_ids.append(sib_id)
+            grid_rows.append(alpha_values)
             if on_result is not None:
                 on_result(idx, r, alpha_values)
 
-        if return_node_ids:
-            return results, sibling_node_ids
-        return results
+        return RunSet(
+            results,
+            node_ids=sibling_node_ids,
+            grid=grid_rows,
+            kind="fan",
+        )
 
     # -- Generation control --
 

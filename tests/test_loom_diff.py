@@ -4,11 +4,8 @@ from __future__ import annotations
 import pytest
 
 from saklas import (
-    DiffSpan,
     LoomTree,
     Recipe,
-    ReadingDelta,
-    TokenDeltaSpan,
     per_token_diff,
     readings_diff,
     steering_delta,
