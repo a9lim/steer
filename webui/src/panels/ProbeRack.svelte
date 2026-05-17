@@ -223,7 +223,7 @@
     accent-color: var(--accent-blue);
   }
 
-  /* Strips own the scroll inside the rack — with 24 auto-loaded probes
+  /* Strips own the scroll inside the rack — with 26 auto-loaded probes
    * the list overflows the rack viewport, but the actions row stays
    * anchored at the bottom. */
   .strips {

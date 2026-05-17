@@ -236,7 +236,7 @@
   /* Four-row internal grid: header, scrollable strips, actions row,
    * paste-edit expression block.  The strips row owns the only flexible
    * track so the actions + expression stay anchored at the bottom even
-   * with 24+ vectors loaded. */
+   * with 26+ vectors loaded. */
   .rack {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto auto;

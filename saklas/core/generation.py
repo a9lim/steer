@@ -316,6 +316,54 @@ class GenerationConfig:
     system_prompt: str | None = None
 
 
+def _sampler_candidates(
+    logits: torch.Tensor,
+    config: GenerationConfig,
+    topk_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(token_ids, probs)`` for the configured sampler.
+
+    ``logits`` is the post-steering, post-penalty ``[1, V]`` tensor for the
+    next token. The returned probabilities are exactly the distribution the
+    sampler draws from after temperature, top-k, and top-p renormalization.
+    Greedy decoding is represented as a one-token distribution with p=1.
+    """
+    if config.temperature <= 0:
+        token = logits.argmax(dim=-1).reshape(1).to(dtype=torch.long)
+        prob = torch.ones(1, device=logits.device, dtype=torch.float32)
+        return token, prob
+
+    scaled = logits.float() / config.temperature
+    top_logits, top_idx = scaled.topk(topk_k, dim=-1, sorted=True)
+    probs = top_logits.softmax(dim=-1)
+    cumprobs = probs.cumsum(dim=-1)
+    mask = (cumprobs - probs) >= config.top_p
+    probs[mask] = 0.0
+    probs[:, :1].clamp_(min=1e-8)
+    probs.div_(probs.sum(dim=-1, keepdim=True))
+
+    row_probs = probs[0]
+    valid = row_probs > 0
+    return top_idx[0][valid].to(dtype=torch.long), row_probs[valid].to(dtype=torch.float32)
+
+
+def _sampler_logprob_vector(
+    logits: torch.Tensor,
+    config: GenerationConfig,
+    topk_k: int,
+) -> torch.Tensor:
+    """Full-vocab logprob vector for the configured sampler distribution."""
+    ids, probs = _sampler_candidates(logits, config, topk_k)
+    out = torch.full(
+        (logits.shape[-1],),
+        float("-inf"),
+        dtype=torch.float32,
+        device=logits.device,
+    )
+    out[ids] = probs.clamp_min(torch.finfo(torch.float32).tiny).log()
+    return out
+
+
 class GenerationState:
     """Shared mutable state for controlling generation from the TUI."""
 
@@ -458,8 +506,8 @@ def generate_steered(
 
     *on_token(text, is_thinking, token_id, logprob, top_alts, perplexity)*
     is called for each emitted token. ``perplexity`` is ``exp`` of the
-    Shannon entropy of the pre-temperature, post-steering next-token
-    distribution (bounded above by ``vocab_size``; ≈1 when the model is
+    Shannon entropy of the configured sampler distribution after
+    temperature, top-k, and top-p renormalization (≈1 when the sampler is
     near-certain). For multi-token UTF-8 sequences (buffered partials),
     *token_id* is ``-1`` and logprob is None; ``perplexity`` carries the
     flushing step's value.
@@ -766,53 +814,34 @@ def generate_steered(
                 if bias_idx is not None:
                     logits[0, bias_idx] += bias_val.to(logits.dtype)
 
-                # Full-vocab log-softmax in fp32 — feeds both perplexity
-                # (every step) and chosen/top logprobs (on demand).
-                #
-                # Gated: when no caller consumes per-token info (no on_token
-                # callback and logprobs disabled), skip the fp32 softmax + the
-                # entropy .item() sync entirely.  Sentinel ``current_perplexity =
-                # float("nan")`` is propagated to ``_emit_token`` for the
-                # otherwise-degenerate partial-flush path so downstream
-                # destructuring stays type-stable.  The session-side
-                # ``_token_tap`` only gets installed when at least one of
-                # logprobs / user on_token / trait-queue scoring is live, so
-                # this gate fires for the v3-style stateless prefill workload
-                # that pegged this block on the profile.
                 chosen_logprob: float | None = None
                 top_alts: list[TokenAlt] | None = None
-                if on_token is not None or logprobs is not None:
-                    lp = torch.log_softmax(logits.float(), dim=-1)
-                    # Shannon entropy in nats → perplexity via exp.
-                    entropy_nats = float((-lp.exp() * lp).sum().item())
+                capture_sampler_stats = on_token is not None or logprobs is not None
+                cand_ids, cand_probs = _sampler_candidates(logits, config, topk_k)
+                if config.temperature <= 0:
+                    chosen_pos = torch.zeros(1, device=device, dtype=torch.long)
+                else:
+                    chosen_pos = torch.multinomial(cand_probs.unsqueeze(0), 1).reshape(1)
+                next_token = cand_ids.index_select(0, chosen_pos).reshape(1, 1)
+
+                if capture_sampler_stats:
+                    cand_logp = cand_probs.clamp_min(
+                        torch.finfo(torch.float32).tiny,
+                    ).log()
+                    entropy_nats = float((-(cand_probs * cand_logp)).sum().item())
                     current_perplexity = math.exp(entropy_nats)
                 else:
-                    lp = None
+                    cand_logp = None
                     current_perplexity = float("nan")
 
-                if config.temperature <= 0:
-                    # Greedy
-                    next_token = logits.argmax(dim=-1, keepdim=True)
-                else:
-                    # Temperature + top-p (nucleus) sampling
-                    logits.div_(config.temperature)
-                    top_logits, top_idx = logits.topk(topk_k, dim=-1, sorted=True)
-                    probs = top_logits.softmax(dim=-1)
-                    cumprobs = probs.cumsum(dim=-1)
-                    mask = (cumprobs - probs) >= config.top_p
-                    probs[mask] = 0.0
-                    probs[:, :1].clamp_(min=1e-8)
-                    probs.div_(probs.sum(dim=-1, keepdim=True))
-
-                    token_idx = torch.multinomial(probs, 1)
-                    next_token = top_idx.gather(-1, token_idx)
-
-                token_id = next_token.item()
+                token_id = int(next_token.item())
 
                 if logprobs is not None:
-                    chosen_logprob = lp[0, token_id].item()
+                    assert cand_logp is not None
+                    chosen_logprob = float(cand_logp[chosen_pos.item()].item())
                     if logprobs > 0:
-                        tlv, tli = lp[0].topk(min(logprobs, _vocab))
+                        tlv, tpos = cand_logp.topk(min(logprobs, cand_logp.numel()))
+                        tli = cand_ids.index_select(0, tpos)
                         top_alts = [
                             TokenAlt(id=int(i), text=_decode_alt(int(i)), logprob=float(v))
                             for i, v in zip(tli.tolist(), tlv.tolist())

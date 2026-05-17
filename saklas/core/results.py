@@ -106,10 +106,10 @@ class TokenEvent:
     # captured hidden state. Populated by ``generate_stream`` only when
     # the session has active probes; otherwise None.
     scores: dict[str, float] | None = None
-    # Perplexity of the pre-temperature, post-steering next-token
-    # distribution — ``exp`` of full-vocab Shannon entropy in nats.
-    # Bounded above by ``vocab_size``; a confident prediction approaches
-    # 1. Consumers take ``log`` to recover entropy-nats for averaging.
+    # Perplexity of the configured sampler distribution after temperature,
+    # top-k, and top-p renormalization — ``exp`` of Shannon entropy in nats.
+    # Bounded above by sampler support size; a confident prediction
+    # approaches 1. Consumers take ``log`` to recover entropy-nats.
     perplexity: float | None = None
 
 

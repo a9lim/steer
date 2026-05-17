@@ -10,8 +10,6 @@ from __future__ import annotations
 import types
 from typing import Any
 
-import pytest
-
 from saklas import (
     LoomTree,
     Recipe,
@@ -170,7 +168,7 @@ def test_sweep_seed_schedule_is_deterministic():
     seeds = [c["sampling"].seed for c in stub.calls]
     # Same fan-out under the same base seed reproduces — compare against
     # the derive_seed_schedule schedule applied per row.
-    rebuilt = [derive_seed_schedule(42, i + 1)[-1] for i in range(3)]
+    rebuilt = derive_seed_schedule(42, 3)
     assert seeds == rebuilt
 
 

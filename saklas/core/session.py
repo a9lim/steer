@@ -28,8 +28,8 @@ from saklas.core.generation import GenerationConfig, GenerationState, build_chat
 from saklas.core.hooks import HiddenCapture, SteeringManager
 from saklas.core.loom import (
     InvalidNodeOperationError,
+    LoomMutated,
     LoomTree,
-    LoomNode,
     Recipe,
     MutationDuringGenerationError,
     derive_seed_schedule,
@@ -157,7 +157,15 @@ _N_PAIRS = 45
 _N_SCENARIOS = 9           # default broad domains per concept
 _N_PAIRS_PER_SCENARIO = 5  # default pairs sampled within each domain
 _MAX_GEN_ATTEMPTS = 4      # retry whole generator call on short parse
-PROBE_CATEGORIES = ["affect", "epistemic", "alignment", "register", "social_stance", "cultural"]
+PROBE_CATEGORIES = [
+    "affect",
+    "epistemic",
+    "alignment",
+    "register",
+    "social_stance",
+    "cultural",
+    "identity",
+]
 MIN_ELAPSED_FOR_RATE = 0.1
 
 _PAIR_RE = re.compile(r"(?:\d+|N)\s*([ab])[.)]\s*(.*)", re.IGNORECASE)
@@ -746,6 +754,18 @@ class SaklasSession:
             model_id=getattr(self._model_info, "model_id", None),
             conflict_check=self._loom_conflict_check,
         )
+        self._joint_logprob_cache: dict[tuple[str, str], Any] = {}
+
+        def _invalidate_tree_analysis_caches(event: Any) -> None:
+            if isinstance(event, LoomMutated) and event.op in {
+                "edit",
+                "delete",
+                "reset",
+                "finalize_assistant",
+            }:
+                self._joint_logprob_cache.clear()
+
+        self.events.subscribe(_invalidate_tree_analysis_caches)
 
         # Subtree root reserved by an in-flight generation (the user-parent
         # of the streaming assistant target).  None while idle; set by
@@ -3201,6 +3221,29 @@ class SaklasSession:
             if lp is not None and tid >= 0 and not is_thinking:
                 mean_logprob_sum += lp
                 mean_logprob_count += 1
+            if assistant_node_id is not None and tid is not None:
+                token_row: dict[str, Any] = {
+                    "token_id": int(tid),
+                    "text": text,
+                    "logprob": float(lp) if lp is not None else None,
+                    "perplexity": (
+                        float(perplexity) if perplexity is not None else None
+                    ),
+                }
+                if top_alts:
+                    token_row["top_alts"] = [
+                        {
+                            "id": int(a.id),
+                            "text": a.text,
+                            "logprob": float(a.logprob),
+                        }
+                        for a in top_alts
+                    ]
+                self.tree.append_token(
+                    assistant_node_id,
+                    token_row,
+                    thinking=bool(is_thinking),
+                )
             if on_token is not None:
                 on_token(text, is_thinking, tid, lp, top_alts, perplexity)
             # Inline per-token scoring for live SSE trait subscribers.
@@ -3546,7 +3589,8 @@ class SaklasSession:
                 ``(id, text, logprob)`` triples) when ``sampling.logprobs > 0``
                 or ``sampling.return_top_k > 0``; ``None`` otherwise.
                 ``perplexity`` is ``exp(entropy_nats)`` of the
-                pre-temperature, post-steering distribution.
+                sampler distribution after temperature, top-k, and
+                top-p renormalization.
             parent_node_id: loom-tree node id to anchor the new turn
                 under.  ``None`` = active node (today's behavior).
             n: fan-out count.  ``n=1`` (default) returns a single
@@ -3839,6 +3883,11 @@ class SaklasSession:
 
         concept_names = list(sweep.keys())
         alpha_lists = [list(sweep[name]) for name in concept_names]
+        total = 1
+        for values in alpha_lists:
+            total *= len(values)
+        base_seed = sampling.seed if sampling is not None else None
+        seed_schedule = derive_seed_schedule(base_seed, total)
 
         base_str: str | None
         if base_steering is None:
@@ -3878,20 +3927,9 @@ class SaklasSession:
             if base_str:
                 expr = f"{base_str} + {expr}"
 
-            # Per-sibling deterministic seed schedule so a repeat sweep
-            # with the same parent reproduces sibling for sibling.
             from dataclasses import replace as _replace
-            base_seed = sampling.seed if sampling is not None else None
-            schedule = derive_seed_schedule(base_seed, len(list(itertools.product(*alpha_lists)))) if False else None
-            # Cheap fallback: derive per-row seed from index + base.
-            row_seed = (
-                derive_seed_schedule(base_seed, idx + 1)[-1]
-                if base_seed is not None
-                else None
-            )
             si = sampling if sampling is not None else SamplingConfig()
-            if row_seed is not None:
-                si = _replace(si, seed=row_seed)
+            si = _replace(si, seed=seed_schedule[idx])
 
             r = self._generate_core(
                 prompt,

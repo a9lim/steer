@@ -511,7 +511,16 @@ export const apiTree = {
     node_id: string,
     text: string,
     id: string = SESSION,
-  ): Promise<{ node_id: string; rev: number }> {
+  ): Promise<{
+    node_id: string;
+    node: LoomNodeJSON;
+    active_path: {
+      active_node_id: string;
+      rev: number;
+      messages: { role: string; content: string }[];
+      node_ids: string[];
+    };
+  }> {
     return request(
       `${SESSION_BASE(id)}/tree/branch`,
       jsonBody({ node_id, text }),
@@ -520,8 +529,8 @@ export const apiTree = {
   delete(
     node_id: string,
     id: string = SESSION,
-  ): Promise<{ removed: string[]; rev: number }> {
-    return request<{ removed: string[]; rev: number }>(
+  ): Promise<{ removed: number }> {
+    return request<{ removed: number }>(
       `${SESSION_BASE(id)}/tree/${encodeURIComponent(node_id)}`,
       { method: "DELETE" },
     );
@@ -604,13 +613,14 @@ export const apiTree = {
     );
   },
   /** Logit-pass Phase 5: cross-evaluation between two sibling assistant
-   *  nodes.  Server runs one forward pass per branch and returns
-   *  per-aligned-position rows with both self- and cross-evaluation
-   *  logprobs, rank-1-change flag, and a top-K-truncated approx KL.
+   *  nodes.  Server force-replays each branch under its stamped recipe
+   *  and returns per-aligned-position rows with both self- and
+   *  cross-evaluation logprobs, rank-1-change flag, and a top-K-truncated
+   *  approx KL.
    *
-   *  Lazy / on-demand per Decision 9 — server caches the result keyed
-   *  by sorted ``(a_id, b_id)`` for the session lifetime; both
-   *  orientations of the same pair share the cache entry. */
+   *  Lazy / on-demand per Decision 9 — server caches the result keyed by
+   *  sorted ``(a_id, b_id)`` until a tree edit/delete/finalize mutation
+   *  invalidates the cache. */
   jointLogprobs(
     a_id: string,
     b_id: string,

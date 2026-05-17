@@ -6,6 +6,7 @@ not load a model — :class:`LoomTree` is independent of HF state.
 """
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -529,10 +530,58 @@ def test_to_dict_round_trip(tmp_path: Path):
     assert t2.rev == t.rev
 
 
+def test_save_load_round_trips_token_sidecar(tmp_path: Path):
+    t = _seed_tree()
+    aid = t.active_node_id
+    t.append_token(
+        aid,
+        {
+            "token_id": 42,
+            "text": "hello",
+            "logprob": -0.25,
+            "top_alts": [{"id": 7, "text": "hi", "logprob": -1.5}],
+        },
+    )
+    t.append_token(
+        aid,
+        {"token_id": 9, "text": "hmm", "logprob": -0.75},
+        thinking=True,
+    )
+
+    path = tmp_path / "tree.json"
+    t.save(path)
+    raw = json.loads(path.read_text())
+    assert raw["token_sidecar"] == "tree.tokens.json.gz"
+    raw_node = next(n for n in raw["nodes"] if n["id"] == aid)
+    assert "tokens" not in raw_node
+    assert "thinking_tokens" not in raw_node
+
+    sidecar = path.with_name("tree.tokens.json.gz")
+    with gzip.open(sidecar, "rt", encoding="utf-8") as f:
+        token_payload = json.load(f)
+    assert token_payload["token_sidecar_format"] == 1
+    assert token_payload["nodes"][aid]["tokens"][0]["token_id"] == 42
+
+    t2 = LoomTree.load(path)
+    assert t2.nodes[aid].tokens == t.nodes[aid].tokens
+    assert t2.nodes[aid].thinking_tokens == t.nodes[aid].thinking_tokens
+
+
 def test_recipe_round_trip():
     r = Recipe(
         steering="0.3 honest + 0.5 calm",
-        sampling=SamplingConfig(temperature=0.7, max_tokens=128, seed=42),
+        sampling=SamplingConfig(
+            temperature=0.7,
+            max_tokens=128,
+            seed=42,
+            stop=("END",),
+            logit_bias={123: -2.5},
+            presence_penalty=0.2,
+            frequency_penalty=0.1,
+            logprobs=3,
+            return_hidden=True,
+            return_top_k=12,
+        ),
         thinking=False,
         seed=42,
         probes=["angry.calm", "honest.deceptive"],
@@ -549,6 +598,13 @@ def test_recipe_round_trip():
     assert r2.sampling.temperature == 0.7
     assert r2.sampling.max_tokens == 128
     assert r2.sampling.seed == 42
+    assert r2.sampling.stop == ("END",)
+    assert r2.sampling.logit_bias == {123: -2.5}
+    assert r2.sampling.presence_penalty == 0.2
+    assert r2.sampling.frequency_penalty == 0.1
+    assert r2.sampling.logprobs == 3
+    assert r2.sampling.return_hidden is True
+    assert r2.sampling.return_top_k == 12
 
 
 def test_children_order_preserved_through_save(tmp_path: Path):

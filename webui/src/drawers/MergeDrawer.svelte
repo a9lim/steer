@@ -4,8 +4,8 @@
   //
   // Expression is live-validated in the browser using parseExpression
   // (mirrors the server parser).  On submit, POST /vectors/merge wraps
-  // saklas.io.merge.merge_into_pack server-side; the response carries
-  // the canonical name + profile, which we drop into the rack.
+  // saklas.io.merge.merge_into_pack server-side; the response is the
+  // same VectorInfo shape GET /vectors/{name} returns.
   //
   // Variant picker covers raw / sae / sae-<release>.  The merge endpoint
   // body shape is { name, expression } only — no variant field on the
@@ -127,7 +127,7 @@
         name: name.trim(),
         expression: expression.trim(),
       });
-      addVectorToRack(r.canonical ?? r.profile?.name ?? name.trim());
+      addVectorToRack(r.name ?? name.trim());
       closeDrawer();
     } catch (e) {
       if (e instanceof ApiError) {

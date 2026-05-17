@@ -666,9 +666,11 @@ clobber each other.
 9. **Joint-logprobs server-side join: lazy / on-demand.** Compute
    `joint_logprobs` only when the user opens NodeCompareDrawer for a
    given pair; do not pre-compute for every fan sibling pair. The
-   server route fans out (one tokenize + one log_softmax per aligned
-   position pair) on request, caches the result keyed by
-   `(node_a_id, node_b_id)` for the session lifetime, and returns it.
+   server route force-replays each branch token-by-token under the
+   node's stamped recipe: steering hooks, recipe override effects,
+   probe gates, penalties, logit bias, and sampler transform all match
+   generation. It caches the result keyed by `(node_a_id, node_b_id)`
+   until a tree edit/delete/finalize/reset invalidates the cache.
    Keeps the eager fan path cheap; pays the cost only for pairs the
    researcher actually inspects. _Status: locked._
 

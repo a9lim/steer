@@ -99,10 +99,7 @@ export interface MergeVectorRequest {
   expression: string;
 }
 
-export interface MergeVectorResponse {
-  canonical: string;
-  profile: VectorInfo;
-}
+export type MergeVectorResponse = VectorInfo;
 
 /** Body for POST /sessions/{id}/vectors/clone — wraps the clone CLI. */
 export interface CloneVectorRequest {
@@ -229,8 +226,9 @@ export interface InstallPackRequest {
 }
 
 export interface InstallPackResponse {
-  installed: string[];
-  progress: string[];
+  target: string;
+  installed_at: string;
+  statements_only: boolean;
 }
 
 // ----------------------------------------------------- sweep --

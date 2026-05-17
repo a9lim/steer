@@ -798,7 +798,8 @@ export async function loomNote(node_id: string, text: string): Promise<void> {
 }
 
 /** Regenerate the active assistant: send a fresh ``generate`` request
- *  whose ``parent_node_id`` is the user-parent of the active assistant.
+ *  anchored at the user-parent's parent, so the replayed user prompt
+ *  dedups onto the existing user node and creates a sibling assistant.
  *  N=1 by default.  Recipe is implicit (current rack) unless
  *  ``opts.recipe_override`` is set, in which case the engine applies
  *  the recipe-override modifier on top of the parent's recipe. */
@@ -818,7 +819,7 @@ export async function loomRegenerateActive(
   if (!parent || parent.role !== "user") return;
   try {
     await sendGenerate(parent.text, {
-      parent_node_id: parentId,
+      parent_node_id: parent.parent_id ?? null,
       n,
       recipe_override: opts.recipe_override ?? undefined,
     });
@@ -827,9 +828,9 @@ export async function loomRegenerateActive(
   }
 }
 
-/** Regenerate under a specific user node (the "fan out" entry point —
- *  for siblings of an arbitrary user turn).  Mirrors the engine's
- *  ``generate(parent_node_id=user_id)`` semantics. */
+/** Regenerate under a specific user node (the "fan out" entry point).
+ *  Anchor at the user's parent so ``add_user_turn`` reuses that user
+ *  node and fans out sibling assistant replies. */
 export async function loomRegenerateFromUser(
   userNodeId: string,
   opts: { n?: number; recipe_override?: string | null } = {},
@@ -839,7 +840,7 @@ export async function loomRegenerateFromUser(
   if (!user || user.role !== "user") return;
   try {
     await sendGenerate(user.text, {
-      parent_node_id: userNodeId,
+      parent_node_id: user.parent_id ?? null,
       n: opts.n ?? 1,
       recipe_override: opts.recipe_override ?? undefined,
     });

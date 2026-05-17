@@ -41,7 +41,7 @@ pip install saklas
 saklas tui google/gemma-3-4b-it
 ```
 
-The first run downloads the model and extracts the 24 bundled probes. Try `/steer 0.4 angry`: that applies the built-in `angry.calm` vector at α = +0.4 and the model leans angry. `/steer 0.4 calm` gives you the same vector at α = −0.4. `Ctrl+Y` colors each generated token by how strongly the selected probe lit up on it. `Ctrl+A` toggles a two-column A/B view that runs an unsteered shadow alongside every steered turn.
+The first run downloads the model and extracts the 26 bundled probes. Try `/steer 0.4 angry`: that applies the built-in `angry.calm` vector at α = +0.4 and the model leans angry. `/steer 0.4 calm` gives you the same vector at α = −0.4. `Ctrl+Y` colors each generated token by how strongly the selected probe lit up on it. `Ctrl+A` toggles a two-column A/B view that runs an unsteered shadow alongside every steered turn.
 
 As an API server:
 
@@ -194,7 +194,7 @@ This lets you find concepts that are correlated. For example, on Gemma 4 the mod
 
 ### The probe library
 
-There are 24 default probes across 6 categories. Each probe is built from 45 contrastive pairs generated using the program's pipeline.
+There are 26 default probes across 7 categories. Each probe is built from 45 contrastive pairs generated using the program's pipeline.
 
 | Category | Probes |
 |---|---|
@@ -202,8 +202,9 @@ There are 24 default probes across 6 categories. Each probe is built from 45 con
 | **Epistemic** | confident.uncertain, honest.deceptive, hallucinating.grounded, curious.disinterested |
 | **Alignment** | agentic, refusal.compliant, sycophantic.blunt, manipulative |
 | **Register** | formal.casual, direct.indirect, verbose.concise, creative.conventional, humorous.serious, warm.clinical, technical.accessible |
-| **Social stance** | authoritative.submissive, high_context.low_context |
+| **Social stance** | authoritative.submissive, high_context.low_context, self.other |
 | **Cultural** | masculine.feminine, religious.secular, traditional.progressive, individualist.collectivist |
+| **Identity** | ai.human |
 
 Poles are aliased: `/steer angry 0.5` → `angry.calm` at α = +0.5. `/steer calm 0.5` → `angry.calm` at α = −0.5. This works for any installed bipolar pack.
 
@@ -280,7 +281,7 @@ There are three panels: a vector registry on the left, chat in the center, and a
 
 A footer at the bottom of the trait panel shows the top 5 layers and the live highest and lowest scored tokens for the selected probe.
 
-The footer in the chat panel shows generation progress, live tok/s, elapsed, and the running perplexity of the token stream (geometric mean of the pre-temperature post-steering next-token distribution).
+The footer in the chat panel shows generation progress, live tok/s, elapsed, and the running perplexity of the token stream (geometric mean of the configured sampler distribution after temperature, top-k, and top-p renormalization).
 
 If you want to extract a vector for two poles, use `/extract a dog . a pair of cats`. The TUI parses around the space-period-space delimiter. `dog.cat` stays a single name.
 

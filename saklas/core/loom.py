@@ -20,19 +20,23 @@ are all that exist at the engine level.  Surface-level verbs (slash
 commands, keyboard shortcuts, context menus) compose from these.
 
 Per-node token blobs (``tokens`` and ``thinking_tokens``) are held in
-memory during streaming.  ``LoomTree.to_dict`` omits them by default,
-so ``LoomTree.save`` / ``LoomTree.load`` (the TUI's ``/save`` and
-``/load``) round-trip tree structure and text without the per-token
-score lists.  The tree is otherwise in-memory only — there is no
-automatic cross-session persistence.
+memory during streaming.  ``LoomTree.to_dict`` omits them by default so
+routine wire payloads stay small; ``LoomTree.save`` writes them to a
+compressed sidecar next to the main tree JSON so explicit save/load keeps
+the analysis surface intact.  The tree is otherwise in-memory only —
+there is no automatic cross-session persistence.
 """
 
 from __future__ import annotations
 
+import gzip
+import json
+import os
 import secrets
+import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterator, Literal
 
 from saklas.core.errors import SaklasError
@@ -137,19 +141,15 @@ class Recipe:
     def to_dict(self) -> dict[str, Any]:
         sampling = None
         if self.sampling is not None:
-            # SamplingConfig is a frozen dataclass; pull its declared fields.
-            # We can't rely on ``dataclasses.asdict`` because some fields
-            # (callables) aren't JSON-friendly — instead we round-trip a
-            # known scalar subset.
-            sampling = {
-                k: getattr(self.sampling, k)
-                for k in (
-                    "temperature", "top_p", "top_k", "max_tokens",
-                    "stop", "seed", "presence_penalty", "frequency_penalty",
-                    "logprobs", "return_hidden",
-                )
-                if hasattr(self.sampling, k)
-            }
+            sampling = {}
+            for f in fields(SamplingConfig):
+                k = f.name
+                v = getattr(self.sampling, k)
+                if k == "stop" and v is not None:
+                    v = list(v)
+                elif k == "logit_bias" and v is not None:
+                    v = {str(int(tid)): float(bias) for tid, bias in v.items()}
+                sampling[k] = v
         return {
             "steering": self.steering,
             "sampling": sampling,
@@ -164,6 +164,12 @@ class Recipe:
         sampling = None
         s = data.get("sampling")
         if s is not None:
+            s = dict(s)
+            if s.get("logit_bias") is not None:
+                s["logit_bias"] = {
+                    int(tid): float(bias)
+                    for tid, bias in dict(s["logit_bias"]).items()
+                }
             sampling = SamplingConfig(**{k: v for k, v in s.items() if v is not None})
         return cls(
             steering=data.get("steering"),
@@ -1123,20 +1129,91 @@ class LoomTree:
     def save(self, path: Any) -> None:
         """Atomic write of the tree to ``path`` as JSON.
 
-        Per-token score blobs are omitted (``to_dict(include_tokens=
-        False)``) — structure, text, and recipes round-trip; per-token
-        highlight scores do not.
+        The main tree file omits token blobs; response/thinking token rows
+        are written to a gzip sidecar named ``<stem>.tokens.json.gz``.  This
+        keeps routine tree payloads small while explicit save/load preserves
+        logprob/top-alt/probe drilldown data.
         """
         from pathlib import Path
         from saklas.io.atomic import write_json_atomic
-        write_json_atomic(Path(path), self.to_dict(include_tokens=False))
+
+        out_path = Path(path)
+        sidecar = out_path.with_name(f"{out_path.stem}.tokens.json.gz")
+        with self._lock:
+            data = self.to_dict(include_tokens=False)
+            token_nodes: dict[str, dict[str, Any]] = {}
+            for node in self.nodes.values():
+                if node.tokens or node.thinking_tokens:
+                    token_nodes[node.id] = {
+                        "tokens": node.tokens or [],
+                        "thinking_tokens": node.thinking_tokens or [],
+                    }
+            token_payload = None
+            if token_nodes:
+                data["token_sidecar"] = sidecar.name
+                token_payload = {
+                    "token_sidecar_format": 1,
+                    "nodes": token_nodes,
+                }
+
+        if token_payload is None:
+            write_json_atomic(out_path, data)
+            try:
+                sidecar.unlink()
+            except FileNotFoundError:
+                pass
+            return
+
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{sidecar.name}.",
+            suffix=".tmp",
+            dir=str(sidecar.parent),
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            with gzip.open(tmp, "wt", encoding="utf-8") as f:
+                json.dump(token_payload, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, sidecar)
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        write_json_atomic(out_path, data)
 
     @classmethod
     def load(cls, path: Any, *, events: Any | None = None) -> "LoomTree":
         from pathlib import Path
-        import json
-        with open(Path(path), "r", encoding="utf-8") as f:
+
+        in_path = Path(path)
+        with open(in_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        sidecar_name = data.get("token_sidecar")
+        if sidecar_name:
+            sidecar = in_path.parent / str(sidecar_name)
+            try:
+                with gzip.open(sidecar, "rt", encoding="utf-8") as f:
+                    token_payload = json.load(f)
+            except FileNotFoundError as e:
+                raise LoomTreeError(
+                    f"token sidecar declared but missing: {sidecar}"
+                ) from e
+            if token_payload.get("token_sidecar_format") != 1:
+                raise LoomTreeError(
+                    f"unsupported token_sidecar_format "
+                    f"{token_payload.get('token_sidecar_format')!r}"
+                )
+            by_id = dict(token_payload.get("nodes", {}))
+            for raw in data.get("nodes", []):
+                node_tokens = by_id.get(raw.get("id"))
+                if not isinstance(node_tokens, dict):
+                    continue
+                raw["tokens"] = list(node_tokens.get("tokens") or [])
+                raw["thinking_tokens"] = list(
+                    node_tokens.get("thinking_tokens") or []
+                )
         return cls.from_dict(data, events=events)
 
 

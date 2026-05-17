@@ -83,7 +83,7 @@ CLI side: `saklas transcript run <path>` (in `cli/parsers.py` + `cli/runners.py`
 
 `chat_panel.update_status`: one-line footer showing dot + `gen_tokens/max_new_tokens` + progress bar (green while generating, dim between runs — persists post-gen so the bar doesn't appear/disappear each turn; collapses to `○ idle` before the first generation or when `max_tokens` is unknown) · tok/s · elapsed · `ppl <mean>`. The count sits left of the bar. VRAM lives on the left panel already; context info isn't rendered here.
 
-Perplexity is the geometric mean of per-step `TokenEvent.perplexity` values — `exp(sum(log(ppl)) / count)` across scored steps in the current gen. `_log_ppl_sum` / `_ppl_count` reset at `_start_generation`; `_last_gen_state` dedupe tuple tracks `_ppl_count` so the footer refreshes when the aggregate moves. Computed in `generate_steered` as `exp` of full-vocab fp32 Shannon entropy on pre-temperature post-steering logits; one extra softmax + one `.item()` sync per step, inside the steered-throughput headroom.
+Perplexity is the geometric mean of per-step `TokenEvent.perplexity` values — `exp(sum(log(ppl)) / count)` across scored steps in the current gen. `_log_ppl_sum` / `_ppl_count` reset at `_start_generation`; `_last_gen_state` dedupe tuple tracks `_ppl_count` so the footer refreshes when the aggregate moves. Computed in `generate_steered` as `exp` of Shannon entropy over the configured sampler distribution after temperature, top-k, and top-p renormalization; the extra entropy sync only runs when a token consumer/logprob capture is live.
 
 ## Panels
 

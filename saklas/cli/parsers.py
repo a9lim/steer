@@ -30,7 +30,7 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
         "-p", "--probes",
         nargs="*",
         default=None,
-        help="Probe categories: all, none, affect, epistemic, alignment, register, social_stance, cultural (default: all)",
+        help="Probe categories: all, none, affect, epistemic, alignment, register, social_stance, cultural, identity (default: all)",
     )
 
 

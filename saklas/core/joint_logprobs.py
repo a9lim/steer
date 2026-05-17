@@ -1,8 +1,8 @@
 """Cross-branch joint logprobs (Phase 5 of docs/plans/logit-pass.md).
 
-Given two assistant LoomNodes A and B that share a parent, run one
-forward pass per branch and report, for each aligned assistant-token
-position pair:
+Given two assistant LoomNodes A and B that share a parent, replay each
+branch token-by-token under the recipe stamped on that node and report,
+for each aligned assistant-token position pair:
 
 * ``lp_a_in_a`` / ``lp_b_in_b`` — chosen-token logprob under each
   branch's own distribution.  Mirrors what the engine already captures
@@ -27,13 +27,22 @@ nodes invalidate the entries (see ``SaklasSession`` cache wiring).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
+import math
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from saklas.core.generation import build_chat_input
+from saklas.core.generation import (
+    GenerationConfig,
+    _sampler_logprob_vector,
+    build_chat_input,
+    supports_thinking,
+)
 from saklas.core.loom_diff import per_token_diff
+from saklas.core.sampling import SamplingConfig
+from saklas.core.steering import Steering
 
 if TYPE_CHECKING:  # avoid a hard import cycle at module load
     from saklas.core.session import SaklasSession
@@ -107,8 +116,8 @@ class JointLogprobs:
 
 
 def _approx_kl_topk(
-    logp_a: torch.Tensor,  # [V] fp32 log-softmax
-    logp_b: torch.Tensor,  # [V] fp32 log-softmax
+    logp_a: torch.Tensor,  # [V] fp32 sampler logprobs
+    logp_b: torch.Tensor,  # [V] fp32 sampler logprobs
     top_k: int,
 ) -> float:
     """Truncated KL(P_A || P_B) over the union of each side's top-K.
@@ -124,13 +133,29 @@ def _approx_kl_topk(
     top_a = torch.topk(logp_a, k).indices
     top_b = torch.topk(logp_b, k).indices
     union = torch.unique(torch.cat([top_a, top_b]))
-    pa = logp_a.index_select(0, union).exp()
-    diff = logp_a.index_select(0, union) - logp_b.index_select(0, union)
+    la = logp_a.index_select(0, union)
+    lb = logp_b.index_select(0, union)
+    support = torch.isfinite(la)
+    if not bool(support.any().item()):
+        return 0.0
+    if bool((~torch.isfinite(lb[support])).any().item()):
+        return float("inf")
+    pa = la[support].exp()
+    diff = la[support] - lb[support]
     return float((pa * diff).sum().item())
 
 
+def _finite_float(value: torch.Tensor | float) -> float | None:
+    """Convert finite tensor/float values to JSON-safe floats."""
+    if isinstance(value, torch.Tensor):
+        out = float(value.item())
+    else:
+        out = float(value)
+    return out if math.isfinite(out) else None
+
+
 def _compute_rows(
-    logp_a: torch.Tensor,        # [T_a, V] log-softmax of A's logits
+    logp_a: torch.Tensor,        # [T_a, V] sampler-renormalized logprobs
     logp_b: torch.Tensor,        # [T_b, V]
     token_ids_a: list[int],      # full sequence (prefix + assistant) for A
     token_ids_b: list[int],
@@ -144,7 +169,7 @@ def _compute_rows(
 
     Aligns A's assistant tail and B's assistant tail via the shared
     :func:`per_token_diff` byte-offset walker, then looks up logprobs
-    from the precomputed log-softmax tables.  Position ``prefix_len + i``
+    from the precomputed sampler-logprob tables.  Position ``prefix_len + i``
     in the full sequence is *predicted* by the logits at position
     ``prefix_len + i - 1`` — that's the index we read from on each row.
     """
@@ -175,9 +200,9 @@ def _compute_rows(
         lp_a_in_a: float | None = None
         lp_b_in_b: float | None = None
         if 0 <= a_idx < len(assistant_ids_a):
-            lp_a_in_a = float(logp_a[pa_pos, assistant_ids_a[a_idx]].item())
+            lp_a_in_a = _finite_float(logp_a[pa_pos, assistant_ids_a[a_idx]])
         if 0 <= b_idx < len(assistant_ids_b):
-            lp_b_in_b = float(logp_b[pb_pos, assistant_ids_b[b_idx]].item())
+            lp_b_in_b = _finite_float(logp_b[pb_pos, assistant_ids_b[b_idx]])
 
         # Cross-evaluation: only meaningful when the positions actually
         # align (byte-equal context up to here).  On divergent rows the
@@ -188,16 +213,16 @@ def _compute_rows(
         rank_changed = False
         approx_kl: float | None = None
         if sp.aligned and 0 <= a_idx < len(assistant_ids_a) and 0 <= b_idx < len(assistant_ids_b):
-            lp_a_in_b = float(logp_b[pb_pos, assistant_ids_a[a_idx]].item())
-            lp_b_in_a = float(logp_a[pa_pos, assistant_ids_b[b_idx]].item())
+            lp_a_in_b = _finite_float(logp_b[pb_pos, assistant_ids_a[a_idx]])
+            lp_b_in_a = _finite_float(logp_a[pa_pos, assistant_ids_b[b_idx]])
             # Rank-1 change: does the argmax differ at this aligned
             # position?  Cheap signal — one ``argmax`` per side.
             argmax_a = int(logp_a[pa_pos].argmax().item())
             argmax_b = int(logp_b[pb_pos].argmax().item())
             rank_changed = argmax_a != argmax_b
-            approx_kl = _approx_kl_topk(
+            approx_kl = _finite_float(_approx_kl_topk(
                 logp_a[pa_pos], logp_b[pb_pos], kl_top_k,
-            )
+            ))
 
         rows.append(JointLogprobRow(
             a_index=a_idx,
@@ -235,6 +260,327 @@ def _shared_prefix_len(ids_a: list[int], ids_b: list[int]) -> int:
     return i
 
 
+@dataclass(frozen=True)
+class _ReplayBranch:
+    node_id: str
+    prompt_ids: list[int]
+    response_ids: list[int]
+    token_ids: list[int]
+    token_strs: list[str]
+    thinking_ids: list[int]
+    sampling: SamplingConfig
+    steering: Steering | None
+    thinking: bool
+
+
+def _decode_each(tokenizer: Any, ids: list[int]) -> list[str]:
+    # Batch-decode-per-id rather than ``decode(ids)`` to keep the
+    # per-position list aligned 1:1 with the id list.  Coerce to ``str``
+    # because some tokenizer signatures are typed loosely.
+    return [str(tokenizer.decode([tid])) for tid in ids]
+
+
+def _row_token_ids(rows: list[dict[str, Any]] | None) -> tuple[list[int], list[str]]:
+    ids: list[int] = []
+    texts: list[str] = []
+    for row in rows or []:
+        try:
+            tid = int(row.get("token_id"))
+        except (TypeError, ValueError):
+            continue
+        if tid < 0:
+            # Buffered partial UTF-8 rows do not correspond to a single
+            # model token and cannot be forced through replay.
+            continue
+        ids.append(tid)
+        text = row.get("text")
+        texts.append(str(text) if text is not None else "")
+    return ids, texts
+
+
+def _sampling_from_recipe(recipe: Any) -> SamplingConfig:
+    sampling = getattr(recipe, "sampling", None)
+    if not isinstance(sampling, SamplingConfig):
+        sampling = SamplingConfig()
+    seed = getattr(recipe, "seed", None)
+    if seed is not None and sampling.seed is None:
+        sampling = replace(sampling, seed=int(seed))
+    return sampling
+
+
+def _supports_thinking_safe(tokenizer: Any) -> bool:
+    try:
+        return bool(supports_thinking(tokenizer))
+    except Exception:
+        return False
+
+
+def _compose_replay_config(
+    session: "SaklasSession",
+    sampling: SamplingConfig,
+) -> GenerationConfig:
+    compose = getattr(session, "_compose_gen_config", None)
+    if compose is not None:
+        return compose(sampling)
+
+    base = getattr(session, "config", None)
+    if isinstance(base, GenerationConfig):
+        cfg = base
+    else:
+        cfg = GenerationConfig(
+            max_new_tokens=int(getattr(base, "max_new_tokens", 1024)),
+            temperature=float(getattr(base, "temperature", 1.0)),
+            top_p=float(getattr(base, "top_p", 0.9)),
+            top_k=getattr(base, "top_k", None),
+            system_prompt=getattr(base, "system_prompt", None),
+        )
+    overrides: dict[str, Any] = {}
+    if sampling.temperature is not None:
+        overrides["temperature"] = sampling.temperature
+    if sampling.top_p is not None:
+        overrides["top_p"] = sampling.top_p
+    if sampling.top_k is not None:
+        overrides["top_k"] = sampling.top_k
+    if sampling.max_tokens is not None:
+        overrides["max_new_tokens"] = sampling.max_tokens
+    return replace(cfg, **overrides) if overrides else cfg
+
+
+def _branch_inputs(session: "SaklasSession", node_id: str) -> _ReplayBranch:
+    tree = session.tree
+    tokenizer = session.tokenizer
+    node = tree.nodes[node_id]
+    recipe = getattr(node, "recipe", None)
+    sampling = _sampling_from_recipe(recipe)
+    steering = Steering.from_value(getattr(recipe, "steering", None))
+
+    stamped_thinking = getattr(recipe, "thinking", None)
+    if stamped_thinking is None:
+        if steering is not None and steering.thinking is not None:
+            thinking = bool(steering.thinking)
+        else:
+            thinking = _supports_thinking_safe(tokenizer)
+    else:
+        thinking = bool(stamped_thinking)
+
+    parent_id = getattr(node, "parent_id", None)
+    parent = tree.nodes.get(parent_id) if parent_id is not None else None
+    if parent is not None and parent.role == "user":
+        prompt_messages = tree.messages_for(parent.id)
+    else:
+        prompt_messages = tree.messages_for(node_id)
+    system_prompt = getattr(getattr(session, "config", None), "system_prompt", None) or None
+    prompt_input = build_chat_input(
+        tokenizer,
+        prompt_messages,
+        system_prompt=system_prompt,
+        thinking=thinking,
+        add_generation_prompt=True,
+    )
+    prompt_ids = [int(t) for t in prompt_input[0].tolist()]
+
+    response_ids, response_texts = _row_token_ids(getattr(node, "tokens", None))
+    thinking_ids, _thinking_texts = _row_token_ids(
+        getattr(node, "thinking_tokens", None)
+    )
+
+    if not response_ids:
+        full_input = build_chat_input(
+            tokenizer,
+            tree.messages_for(node_id),
+            system_prompt=system_prompt,
+            thinking=thinking,
+            add_generation_prompt=False,
+        )
+        full_ids = [int(t) for t in full_input[0].tolist()]
+        cut = _shared_prefix_len(prompt_ids, full_ids)
+        prompt_ids = full_ids[:cut]
+        response_ids = full_ids[cut:]
+        response_texts = _decode_each(tokenizer, response_ids)
+    elif len(response_texts) != len(response_ids) or any(t == "" for t in response_texts):
+        response_texts = _decode_each(tokenizer, response_ids)
+
+    prompt_strs = _decode_each(tokenizer, prompt_ids)
+    return _ReplayBranch(
+        node_id=node_id,
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        token_ids=prompt_ids + response_ids,
+        token_strs=prompt_strs + response_texts,
+        thinking_ids=thinking_ids,
+        sampling=sampling,
+        steering=steering,
+        thinking=thinking,
+    )
+
+
+def _call_model(model: Any, **kwargs: Any) -> Any:
+    try:
+        return model(**kwargs)
+    except TypeError as e:
+        msg = str(e)
+        if (
+            "attention_mask" not in msg
+            and "past_key_values" not in msg
+            and "cache_position" not in msg
+        ):
+            raise
+        return model(input_ids=kwargs["input_ids"], use_cache=kwargs.get("use_cache", False))
+
+
+def _replay_branch_logprobs(
+    session: "SaklasSession",
+    branch: _ReplayBranch,
+) -> torch.Tensor:
+    """Force-replay one branch and return visible response-row logprobs."""
+    model = session._model
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:  # pragma: no cover - defensive for odd test doubles
+        device = torch.device("cpu")
+
+    n_rows = len(branch.token_ids)
+    forced_ids = branch.thinking_ids + branch.response_ids
+    if not forced_ids:
+        return torch.empty((n_rows, 0), dtype=torch.float32)
+    if not branch.prompt_ids:
+        raise ValueError("joint-logprob replay requires a non-empty prompt")
+
+    config = _compose_replay_config(session, branch.sampling)
+    logit_bias = branch.sampling.logit_bias
+    presence_penalty = branch.sampling.presence_penalty
+    frequency_penalty = branch.sampling.frequency_penalty
+    use_penalties = presence_penalty != 0.0 or frequency_penalty != 0.0
+    completion_counts: dict[int, int] = {}
+
+    bias_idx: torch.Tensor | None = None
+    bias_val: torch.Tensor | None = None
+    if logit_bias:
+        bias_idx = torch.tensor(list(logit_bias.keys()), dtype=torch.long, device=device)
+        bias_val = torch.tensor(list(logit_bias.values()), dtype=torch.float32, device=device)
+
+    ctx = getattr(getattr(session, "_steering", None), "ctx", None)
+    steering_cm = contextlib.nullcontext()
+    if branch.steering is not None and branch.steering.alphas and hasattr(session, "steering"):
+        steering_cm = session.steering(branch.steering)
+
+    row_logps: dict[int, torch.Tensor] = {}
+    vocab_size: int | None = None
+
+    with steering_cm:
+        if ctx is not None:
+            ctx.reset()
+        begin_capture = getattr(session, "_begin_capture", None)
+        end_capture = getattr(session, "_end_capture", None)
+        monitor = getattr(session, "_monitor", None)
+        if begin_capture is not None:
+            begin_capture(widen=False)
+        if monitor is not None and hasattr(monitor, "begin_live"):
+            monitor.begin_live()
+        try:
+            needs_gating = (
+                bool(session._steering_needs_probe_gating())
+                if hasattr(session, "_steering_needs_probe_gating")
+                else False
+            )
+            gating_callback = (
+                session._build_gating_score_callback()
+                if needs_gating and hasattr(session, "_build_gating_score_callback")
+                else None
+            )
+
+            current_input = torch.tensor(
+                [branch.prompt_ids],
+                dtype=torch.long,
+                device=device,
+            )
+            past_key_values = None
+            no_cache_mode = False
+            prefill = True
+
+            with torch.inference_mode():
+                for forced_idx, token_id in enumerate(forced_ids):
+                    if ctx is not None:
+                        ctx.is_prefill = prefill
+                        ctx.thinking = forced_idx < len(branch.thinking_ids)
+                        ctx.gen_step = forced_idx
+
+                    kwargs: dict[str, Any] = {
+                        "input_ids": current_input,
+                        "use_cache": True,
+                    }
+                    if past_key_values is not None and not no_cache_mode:
+                        kwargs["past_key_values"] = past_key_values
+                    if prefill or no_cache_mode:
+                        kwargs["attention_mask"] = torch.ones_like(current_input)
+
+                    outputs = _call_model(model, **kwargs)
+                    prefill = False
+
+                    if gating_callback is not None and ctx is not None:
+                        ctx.probe_scores = gating_callback()
+
+                    if not no_cache_mode:
+                        past_key_values = getattr(outputs, "past_key_values", None)
+                        if past_key_values is None and current_input.shape[1] > 1:
+                            no_cache_mode = True
+
+                    logits = outputs.logits[:, -1, :]
+                    logits.nan_to_num_(nan=0.0, posinf=100.0, neginf=-100.0)
+                    logits.clamp_(-100.0, 100.0)
+
+                    if use_penalties and completion_counts:
+                        ids = list(completion_counts.keys())
+                        counts = list(completion_counts.values())
+                        idx_t = torch.tensor(ids, dtype=torch.long, device=device)
+                        cnt_t = torch.tensor(counts, dtype=logits.dtype, device=device)
+                        logits[0, idx_t] -= (
+                            frequency_penalty * cnt_t + presence_penalty
+                        )
+                    if bias_idx is not None:
+                        logits[0, bias_idx] += bias_val.to(logits.dtype)
+
+                    vocab_size = int(logits.shape[-1])
+                    user_top_k = (
+                        config.top_k if (config.top_k and config.top_k > 0) else 1024
+                    )
+                    topk_k = min(int(user_top_k), vocab_size)
+                    logp = _sampler_logprob_vector(logits, config, topk_k)
+
+                    if forced_idx >= len(branch.thinking_ids):
+                        response_idx = forced_idx - len(branch.thinking_ids)
+                        visible_pos = len(branch.prompt_ids) + response_idx - 1
+                        row_logps[visible_pos] = logp.detach().to("cpu")
+
+                    if use_penalties:
+                        completion_counts[token_id] = (
+                            completion_counts.get(token_id, 0) + 1
+                        )
+
+                    next_token = torch.tensor([[int(token_id)]], dtype=torch.long, device=device)
+                    if no_cache_mode:
+                        current_input = torch.cat([current_input, next_token], dim=1)
+                    else:
+                        current_input = next_token
+        finally:
+            if end_capture is not None:
+                end_capture()
+            if monitor is not None and hasattr(monitor, "end_live"):
+                monitor.end_live()
+
+    if vocab_size is None:
+        return torch.empty((n_rows, 0), dtype=torch.float32)
+    out = torch.full(
+        (n_rows, vocab_size),
+        float("-inf"),
+        dtype=torch.float32,
+    )
+    for row_idx, logp in row_logps.items():
+        if 0 <= row_idx < n_rows:
+            out[row_idx] = logp
+    return out
+
+
 def compute_joint_logprobs(
     session: "SaklasSession",
     a_id: str,
@@ -242,9 +588,9 @@ def compute_joint_logprobs(
 ) -> JointLogprobs:
     """Run cross-evaluation between two assistant sibling nodes.
 
-    Builds each branch's full input through the chat template, runs one
-    forward pass per branch in ``inference_mode``, and assembles per-
-    aligned-position records.  Caller is responsible for holding
+    Builds each branch's prompt through the chat template, force-replays
+    its stored response tokens under that node's recipe, and assembles
+    per-aligned-position records.  Caller is responsible for holding
     ``session.lock`` — model forwards must serialize against any
     concurrent generation on the same session.
 
@@ -257,29 +603,10 @@ def compute_joint_logprobs(
     a_node = tree.nodes[a_id]
     b_node = tree.nodes[b_id]
     parent_id = a_node.parent_id if a_node.parent_id == b_node.parent_id else None
-
-    tokenizer = session.tokenizer
-    model = session._model
-    device = next(model.parameters()).device
-
-    # Build full token sequence for each branch.  ``add_generation_prompt
-    # =False`` because the assistant content *is* the last message —
-    # we don't want the template to start a new assistant turn after it.
-    messages_a = tree.messages_for(a_id)
-    messages_b = tree.messages_for(b_id)
-    system_prompt = session.config.system_prompt or None
-    input_a = build_chat_input(
-        tokenizer, messages_a, system_prompt=system_prompt,
-        thinking=False, add_generation_prompt=False,
-    )
-    input_b = build_chat_input(
-        tokenizer, messages_b, system_prompt=system_prompt,
-        thinking=False, add_generation_prompt=False,
-    )
-    # Both shapes are ``[1, T]``; squeeze the batch dim for our ops and
-    # restore it inside the forward.
-    ids_a = input_a[0].tolist()
-    ids_b = input_b[0].tolist()
+    branch_a = _branch_inputs(session, a_id)
+    branch_b = _branch_inputs(session, b_id)
+    ids_a = branch_a.token_ids
+    ids_b = branch_b.token_ids
     prefix_len = _shared_prefix_len(ids_a, ids_b)
 
     # If neither side has any assistant tokens past the prefix, return
@@ -290,38 +617,12 @@ def compute_joint_logprobs(
             rows=(), n_rank1_changed=0,
         )
 
-    # Per-token display text — ``tokenizer.decode([id])`` gives the
-    # human-readable rendering (space-prefixed where appropriate),
-    # which byte-aligns cleanly under ``per_token_diff`` because both
-    # branches tokenize the shared prefix identically.
-    def _decode_each(ids: list[int]) -> list[str]:
-        # Batch-decode-per-id rather than ``decode(ids)`` to keep the
-        # per-position list aligned 1:1 with the id list.  Cost is
-        # ~O(T) tokenizer calls; small enough for a single drawer
-        # open.  Coerce to ``str`` because some tokenizer's ``decode``
-        # signature is typed ``list[str] | str``.
-        return [str(tokenizer.decode([tid])) for tid in ids]
-
-    strs_a = _decode_each(ids_a)
-    strs_b = _decode_each(ids_b)
-
-    # Run the two forward passes.  ``use_cache=False`` — we don't reuse
-    # the kv across the two branches, and a single one-shot forward is
-    # what fastest on every backend.  ``inference_mode`` matches the
-    # generation path's discipline.
-    input_a_dev = input_a.to(device)
-    input_b_dev = input_b.to(device)
-    with torch.inference_mode():
-        out_a = model(input_ids=input_a_dev, use_cache=False)
-        out_b = model(input_ids=input_b_dev, use_cache=False)
-    # Cast to fp32 for the log-softmax to dodge fp16 overflow at large
-    # vocabs.  Move to CPU so the downstream ``.item()`` reads don't
-    # bounce through device sync per cell.
-    logp_a = torch.log_softmax(out_a.logits[0].float(), dim=-1).cpu()
-    logp_b = torch.log_softmax(out_b.logits[0].float(), dim=-1).cpu()
+    logp_a = _replay_branch_logprobs(session, branch_a)
+    logp_b = _replay_branch_logprobs(session, branch_b)
 
     rows = _compute_rows(
-        logp_a, logp_b, ids_a, ids_b, strs_a, strs_b, prefix_len,
+        logp_a, logp_b, ids_a, ids_b,
+        branch_a.token_strs, branch_b.token_strs, prefix_len,
     )
     n_changed = sum(1 for r in rows if r.aligned and r.rank_changed)
     return JointLogprobs(

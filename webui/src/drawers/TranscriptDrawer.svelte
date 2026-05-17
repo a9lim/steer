@@ -103,7 +103,10 @@
   function resolveByPrefix(prefix: string): PrefixResolution {
     const p = prefix.trim();
     if (!p) return { id: null, matches: [] };
-    if (p === "root") return { id: loomTree.root_id, matches: [loomTree.root_id] };
+    if (p === "root") {
+      const root = loomTree.root_id;
+      return root ? { id: root, matches: [root] } : { id: null, matches: [] };
+    }
     const matches: string[] = [];
     for (const id of loomTree.nodes.keys()) {
       if (id === p) return { id, matches: [id] };

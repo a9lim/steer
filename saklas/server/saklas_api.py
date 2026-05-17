@@ -825,8 +825,7 @@ def register_saklas_routes(app: FastAPI) -> None:
         original target, the user simply sees a different active path.
         """
         _resolve_session_id(session, session_id)
-        async with session.lock:
-            session.tree.navigate(req.node_id)
+        session.tree.navigate(req.node_id)
         return _active_path_json(session)
 
     @app.post("/saklas/v1/sessions/{session_id}/tree/edit")
@@ -838,8 +837,7 @@ def register_saklas_routes(app: FastAPI) -> None:
         unknown id; 400 on root-edit or other invalid ops.
         """
         _resolve_session_id(session, session_id)
-        async with session.lock:
-            session.tree.edit(req.node_id, req.text)
+        session.tree.edit(req.node_id, req.text)
         return _node_json(session, req.node_id)
 
     @app.post("/saklas/v1/sessions/{session_id}/tree/branch")
@@ -855,10 +853,9 @@ def register_saklas_routes(app: FastAPI) -> None:
         _resolve_session_id(session, session_id)
         # Cast role through the Literal-narrowing layer the tree owns.
         role_arg = req.role  # type: ignore[assignment]
-        async with session.lock:
-            new_id = session.tree.branch(
-                req.node_id, req.text, role=role_arg,
-            )
+        new_id = session.tree.branch(
+            req.node_id, req.text, role=role_arg,
+        )
         return {
             "node_id": new_id,
             "node": _node_json(session, new_id),
@@ -874,8 +871,7 @@ def register_saklas_routes(app: FastAPI) -> None:
         id. Returns ``{removed: <count>}``.
         """
         _resolve_session_id(session, session_id)
-        async with session.lock:
-            removed = session.tree.delete_subtree(node_id)
+        removed = session.tree.delete_subtree(node_id)
         return {"removed": removed}
 
     @app.post("/saklas/v1/sessions/{session_id}/tree/star")
@@ -885,8 +881,7 @@ def register_saklas_routes(app: FastAPI) -> None:
         Decoration-only; never raises a concurrency conflict.
         """
         _resolve_session_id(session, session_id)
-        async with session.lock:
-            session.tree.star(req.node_id, req.on)
+        session.tree.star(req.node_id, req.on)
         return _node_json(session, req.node_id)
 
     @app.post("/saklas/v1/sessions/{session_id}/tree/note")
@@ -896,8 +891,7 @@ def register_saklas_routes(app: FastAPI) -> None:
         Decoration-only; never raises a concurrency conflict.
         """
         _resolve_session_id(session, session_id)
-        async with session.lock:
-            session.tree.annotate(req.node_id, req.text)
+        session.tree.annotate(req.node_id, req.text)
         return _node_json(session, req.node_id)
 
     @app.post("/saklas/v1/sessions/{session_id}/tree/reset", status_code=204)
@@ -1145,20 +1139,20 @@ def register_saklas_routes(app: FastAPI) -> None:
     async def tree_joint_logprobs(session_id: str, req: JointLogprobsRequest):
         """Cross-evaluation between two sibling assistant nodes.
 
-        Logit-pass Phase 5 of ``docs/plans/logit-pass.md``.  Runs one
-        forward pass per branch under ``inference_mode``, computes the
-        log-softmax at each position, and returns per-aligned-position
-        records carrying both branches' chosen-token logprobs *and* the
-        cross-branch evaluation (what each side would have given the
-        other's chosen token at the same byte-aligned position).
+        Logit-pass Phase 5 of ``docs/plans/logit-pass.md``.  Force-replays
+        each branch under the node's stamped recipe, steering hooks, probe
+        gates, penalties, logit bias, and sampler transform, then returns
+        per-aligned-position records carrying both branches' chosen-token
+        logprobs *and* the cross-branch evaluation (what each side would
+        have given the other's chosen token at the same byte-aligned
+        position).
 
         Cache shape:
         * Stored on ``session._joint_logprob_cache: dict[tuple[str,
           str], JointLogprobs]`` keyed by sorted ``(a_id, b_id)`` so
           the symmetric pair shares an entry.
-        * Persists for the session lifetime — the underlying nodes are
-          immutable by ulid (mutations create new node ids), so stale
-          entries can't poison the response.
+        * Invalidated by tree edits/deletes/finalize events in
+          ``SaklasSession``; navigate/star/note leave it intact.
 
         Held under ``acquire_session_lock`` because the forward passes
         compete for the same model with any concurrent generation;
@@ -1178,8 +1172,8 @@ def register_saklas_routes(app: FastAPI) -> None:
         if req.b_id not in session.tree.nodes:
             raise HTTPException(404, f"unknown node id: {req.b_id}")
 
-        # Lazy cache attached to the session at first request — keeps
-        # the SaklasSession constructor footprint untouched.
+        # New sessions create this cache in SaklasSession; keep the lazy
+        # fallback for older test doubles and external session shims.
         cache_obj: Any = getattr(session, "_joint_logprob_cache", None)
         if cache_obj is None:
             cache_obj = {}
