@@ -155,7 +155,7 @@
   .rail {
     display: flex;
     flex-direction: column;
-    padding: 0.7rem 0.5rem;
+    padding: var(--space-5) var(--space-4);
     background: var(--bg-deep);
     border-right: 1px solid var(--border);
     min-height: 0;
@@ -164,7 +164,7 @@
   .items {
     display: flex;
     flex-direction: column;
-    gap: 0.45rem;
+    gap: var(--space-4);
   }
 
   .rail-btn {
@@ -172,29 +172,24 @@
     width: 100%;
     display: grid;
     place-items: center;
-    gap: 0.18rem;
+    gap: var(--space-1);
     border: 1px solid transparent;
     border-radius: var(--radius);
     background: transparent;
     color: var(--fg-subtle);
-    padding: 0.35rem 0.2rem;
+    padding: var(--space-2) var(--space-1);
     font-family: var(--font-ui);
     cursor: pointer;
     transition:
       background var(--dur) var(--ease-out),
       border-color var(--dur) var(--ease-out),
-      color var(--dur) var(--ease-out),
-      transform var(--dur-fast) var(--ease-out);
+      color var(--dur) var(--ease-out);
   }
   .rail-btn:hover:not(:disabled),
   .rail-btn.active {
     background: var(--accent-subtle);
-    border-color: rgba(72, 138, 203, 0.42);
+    border-color: var(--accent);
     color: var(--fg);
-    transform: translateY(-1px);
-  }
-  .rail-btn:active:not(:disabled) {
-    transform: translateY(0);
   }
   .rail-btn:disabled {
     opacity: 0.35;
@@ -210,7 +205,7 @@
     stroke-linejoin: round;
   }
   .rail-btn span {
-    font-size: 0.58rem;
+    font-size: var(--text-2xs);
     line-height: 1;
     text-transform: uppercase;
     letter-spacing: 0;
@@ -224,12 +219,12 @@
     background: var(--surface-strong);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.25em 0;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    padding: var(--space-2) 0;
+    box-shadow: var(--shadow-overlay);
     display: flex;
     flex-direction: column;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     animation: flyout-in var(--dur) var(--ease-out);
   }
   @keyframes flyout-in {
@@ -244,9 +239,9 @@
   }
   .flyout-title {
     margin: 0;
-    padding: 0.4em 0.8em 0.3em;
+    padding: var(--space-3) var(--space-5) var(--space-2);
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
@@ -254,7 +249,7 @@
     background: transparent;
     border: 0;
     text-align: left;
-    padding: 0.4em 0.8em;
+    padding: var(--space-3) var(--space-5);
     color: var(--fg-strong);
     font: inherit;
     font-family: var(--font-mono);

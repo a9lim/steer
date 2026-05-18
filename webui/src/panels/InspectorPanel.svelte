@@ -15,10 +15,11 @@
 </aside>
 
 <style>
+  /* One flat panel — no outer padding, so the two rack sections run
+   * edge to edge and the hairline between them is full-bleed. */
   .inspector {
     display: grid;
     grid-template-rows: minmax(0, 1fr);
-    padding: 0.75rem;
     height: 100%;
     max-height: 100%;
     min-height: 0;
@@ -26,10 +27,11 @@
     background: var(--bg-alt);
   }
 
+  /* Two equal flat sections, divided only by SteeringRack's border-bottom
+   * hairline — no gap, no nested boxes. */
   .rack-grid {
     display: grid;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 0.65rem;
     height: 100%;
     max-height: 100%;
     min-height: 0;

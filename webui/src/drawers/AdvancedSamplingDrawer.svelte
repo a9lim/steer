@@ -74,8 +74,8 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 1rem;
-    padding: 1rem 1.1rem;
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-6);
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
@@ -83,35 +83,35 @@
     color: var(--accent);
     text-transform: uppercase;
     letter-spacing: 0;
-    font-size: 0.75rem;
-    font-weight: 700;
+    font-size: var(--text-xs);
+    font-weight: var(--weight-bold);
   }
   p {
-    margin: 0.3rem 0 0;
+    margin: var(--space-2) 0 0;
     color: var(--fg-muted);
   }
   .close {
     background: transparent;
     border: 0;
     color: var(--fg-muted);
-    font-size: 1.25rem;
+    font-size: var(--text-md);
   }
   .body {
     display: grid;
-    gap: 0.8rem;
-    padding: 1rem;
+    gap: var(--space-5);
+    padding: var(--space-6);
     overflow: auto;
   }
   .panel {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
-    padding: 0.9rem;
+    padding: var(--space-6);
   }
   h3 {
-    margin: 0 0 0.6rem;
+    margin: 0 0 var(--space-4);
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: var(--text);
     letter-spacing: 0;
   }
   textarea {
@@ -120,9 +120,9 @@
     border-radius: var(--radius);
     background: var(--bg-deep);
     color: var(--fg);
-    padding: 0.55rem;
+    padding: var(--space-4);
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--text-xs);
     letter-spacing: 0;
     resize: vertical;
     line-height: 1.45;
@@ -135,7 +135,7 @@
     border-color: var(--accent-red);
   }
   .hint {
-    font-size: 0.74rem;
+    font-size: var(--text-xs);
     line-height: 1.35;
   }
   .error {

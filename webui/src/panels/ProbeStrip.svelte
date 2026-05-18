@@ -148,14 +148,14 @@
   /* Match VectorStrip's outer frame so steering and probe rows read as
    * one visual family — same border, radius, background, font-size. */
   .strip {
-    border: 1px solid var(--border-dim);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-alt);
-    transition: border-color 0.1s ease;
-    font-size: 0.85em;
+    transition: border-color var(--dur-fast) var(--ease-out);
+    font-size: var(--text-sm);
   }
   .strip.selected {
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
 
   /* Row body — flex / 32px / 0.4em gap / 0.25em·0.4em padding to match
@@ -164,9 +164,9 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 0.4em;
+    gap: var(--space-3);
     min-height: 32px;
-    padding: 0.25em 0.4em;
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
     user-select: none;
   }
@@ -174,7 +174,7 @@
     background: var(--bg-elev);
   }
   .row:focus-visible {
-    outline: 1px solid var(--accent-blue);
+    outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
 
@@ -184,9 +184,9 @@
    * highlighted" blue). */
   .select-glyph {
     color: var(--fg-muted);
-    font-size: 1em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0 0.2em;
+    padding: 0 var(--space-1);
     flex: 0 0 auto;
   }
   .strip.selected .select-glyph {
@@ -211,7 +211,7 @@
   }
   .strip.selected .name {
     color: var(--accent-blue);
-    font-weight: bold;
+    font-weight: var(--weight-bold);
   }
 
   .value {
@@ -233,10 +233,10 @@
     background: transparent;
     border: 0;
     color: var(--fg-muted);
-    font-size: 0.95em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0.1em 0.35em;
-    border-radius: 2px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     flex: 0 0 auto;
   }
   .icon:hover:not(:disabled) {
@@ -250,16 +250,16 @@
   .layers {
     display: flex;
     align-items: center;
-    gap: 0.4em;
-    padding: 0.3em 0.4em 0.4em 0.4em;
-    border-top: 1px solid var(--border-dim);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3) var(--space-3) var(--space-3);
+    border-top: 1px solid var(--border);
     overflow-x: auto;
     white-space: nowrap;
   }
   .layers-status {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
-    padding: 0.1em 0;
+    font-size: var(--text-sm);
+    padding: var(--space-1) 0;
   }
   .cells {
     display: flex;
@@ -268,7 +268,7 @@
   }
   .endcap {
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     flex: 0 0 auto;
   }

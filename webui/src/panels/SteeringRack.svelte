@@ -253,18 +253,19 @@
 </section>
 
 <style>
-  /* Fixed chrome + one scrollable middle.  This deliberately uses flex
-   * instead of grid: the generated ``.strips`` element was able to grow
-   * past the rack in some viewport sizes, hiding the apply-vector controls.
-   */
+  /* A flat section of the inspector panel — no border box, no own
+   * background; the only chrome is the border-bottom hairline dividing
+   * it from the probe section below.  Fixed chrome + one scrollable
+   * middle.  This deliberately uses flex instead of grid: the generated
+   * ``.strips`` element was able to grow past the rack in some viewport
+   * sizes, hiding the apply-vector controls. */
   .rack {
     display: flex;
     flex-direction: column;
-    gap: 0.5em;
-    padding: var(--panel-pad);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
+    gap: var(--space-3);
+    padding: var(--space-5);
+    background: transparent;
+    border-bottom: 1px solid var(--border);
     height: 100%;
     min-height: 0;
     max-height: 100%;
@@ -275,33 +276,33 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.5em;
-    border-bottom: 1px solid var(--border-dim);
-    padding-bottom: 0.3em;
+    gap: var(--space-3);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: var(--space-3);
   }
   .header-text {
     display: flex;
     align-items: baseline;
-    gap: 0.5em;
+    gap: var(--space-3);
     min-width: 0;
   }
   .title {
-    font-weight: bold;
+    font-weight: var(--weight-bold);
     color: var(--accent-blue);
     letter-spacing: 0;
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     text-transform: uppercase;
   }
   .subtitle {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .count {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     flex: 0 0 auto;
   }
 
@@ -310,12 +311,12 @@
   .strips {
     display: flex;
     flex-direction: column;
-    gap: 0.3em;
+    gap: var(--space-2);
     flex: 1 1 0;
     min-height: 2.4rem;
     max-height: 100%;
     overflow-y: auto;
-    padding-right: 0.2em;
+    padding-right: var(--space-1);
   }
   .strips.is-empty {
     align-items: center;
@@ -327,14 +328,14 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.7em;
-    padding: 1em 0.6em;
+    gap: var(--space-4);
+    padding: var(--space-5) var(--space-4);
     text-align: center;
   }
   .empty-copy {
     margin: 0;
     color: var(--fg-dim);
-    font-size: 0.9em;
+    font-size: var(--text-sm);
     line-height: 1.5;
     max-width: 28ch;
   }
@@ -343,55 +344,49 @@
    * Border-top mirrors the probe rack's actions row for visual symmetry. */
   .actions {
     flex: 0 0 auto;
-    border-top: 1px solid var(--border-dim);
-    padding-top: 0.4em;
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
   }
   /* Primary entry point — the one obvious way to add a steering vector. */
   .add-steering {
     width: 100%;
-    background: var(--secondary-subtle);
+    background: var(--accent-subtle);
     color: var(--accent-blue);
-    border: 1px solid var(--accent-blue);
+    border: 1px solid var(--border);
     min-height: 2.1rem;
-    padding: 0.4em 0.8em;
+    padding: var(--space-4) var(--space-5);
     border-radius: var(--radius);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--text-sm);
     cursor: pointer;
-    transition:
-      background var(--dur) var(--ease-out),
-      transform var(--dur-fast) var(--ease-out);
+    transition: background var(--dur) var(--ease-out);
   }
   .empty .add-steering {
     width: auto;
     min-width: 14em;
   }
   .add-steering:hover {
-    background: rgba(72, 138, 203, 0.22);
-    transform: translateY(-1px);
-  }
-  .add-steering:active {
-    transform: translateY(0);
+    background: var(--accent-glow);
   }
 
   .expression-block {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 0.3em;
-    border-top: 1px solid var(--border-dim);
-    padding-top: 0.4em;
+    gap: var(--space-2);
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
   }
   .expr-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .expr-label {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0;
   }
@@ -399,9 +394,9 @@
     background: transparent;
     border: 0;
     color: var(--fg-muted);
-    font-size: 0.9em;
-    padding: 0.1em 0.35em;
-    border-radius: 2px;
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     line-height: 1;
   }
   .pencil:hover {
@@ -413,19 +408,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.5em;
+    gap: var(--space-3);
     width: 100%;
     text-align: left;
-    background: var(--bg-alt);
+    background: var(--bg-elev);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.6em;
+    padding: var(--space-4) var(--space-3);
     color: var(--fg-strong);
     font-family: var(--font-mono);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
   }
   .expr-code:hover {
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .expr-code code {
     flex: 1 1 auto;
@@ -436,7 +431,7 @@
   }
   .copy-hint {
     flex: 0 0 auto;
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     color: var(--fg-muted);
   }
   .copy-hint.active {
@@ -444,12 +439,12 @@
   }
 
   .expr-empty {
-    background: var(--bg-alt);
-    border: 1px dashed var(--border-dim);
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.6em;
+    padding: var(--space-4) var(--space-3);
     color: var(--fg-muted);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
   }
   .expr-empty code {
     background: transparent;
@@ -458,39 +453,39 @@
 
   .expr-edit {
     width: 100%;
-    background: var(--bg);
+    background: var(--bg-elev);
     color: var(--fg);
-    border: 1px solid var(--accent-blue);
+    border: 1px solid var(--accent);
     border-radius: var(--radius);
-    padding: 0.4em 0.6em;
+    padding: var(--space-4) var(--space-3);
     font-family: var(--font-mono);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     resize: vertical;
     min-height: 3em;
   }
   .expr-edit:focus {
     outline: none;
-    border-color: var(--accent-blue);
-    box-shadow: 0 0 0 1px var(--accent-blue);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
   }
 
   .edit-hints {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .hint {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
   .cancel {
     background: transparent;
-    border: 1px solid var(--border-dim);
+    border: 1px solid var(--border);
     color: var(--fg-muted);
-    padding: 0.15em 0.5em;
-    border-radius: 2px;
-    font-size: var(--font-size-small);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
   }
   .cancel:hover {
     color: var(--fg-strong);
@@ -502,8 +497,8 @@
     background: rgba(248, 81, 73, 0.08);
     border: 1px solid var(--accent-red);
     border-radius: var(--radius);
-    padding: 0.3em 0.5em;
-    font-size: 0.85em;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
     font-family: var(--font-mono);
   }
 </style>

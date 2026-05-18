@@ -100,24 +100,24 @@
 
 <style>
   .drawer-shell { display: flex; flex-direction: column; min-height: 0; background: var(--bg-alt); }
-  .header { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); background: var(--surface); }
-  .title { color: var(--accent); text-transform: uppercase; letter-spacing: 0; font-size: 0.75rem; font-weight: 700; }
-  .header p, .hint, .panel p { margin: 0.3rem 0 0; color: var(--fg-muted); line-height: 1.45; }
-  .close { background: transparent; border: 0; color: var(--fg-muted); font-size: 1.25rem; }
-  .body { display: grid; gap: 0.85rem; padding: 1rem; overflow: auto; }
-  .panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 0.9rem; }
-  h3 { margin: 0 0 0.65rem; color: var(--fg); font-size: 0.92rem; letter-spacing: 0; }
-  .key-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem; }
-  input { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-deep); color: var(--fg); padding: 0.55rem; font-family: var(--font-mono); }
-  button { border: 1px solid var(--border); border-radius: var(--radius); background: rgba(255,255,255,0.03); color: var(--fg); padding: 0.5rem 0.7rem; }
+  .header { display: flex; justify-content: space-between; gap: var(--space-6); padding: var(--space-6) var(--space-6); border-bottom: 1px solid var(--border); background: var(--surface); }
+  .title { color: var(--accent); text-transform: uppercase; letter-spacing: 0; font-size: var(--text-xs); font-weight: var(--weight-bold); }
+  .header p, .hint, .panel p { margin: var(--space-1) 0 0; color: var(--fg-muted); line-height: 1.45; }
+  .close { background: transparent; border: 0; color: var(--fg-muted); font-size: var(--text-md); }
+  .body { display: grid; gap: var(--space-5); padding: var(--space-6); overflow: auto; }
+  .panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: var(--space-6); }
+  h3 { margin: 0 0 var(--space-4); color: var(--fg); font-size: var(--text-sm); letter-spacing: 0; }
+  .key-row { display: grid; grid-template-columns: 1fr auto auto; gap: var(--space-3); }
+  input { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-deep); color: var(--fg); padding: var(--space-4); font-family: var(--font-mono); }
+  button { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); color: var(--fg); padding: var(--space-3) var(--space-5); }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-  .sessions { display: grid; gap: 0.5rem; }
-  article { display: grid; gap: 0.25rem; border: 1px solid var(--border-dim); border-radius: var(--radius); background: rgba(255,255,255,0.025); padding: 0.65rem; }
-  article.active { border-color: rgba(72, 138, 203, 0.55); background: rgba(72, 138, 203, 0.10); }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); }
+  .sessions { display: grid; gap: var(--space-3); }
+  article { display: grid; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); padding: var(--space-4); }
+  article.active { border-color: var(--accent); background: var(--accent-subtle); }
   strong { color: var(--accent); }
   code { color: var(--accent-amber); font-family: var(--font-mono); }
   article span { color: var(--fg-muted); }
   .error { color: var(--accent-red); }
-  .empty { color: var(--fg-muted); border: 1px dashed var(--border); border-radius: var(--radius); padding: 1rem; text-align: center; }
+  .empty { color: var(--fg-muted); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-6); text-align: center; }
 </style>

@@ -534,7 +534,7 @@
     background: var(--bg);
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     border-left: 1px solid var(--border);
   }
 
@@ -542,19 +542,19 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 0.6em;
-    padding: 0.6em 0.8em;
-    border-bottom: 1px solid var(--border-dim);
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-4);
+    border-bottom: 1px solid var(--border);
   }
   .title {
     display: flex;
     flex-direction: column;
-    gap: 0.2em;
+    gap: var(--space-1);
     min-width: 0;
   }
   .label {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0;
   }
@@ -562,7 +562,7 @@
     color: var(--fg-strong);
     font-family: var(--font-mono);
     background: var(--bg-alt);
-    padding: 0.1em 0.4em;
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--border);
     word-break: break-all;
     max-width: 28ch;
@@ -572,15 +572,15 @@
   }
   .coord {
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .close {
     background: transparent;
     color: var(--fg-muted);
     border: 1px solid var(--border);
-    padding: 0 0.5em;
+    padding: 0 var(--space-3);
     font: inherit;
-    font-size: 1.1em;
+    font-size: var(--text-md);
     cursor: pointer;
     line-height: 1.4;
   }
@@ -591,15 +591,15 @@
 
   .branch-toggle {
     display: flex;
-    gap: 0.3em;
-    padding: 0.4em 0.8em;
-    border-bottom: 1px dashed var(--border-dim);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
   }
   .branch-toggle button {
     background: transparent;
     color: var(--fg-dim);
     border: 1px solid var(--border);
-    padding: 0.2em 0.7em;
+    padding: var(--space-1) var(--space-4);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);
@@ -611,8 +611,8 @@
   }
   .branch-toggle button.active {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    background: rgba(72, 138, 203, 0.10);
+    border-color: var(--accent);
+    background: var(--accent-subtle);
   }
 
   /* View tab strip — same shape as the branch toggle but lives on its
@@ -620,15 +620,15 @@
      (steered/unsteered split + probes/logits split). */
   .tab-strip {
     display: flex;
-    gap: 0.3em;
-    padding: 0.4em 0.8em;
-    border-bottom: 1px dashed var(--border-dim);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
   }
   .tab-strip button {
     background: transparent;
     color: var(--fg-dim);
     border: 1px solid var(--border);
-    padding: 0.2em 0.7em;
+    padding: var(--space-1) var(--space-4);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);
@@ -640,27 +640,27 @@
   }
   .tab-strip button.active {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    background: rgba(72, 138, 203, 0.10);
+    border-color: var(--accent);
+    background: var(--accent-subtle);
   }
 
   .body {
     flex: 1 1 auto;
     overflow: auto;
     min-height: 0;
-    padding: 0.6em 0.8em;
+    padding: var(--space-4) var(--space-4);
   }
   .empty {
     color: var(--fg-muted);
     font-style: italic;
-    padding: 1em 0;
+    padding: var(--space-5) 0;
     line-height: 1.4;
   }
 
   .grid-scroll {
     overflow: auto;
     max-height: 100%;
-    border: 1px solid var(--border-dim);
+    border: 1px solid var(--border);
     background: var(--bg-alt);
   }
   .grid {
@@ -686,9 +686,9 @@
     left: 0;
     z-index: 1;
     text-align: right;
-    padding: 0 0.5em 0 0.4em;
+    padding: 0 var(--space-3) 0 var(--space-2);
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     border-right: 1px solid var(--border);
     white-space: nowrap;
   }
@@ -698,15 +698,15 @@
     left: 0;
     z-index: 3;
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-align: left;
-    padding: 0.2em 0.5em;
+    padding: var(--space-1) var(--space-3);
     border-right: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
   }
   .grid .col-label {
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     padding: 0;
     /* Rotate compact column labels so they fit narrow cells.  Wrap the
      * inner span so the rotation pivots around the cell box, not the
@@ -722,7 +722,7 @@
     transform: rotate(-60deg);
     transform-origin: left bottom;
     white-space: nowrap;
-    padding-bottom: 0.4em;
+    padding-bottom: var(--space-2);
   }
   .grid .cell-td {
     line-height: 0; /* HeatmapCell brings its own box; remove text leading. */
@@ -730,14 +730,14 @@
 
   /* Logits tab — chosen-row summary line and the ranked alts table. */
   .logits-summary {
-    padding: 0 0 0.6em 0;
+    padding: 0 0 var(--space-4) 0;
     color: var(--fg);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     line-height: 1.6;
   }
   .logits-summary .kv {
     color: var(--fg-dim);
-    margin-left: 0.6em;
+    margin-left: var(--space-4);
   }
   .logits-summary strong {
     color: var(--fg-strong);
@@ -747,12 +747,12 @@
     border-collapse: separate;
     border-spacing: 0;
     font-variant-numeric: tabular-nums;
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .logits-table th,
   .logits-table td {
-    padding: 0.25em 0.6em;
-    border-bottom: 1px solid var(--border-dim);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
     text-align: left;
     background: var(--bg-alt);
   }
@@ -761,8 +761,8 @@
     top: 0;
     z-index: 1;
     color: var(--fg-muted);
-    font-weight: normal;
-    font-size: var(--font-size-tiny);
+    font-weight: var(--weight-normal);
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0;
     border-bottom: 1px solid var(--border);
@@ -782,18 +782,18 @@
      glance.  Reuses the same accent-blue rationale as the branch toggle's
      active state. */
   .logits-table tr.chosen td {
-    background: rgba(72, 138, 203, 0.10);
+    background: var(--accent-subtle);
     color: var(--fg-strong);
   }
   .mini {
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: rgba(255, 255, 255, 0.025);
+    background: var(--bg-elev);
     color: var(--accent);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-tiny);
-    padding: 0.15em 0.45em;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
   }
   .mini:hover:not(:disabled) {
     border-color: var(--accent);
@@ -805,8 +805,8 @@
   }
   .branch-error {
     color: var(--accent-error);
-    font-size: var(--font-size-small);
-    margin: 0.6em 0 0;
+    font-size: var(--text-sm);
+    margin: var(--space-4) 0 0;
   }
   .link-btn {
     background: transparent;
@@ -815,11 +815,11 @@
     font: inherit;
     font-family: var(--font-mono);
     cursor: pointer;
-    padding: 0.2em 0.7em;
+    padding: var(--space-1) var(--space-4);
   }
   .link-btn:hover:not(:disabled) {
     color: var(--fg-strong);
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .link-btn:disabled {
     color: var(--fg-muted);
@@ -827,10 +827,10 @@
   }
 
   .drawer-footer {
-    border-top: 1px solid var(--border-dim);
-    padding: 0.4em 0.8em;
+    border-top: 1px solid var(--border);
+    padding: var(--space-2) var(--space-4);
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
   .hint {
     line-height: 1.4;

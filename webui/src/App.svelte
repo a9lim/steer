@@ -328,7 +328,7 @@
   .chat-zone {
     display: flex;
     flex-direction: column;
-    padding: 0.75rem;
+    padding: var(--space-5);
   }
   /* Two-row grid: steering rack and probe rack.  Reference views
    * (correlation N×N, per-name layer norms) live in drawer overlays
@@ -361,8 +361,8 @@
     z-index: calc(var(--z-drawer) + 1);
     display: flex;
     flex-direction: column;
-    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
-    animation: drawer-in 200ms var(--ease-out);
+    box-shadow: var(--shadow-overlay);
+    animation: drawer-in var(--dur) var(--ease-out);
   }
   /* Forms / pickers — sized to their content rather than the wide
    * analysis panel. */
@@ -381,12 +381,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.5em 1em;
+    padding: var(--space-3) var(--space-6);
     border-bottom: 1px solid var(--border);
   }
   .drawer-title {
     color: var(--accent-blue);
-    font-size: 0.95em;
+    font-size: var(--text);
     text-transform: lowercase;
     letter-spacing: 0;
   }
@@ -394,9 +394,9 @@
     background: transparent;
     border: 0;
     color: var(--fg-dim);
-    font-size: 1em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0.25em 0.4em;
+    padding: var(--space-2) var(--space-3);
   }
   .drawer-close:hover {
     color: var(--accent-red);
@@ -404,12 +404,12 @@
   .drawer-body {
     flex: 1;
     overflow-y: auto;
-    padding: 1em;
+    padding: var(--space-5);
   }
   .stub {
     color: var(--fg-strong);
-    font-size: 0.95em;
-    margin: 0 0 0.4em 0;
+    font-size: var(--text);
+    margin: 0 0 var(--space-3) 0;
   }
 
   /* Boot-failed gate — sits over the whole viewport since the rest of
@@ -423,14 +423,14 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 0.6em;
-    padding: 2em;
+    gap: var(--space-4);
+    padding: var(--space-8);
     text-align: center;
   }
   .boot-failed h1 {
     color: var(--accent-red);
     margin: 0;
-    font-size: 1.4em;
+    font-size: var(--text-lg);
   }
   .boot-failed .message {
     color: var(--fg-dim);
@@ -442,24 +442,25 @@
   .boot-failed .hint {
     color: var(--fg-muted);
     margin: 0;
-    font-size: 0.9em;
+    font-size: var(--text-sm);
   }
   .boot-failed code {
     background: var(--bg-elev);
-    padding: 0.1em 0.35em;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     color: var(--accent-blue);
   }
   .retry {
-    margin-top: 1em;
-    background: transparent;
+    margin-top: var(--space-5);
+    background: var(--bg-elev);
     color: var(--accent-blue);
-    border: 1px solid var(--accent-blue);
-    padding: 0.4em 1em;
+    border: 1px solid var(--border);
+    padding: var(--space-3) var(--space-6);
     border-radius: var(--radius);
-    font-size: 0.9em;
+    font-size: var(--text-sm);
+    transition: background var(--dur) var(--ease-out);
   }
   .retry:hover {
-    background: rgba(72, 138, 203, 0.12);
+    background: var(--accent-subtle);
   }
 </style>

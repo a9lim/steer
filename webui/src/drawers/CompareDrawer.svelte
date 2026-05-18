@@ -292,13 +292,13 @@
     min-height: 0;
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
   }
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px;
+    padding: var(--space-6);
     border-bottom: 1px solid var(--border);
   }
   .title {
@@ -311,7 +311,7 @@
     border: 0;
     color: var(--fg-dim);
     cursor: pointer;
-    padding: 0.25em 0.4em;
+    padding: var(--space-2) var(--space-2);
   }
   .close:hover {
     color: var(--accent-red);
@@ -319,95 +319,95 @@
   .body {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 16px;
+    padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
+    gap: var(--space-3);
     min-height: 0;
   }
   .mode-row {
     display: flex;
-    gap: 1.2em;
+    gap: var(--space-6);
   }
   .mode-opt {
     display: inline-flex;
     align-items: center;
-    gap: 0.35em;
+    gap: var(--space-2);
     color: var(--fg-strong);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .form {
     display: flex;
     flex-direction: column;
-    gap: 0.65em;
+    gap: var(--space-4);
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
   }
   .label {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     text-transform: lowercase;
   }
   .input {
     background: var(--bg-deep);
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 0.4em 0.5em;
+    padding: var(--space-2) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
   }
   .input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .validation {
     color: var(--accent-yellow);
     margin: 0;
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .error {
     color: var(--accent-error);
     margin: 0;
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     word-break: break-word;
   }
   .result-box {
     background: var(--bg-deep);
     border: 1px solid var(--border);
-    padding: 0.6em 0.8em;
+    padding: var(--space-4) var(--space-5);
   }
   .result-line {
-    margin: 0.15em 0;
+    margin: var(--space-1) 0;
     color: var(--fg-strong);
   }
   .value {
     color: var(--accent-green);
-    font-weight: 600;
+    font-weight: var(--weight-medium);
   }
   .dim {
     color: var(--fg-muted);
   }
   .small {
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .ranked-list {
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
     background: var(--bg-deep);
     border: 1px solid var(--border);
-    padding: 0.5em 0.6em;
+    padding: var(--space-3) var(--space-4);
   }
   .rrow {
     display: grid;
     grid-template-columns: minmax(8em, 14em) 1fr 4em 3em;
     align-items: center;
-    gap: 0.5em;
-    font-size: var(--font-size-small);
+    gap: var(--space-3);
+    font-size: var(--text-sm);
   }
   .rname {
     color: var(--fg-strong);
@@ -418,7 +418,7 @@
   .rbar-track {
     background: var(--bg-elev);
     height: 6px;
-    border-radius: 1px;
+    border-radius: var(--radius);
     position: relative;
     overflow: hidden;
   }
@@ -433,20 +433,20 @@
   .rlayers {
     color: var(--fg-muted);
     text-align: right;
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
   .footer {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5em;
-    padding: 16px;
+    gap: var(--space-3);
+    padding: var(--space-6);
     border-top: 1px solid var(--border);
   }
   .btn {
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.4em 0.9em;
+    padding: var(--space-2) var(--space-5);
     font: inherit;
     font-family: var(--font-mono);
     cursor: pointer;
@@ -457,14 +457,19 @@
   }
   .btn:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
   .btn.primary {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border-color: var(--accent);
   }
   .btn.primary:hover:not(:disabled) {
-    background: rgba(72, 138, 203, 0.12);
+    background: var(--accent-light);
+    border-color: var(--accent-light);
+  }
+  .btn.primary:disabled {
+    background: var(--bg-elev);
   }
 </style>

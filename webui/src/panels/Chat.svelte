@@ -896,26 +896,26 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    gap: 0.5em;
+    gap: var(--space-3);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     color: var(--fg);
   }
 
   .chat-header {
     display: flex;
     align-items: center;
-    gap: 0.8em;
+    gap: var(--space-4);
     flex-wrap: wrap;
-    padding-bottom: 0.4em;
-    border-bottom: 1px solid var(--border-dim);
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border);
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .ctl {
     display: inline-flex;
     align-items: center;
-    gap: 0.35em;
+    gap: var(--space-2);
   }
   .ctl-inline {
     cursor: pointer;
@@ -933,7 +933,7 @@
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.15em 0.45em;
+    padding: var(--space-1) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
   }
@@ -947,7 +947,7 @@
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 0.5em;
+    gap: var(--space-3);
     flex-wrap: wrap;
     margin-left: auto;
   }
@@ -956,10 +956,10 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--fg-dim);
-    padding: 0.15em 0.55em;
+    padding: var(--space-1) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
     transition:
       background var(--dur) var(--ease-out),
@@ -968,12 +968,12 @@
   }
   .hbtn:hover:not(:disabled) {
     background: var(--bg-elev);
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
     color: var(--accent-blue);
   }
   .hbtn:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
   .ctl-input {
@@ -981,15 +981,15 @@
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.15em 0.45em;
+    padding: var(--space-1) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     min-width: 14em;
   }
   .ctl-input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
 
   .log {
@@ -998,9 +998,9 @@
     overflow-x: hidden;
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
+    gap: var(--space-4);
     min-height: 0;
-    padding-right: 0.4em;
+    padding-right: var(--space-2);
   }
 
   .log.ab {
@@ -1012,25 +1012,25 @@
   .ab-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.8em;
+    gap: var(--space-4);
   }
   .ab-col {
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
+    gap: var(--space-4);
     min-width: 0;
   }
   .pin-header {
     display: flex;
     align-items: center;
-    gap: 0.4em;
-    padding: 0.3em 0.5em;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     background: rgba(167, 139, 250, 0.10);
-    border: 1px solid var(--accent-purple);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--accent-purple);
-    font-size: var(--font-size-tiny);
-    margin-bottom: 0.4em;
+    font-size: var(--text-xs);
+    margin-bottom: var(--space-2);
   }
   .pin-tag {
     text-transform: lowercase;
@@ -1044,10 +1044,10 @@
     background: transparent;
     color: var(--fg-dim);
     border: 1px solid var(--border);
-    padding: 0.1em 0.4em;
+    padding: var(--space-1) var(--space-2);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     cursor: pointer;
   }
   .pin-unpin:hover {
@@ -1060,16 +1060,16 @@
 
   .msg {
     border-left: 2px solid var(--border);
-    padding: 0.1em 0.6em;
+    padding: var(--space-1) var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
     min-width: 0;
     word-break: break-word;
   }
   .msg .role {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: lowercase;
     letter-spacing: 0;
   }
@@ -1103,7 +1103,7 @@
     opacity: 0.6;
   }
   .placeholder-text {
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
 
   .response-body {
@@ -1119,9 +1119,9 @@
   /* Thinking-collapsible block — visible-only header when collapsed,
    * with the body indented when expanded. */
   .thinking-block {
-    border-top: 1px dashed var(--border-dim);
-    border-bottom: 1px dashed var(--border-dim);
-    margin-bottom: 0.2em;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-1);
   }
   .thinking-toggle {
     background: transparent;
@@ -1129,12 +1129,12 @@
     color: var(--fg-dim);
     font: inherit;
     font-family: var(--font-mono);
-    padding: 0.15em 0;
+    padding: var(--space-1) 0;
     cursor: pointer;
     text-align: left;
     display: inline-flex;
     align-items: center;
-    gap: 0.4em;
+    gap: var(--space-2);
     width: 100%;
   }
   .thinking-toggle:hover {
@@ -1146,7 +1146,8 @@
     display: inline-block;
   }
   .thinking-body {
-    padding: 0.2em 0 0.4em 1.6em;
+    /* 1.6em left pad is a hanging indent tuned to the caret width — kept raw. */
+    padding: var(--space-1) 0 var(--space-2) 1.6em;
     color: var(--fg-dim);
     font-style: italic;
     white-space: pre-wrap;
@@ -1164,7 +1165,7 @@
    * off (matches the user-visible click contract). */
   .tok {
     cursor: pointer;
-    border-radius: 1px;
+    border-radius: var(--radius);
   }
   .tok:hover {
     outline: 1px solid var(--fg-muted);
@@ -1172,7 +1173,7 @@
 
   .input-row {
     display: flex;
-    gap: 0.5em;
+    gap: var(--space-3);
     align-items: flex-end;
     /* No border-top — the status footer directly above already caps
      * the input region with its own hairline. */
@@ -1182,7 +1183,7 @@
     background: var(--bg-alt);
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 0.4em 0.6em;
+    padding: var(--space-2) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
     resize: none;
@@ -1192,28 +1193,28 @@
   }
   .input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   /* Prefill mode: the active loom node is a user turn, so this box
      composes the assistant reply.  Tint the border to signal the role
      shift before the user starts typing. */
   .input.prefill-mode {
-    border-color: var(--accent-purple);
+    border-color: var(--accent);
     background: rgba(167, 139, 250, 0.06);
   }
   .input.prefill-mode:focus {
-    border-color: var(--accent-purple);
+    border-color: var(--accent);
   }
   .input-actions {
     display: flex;
-    gap: 0.3em;
+    gap: var(--space-2);
     align-items: center;
   }
   .input-actions button {
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.4em 0.8em;
+    padding: var(--space-2) var(--space-5);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);
@@ -1224,7 +1225,7 @@
   }
   .input-actions button:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
   .input-actions .send {
@@ -1238,10 +1239,10 @@
   }
   .input-actions .stateless {
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .input-actions .stateless.on {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
 </style>

@@ -355,13 +355,13 @@
     min-height: 0;
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
   }
   .header {
     display: flex;
     align-items: center;
-    gap: 0.8em;
-    padding: 12px 16px;
+    gap: var(--space-4);
+    padding: var(--space-5) var(--space-6);
     border-bottom: 1px solid var(--border);
   }
   .title {
@@ -371,7 +371,7 @@
   }
   .tabs {
     display: flex;
-    gap: 0.3em;
+    gap: var(--space-2);
     flex: 1 1 auto;
     justify-content: center;
   }
@@ -379,10 +379,10 @@
     background: transparent;
     color: var(--fg-dim);
     border: 1px solid var(--border);
-    padding: 0.2em 0.7em;
+    padding: var(--space-1) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .tab:hover {
@@ -390,16 +390,16 @@
   }
   .tab.active {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    background: rgba(88, 166, 255, 0.10);
+    border-color: var(--accent);
+    background: var(--accent-subtle);
   }
   .close {
     background: transparent;
     border: 0;
     color: var(--fg-dim);
     cursor: pointer;
-    padding: 0.25em 0.4em;
-    font-size: 1em;
+    padding: var(--space-2) var(--space-2);
+    font-size: var(--text);
     line-height: 1;
   }
   .close:hover {
@@ -408,47 +408,47 @@
   .body {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 16px;
+    padding: var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
+    gap: var(--space-3);
     min-height: 0;
   }
   .hint {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 0.3em;
+    gap: var(--space-2);
   }
   .label {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     text-transform: lowercase;
   }
   .input {
     background: var(--bg-deep);
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 0.4em 0.5em;
+    padding: var(--space-2) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
   }
   .input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .yaml {
     background: var(--bg-deep);
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 0.5em 0.6em;
+    padding: var(--space-3) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     resize: vertical;
     min-height: 8em;
     white-space: pre;
@@ -456,56 +456,56 @@
   }
   .mode-opt {
     display: inline-flex;
-    gap: 0.4em;
+    gap: var(--space-2);
     align-items: center;
     color: var(--fg-strong);
-    font-size: var(--font-size-small);
-    margin: 0.2em 0;
+    font-size: var(--text-sm);
+    margin: var(--space-1) 0;
   }
   .form-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5em;
+    gap: var(--space-3);
   }
   .error {
     color: var(--accent-red);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
   }
   .ok {
     color: var(--accent-green);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
   }
   .banner {
     background: rgba(210, 153, 34, 0.12);
     border: 1px solid var(--accent-yellow);
-    padding: 0.6em 0.8em;
+    padding: var(--space-4) var(--space-4);
     color: var(--accent-yellow);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .banner-title {
     text-transform: lowercase;
-    font-weight: 600;
+    font-weight: var(--weight-medium);
     display: block;
-    margin-bottom: 0.2em;
+    margin-bottom: var(--space-1);
   }
   .banner ul {
-    margin: 0.2em 0 0.2em 1em;
+    margin: var(--space-1) 0 var(--space-1) 1em;
     padding: 0;
   }
   .footer {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5em;
-    padding: 12px 16px;
+    gap: var(--space-3);
+    padding: var(--space-5) var(--space-6);
     border-top: 1px solid var(--border);
   }
   .btn {
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.4em 0.9em;
+    padding: var(--space-2) var(--space-5);
     font: inherit;
     font-family: var(--font-mono);
     cursor: pointer;
@@ -519,10 +519,15 @@
     cursor: not-allowed;
   }
   .btn.primary {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border-color: var(--accent);
   }
   .btn.primary:hover:not(:disabled) {
-    background: rgba(72, 138, 203, 0.12);
+    background: var(--accent-light);
+    border-color: var(--accent-light);
+  }
+  .btn.primary:disabled {
+    background: var(--bg-elev);
   }
 </style>

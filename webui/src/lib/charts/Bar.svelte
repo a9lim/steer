@@ -59,7 +59,7 @@
       x2={width}
       y1={height}
       y2={height}
-      stroke="var(--border-dim)"
+      stroke="var(--border)"
       stroke-width="0.5"
     />
   {/if}
@@ -74,6 +74,6 @@
     fill: var(--bg-elev);
   }
   .fill {
-    transition: width 0.15s ease-out;
+    transition: width var(--dur) var(--ease-out);
   }
 </style>

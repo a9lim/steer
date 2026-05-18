@@ -42,11 +42,11 @@
 <style>
   .toaster {
     position: fixed;
-    right: 1em;
-    bottom: 3em;
+    right: var(--space-6);
+    bottom: var(--space-8);
     display: flex;
     flex-direction: column;
-    gap: 0.5em;
+    gap: var(--space-3);
     z-index: calc(var(--z-modal) + 10);
     max-width: 32em;
     pointer-events: none;
@@ -56,14 +56,14 @@
     background: var(--bg-alt);
     color: var(--fg);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--accent-blue);
-    padding: 0.55em 0.75em;
+    border-left: 2px solid var(--accent-blue);
+    padding: var(--space-4) var(--space-5);
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    font-size: var(--text-sm);
+    box-shadow: var(--shadow-overlay);
     display: flex;
     align-items: flex-start;
-    gap: 0.6em;
+    gap: var(--space-4);
     line-height: 1.4;
   }
   .toast.warning {
@@ -81,7 +81,7 @@
     border: 0;
     color: var(--fg-dim);
     cursor: pointer;
-    padding: 0 0.2em;
+    padding: 0 var(--space-1);
     font: inherit;
     font-family: var(--font-mono);
   }

@@ -123,13 +123,13 @@
     min-height: 0;
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
   }
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.6em 1em;
+    padding: var(--space-4) var(--space-5);
     border-bottom: 1px solid var(--border);
   }
   .title {
@@ -141,9 +141,9 @@
     background: transparent;
     border: 0;
     color: var(--fg-dim);
-    font-size: 1em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0.25em 0.4em;
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
   }
   .close:hover {
@@ -153,27 +153,27 @@
   .body {
     flex: 1 1 auto;
     overflow: hidden;
-    padding: 0.7em 1em;
+    padding: var(--space-4) var(--space-5);
     display: flex;
     flex-direction: column;
-    gap: 0.6em;
+    gap: var(--space-4);
     min-height: 0;
   }
   .hint {
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
     line-height: 1.4;
   }
   .hint code {
     color: var(--accent-blue);
     background: var(--bg-alt);
-    padding: 0.05em 0.3em;
-    border-radius: 2px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
   }
   .error {
     color: var(--accent-error);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
     word-break: break-word;
   }
@@ -181,8 +181,8 @@
   .footer {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5em;
-    padding: 0.6em 1em;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5);
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
   }
@@ -190,10 +190,10 @@
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.4em 0.9em;
+    padding: var(--space-3) var(--space-5);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
     border-radius: var(--radius);
   }
@@ -202,10 +202,15 @@
     border-color: var(--fg-muted);
   }
   .btn.primary {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border-color: var(--accent);
   }
   .btn.primary:hover:not(:disabled) {
-    background: rgba(72, 138, 203, 0.12);
+    background: var(--accent-light);
+    border-color: var(--accent-light);
+  }
+  .btn.primary:disabled {
+    background: var(--bg-elev);
   }
 </style>

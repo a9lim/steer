@@ -119,11 +119,11 @@
   .status-footer {
     display: flex;
     align-items: center;
-    gap: 0.5em;
-    padding: 0.35em 0;
-    border-top: 1px solid var(--border-dim);
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--border);
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     font-family: var(--font-mono);
     min-height: 22px;
     white-space: nowrap;
@@ -155,10 +155,10 @@
     margin-left: auto;
     background: rgba(242, 184, 75, 0.12);
     color: var(--accent-amber);
-    border: 1px solid rgba(242, 184, 75, 0.5);
-    padding: 0.1rem 0.5rem;
+    border: 1px solid var(--border);
+    padding: var(--space-1) var(--space-4);
     border-radius: var(--radius);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     font-family: var(--font-ui);
     cursor: pointer;
     transition: background var(--dur) var(--ease-out);

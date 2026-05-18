@@ -183,33 +183,33 @@
 
 <style>
   .drawer-shell { display: flex; flex-direction: column; min-height: 0; background: var(--bg-alt); }
-  .header { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem 1.1rem; border-bottom: 1px solid var(--border); background: var(--surface); }
-  .title { color: var(--accent); text-transform: uppercase; letter-spacing: 0; font-size: 0.75rem; font-weight: 700; }
-  .header p { margin: 0.3rem 0 0; color: var(--fg-muted); }
-  .close { background: transparent; border: 0; color: var(--fg-muted); font-size: 1.25rem; }
-  .body { display: grid; grid-template-columns: minmax(18rem, 0.72fr) minmax(24rem, 1fr); grid-template-rows: auto 1fr; gap: 0.8rem; padding: 1rem; overflow: auto; }
-  .timeline, .summary, .heatmap-panel, .logits { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 0.85rem; min-width: 0; }
+  .header { display: flex; justify-content: space-between; gap: var(--space-6); padding: var(--space-6) var(--space-6); border-bottom: 1px solid var(--border); background: var(--surface); }
+  .title { color: var(--accent); text-transform: uppercase; letter-spacing: 0; font-size: var(--text-xs); font-weight: var(--weight-bold); }
+  .header p { margin: var(--space-2) 0 0; color: var(--fg-muted); }
+  .close { background: transparent; border: 0; color: var(--fg-muted); font-size: var(--text-md); }
+  .body { display: grid; grid-template-columns: minmax(18rem, 0.72fr) minmax(24rem, 1fr); grid-template-rows: auto 1fr; gap: var(--space-4); padding: var(--space-6); overflow: auto; }
+  .timeline, .summary, .heatmap-panel, .logits { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: var(--space-5); min-width: 0; }
   .timeline { grid-row: span 2; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
-  .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.5rem; }
+  .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
   .logits { grid-column: 2; }
-  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; margin-bottom: 0.7rem; }
-  h3 { margin: 0; color: var(--fg); font-size: 0.92rem; letter-spacing: 0; }
-  .section-head span, .stat span { color: var(--fg-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0; }
-  .token-grid { display: flex; flex-wrap: wrap; gap: 0.25rem; align-content: flex-start; overflow: auto; padding-right: 0.25rem; }
-  .token-grid button { position: relative; max-width: 11rem; border: 1px solid var(--border-dim); border-radius: var(--radius); background: rgba(255,255,255,0.025); color: var(--fg); padding: 0.35rem 0.45rem; overflow: hidden; }
-  .token-grid button.selected { border-color: var(--accent); background: rgba(72, 138, 203, 0.11); }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); }
+  h3 { margin: 0; color: var(--fg); font-size: var(--text); letter-spacing: 0; }
+  .section-head span, .stat span { color: var(--fg-muted); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0; }
+  .token-grid { display: flex; flex-wrap: wrap; gap: var(--space-2); align-content: flex-start; overflow: auto; padding-right: var(--space-2); }
+  .token-grid button { position: relative; max-width: 11rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); color: var(--fg); padding: var(--space-2) var(--space-3); overflow: hidden; }
+  .token-grid button.selected { border-color: var(--accent); background: var(--accent-subtle); }
   .spark { position: absolute; inset: auto auto 0 0; height: 2px; background: var(--accent-amber); opacity: 0.8; }
   code { position: relative; font-family: var(--font-mono); white-space: pre-wrap; }
-  .stat { border: 1px solid var(--border-dim); border-radius: var(--radius); padding: 0.55rem; display: grid; gap: 0.2rem; background: rgba(255,255,255,0.025); }
+  .stat { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-4); display: grid; gap: var(--space-1); background: var(--bg-elev); }
   .stat strong { color: var(--accent); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .heatmap-wrap { overflow: auto; border: 1px solid var(--border-dim); border-radius: var(--radius); max-height: 27rem; }
+  .heatmap-wrap { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); max-height: 27rem; }
   .heatmap { width: 100%; border-collapse: collapse; min-width: 30rem; }
-  th, td { border: 1px solid var(--border-dim); padding: 0.38rem 0.45rem; text-align: right; font-family: var(--font-mono); font-size: 0.72rem; }
-  th { color: var(--fg-muted); background: rgba(255,255,255,0.03); text-transform: uppercase; letter-spacing: 0; }
+  th, td { border: 1px solid var(--border); padding: var(--space-3) var(--space-3); text-align: right; font-family: var(--font-mono); font-size: var(--text-xs); }
+  th { color: var(--fg-muted); background: var(--bg-elev); text-transform: uppercase; letter-spacing: 0; }
   td { color: var(--fg); }
-  .alts { display: grid; gap: 0.35rem; max-height: 14rem; overflow: auto; }
-  .alt-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.6rem; align-items: center; border: 1px solid var(--border-dim); border-radius: var(--radius); padding: 0.45rem 0.55rem; }
+  .alts { display: grid; gap: var(--space-2); max-height: 14rem; overflow: auto; }
+  .alt-row { display: grid; grid-template-columns: 1fr auto auto; gap: var(--space-4); align-items: center; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-3) var(--space-3); }
   .alt-row span { color: var(--fg-muted); }
   .alt-row strong { color: var(--accent-amber); font-family: var(--font-mono); }
-  .empty { display: grid; place-items: center; min-height: 9rem; color: var(--fg-muted); text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); padding: 1rem; }
+  .empty { display: grid; place-items: center; min-height: 9rem; color: var(--fg-muted); text-align: center; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-6); }
 </style>

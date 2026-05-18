@@ -389,20 +389,20 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.6em 1em;
-    padding: 0.5em 0.75em;
+    gap: var(--space-4) var(--space-5);
+    padding: var(--space-3) var(--space-5);
     background: var(--bg-alt);
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     color: var(--fg-strong);
   }
 
   .control {
     display: inline-flex;
     align-items: center;
-    gap: 0.35em;
+    gap: var(--space-2);
     white-space: nowrap;
   }
 
@@ -416,7 +416,7 @@
 
   .label {
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0;
     min-width: 1.6em;
@@ -442,18 +442,18 @@
     color: var(--fg-strong);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.15em 0.35em;
+    padding: var(--space-1) var(--space-2);
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     font-variant-numeric: tabular-nums;
   }
   input[type="number"]:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   input[type="number"]:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
   /* Trim Firefox / Chrome spinners — they steal width and the design tokens
@@ -483,8 +483,8 @@
     color: var(--fg-strong);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.05em 0.4em;
-    font-size: var(--font-size-small);
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
     line-height: 1.2;
   }
   .icon-btn:hover:not(:disabled) {
@@ -493,7 +493,7 @@
   }
   .icon-btn:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
 
@@ -502,9 +502,9 @@
     color: var(--fg-strong);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.2em 0.6em;
+    padding: var(--space-1) var(--space-4);
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     line-height: 1.3;
   }
   .sys-btn:hover:not(:disabled) {
@@ -514,14 +514,14 @@
   }
   .sys-btn:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
 
   /* Narrow viewports — strip wraps to two rows. */
   @media (max-width: 900px) {
     .sampling-strip {
-      gap: 0.5em 0.8em;
+      gap: var(--space-3) var(--space-5);
     }
     .slider-cell {
       width: 6em;

@@ -60,8 +60,8 @@
     height: 4px;
     margin: 0;
     background: var(--bg-elev);
-    border: 1px solid var(--border-dim);
-    border-radius: 999px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
   .sk-slider:disabled {

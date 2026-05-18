@@ -496,13 +496,13 @@
   .strip {
     display: flex;
     align-items: center;
-    gap: 0.4em;
+    gap: var(--space-3);
     min-height: 32px;
-    padding: 0.25em 0.4em;
-    border: 1px solid var(--border-dim);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-alt);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     transition: border-color var(--dur) var(--ease-out),
       opacity var(--dur) var(--ease-out);
   }
@@ -517,9 +517,9 @@
   .enable {
     background: transparent;
     border: 0;
-    padding: 0 0.2em;
+    padding: 0 var(--space-1);
     color: var(--accent-blue);
-    font-size: 1em;
+    font-size: var(--text);
     line-height: 1;
     flex: 0 0 auto;
   }
@@ -529,7 +529,7 @@
 
   .ablate-mark {
     color: var(--accent-purple);
-    font-weight: bold;
+    font-weight: var(--weight-bold);
     flex: 0 0 auto;
   }
 
@@ -538,7 +538,7 @@
     display: grid;
     grid-template-columns: minmax(2.5em, 1fr) minmax(60px, 2.6fr) minmax(2.5em, 1fr);
     align-items: center;
-    gap: 0.35em;
+    gap: var(--space-2);
     flex: 1 1 auto;
     min-width: 0;
   }
@@ -549,7 +549,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.92em;
+    font-size: var(--text-sm);
   }
   .strip.disabled .pole {
     text-decoration: line-through;
@@ -575,9 +575,9 @@
     background: transparent;
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.1em 0.4em;
+    padding: var(--space-1) var(--space-3);
     border-radius: var(--radius);
-    font-size: 0.75em;
+    font-size: var(--text-xs);
     line-height: 1.2;
     flex: 0 0 auto;
     cursor: pointer;
@@ -602,12 +602,12 @@
     right: 0;
     top: calc(100% + 4px);
     min-width: 7em;
-    background: var(--bg-alt);
+    background: var(--surface-hi);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.2em 0;
+    padding: var(--space-1) 0;
     z-index: var(--z-modal);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-overlay);
     display: flex;
     flex-direction: column;
   }
@@ -615,9 +615,9 @@
     background: transparent;
     border: 0;
     text-align: left;
-    padding: 0.35em 0.7em;
+    padding: var(--space-2) var(--space-4);
     color: var(--fg-strong);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .variant-menu button:hover {
@@ -631,10 +631,10 @@
   .projection-tag {
     flex: 0 0 auto;
     color: var(--accent-yellow);
-    font-size: 0.75em;
-    border: 1px dashed var(--border);
-    padding: 0.05em 0.3em;
-    border-radius: 2px;
+    font-size: var(--text-xs);
+    border: 1px solid var(--border);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     max-width: 8em;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -645,10 +645,10 @@
     background: transparent;
     border: 0;
     color: var(--fg-muted);
-    font-size: 0.95em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0.1em 0.35em;
-    border-radius: 2px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     flex: 0 0 auto;
     transition: color var(--dur) var(--ease-out),
       background var(--dur) var(--ease-out);
@@ -670,12 +670,12 @@
     right: 0;
     top: calc(100% + 4px);
     min-width: 200px;
-    background: var(--bg-alt);
+    background: var(--surface-hi);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.25em 0;
+    padding: var(--space-2) 0;
     z-index: var(--z-modal);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-overlay);
     display: flex;
     flex-direction: column;
   }
@@ -683,9 +683,9 @@
     background: transparent;
     border: 0;
     text-align: left;
-    padding: 0.4em 0.8em;
+    padding: var(--space-4) var(--space-5);
     color: var(--fg-strong);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .menu button:hover:not(:disabled) {
@@ -698,8 +698,8 @@
   }
   .menu hr {
     border: 0;
-    border-top: 1px solid var(--border-dim);
-    margin: 0.2em 0;
+    border-top: 1px solid var(--border);
+    margin: var(--space-1) 0;
   }
 
   /* ----- projection modal ----- */
@@ -715,54 +715,54 @@
   .projection-modal {
     min-width: 360px;
     max-width: 480px;
-    background: var(--bg-alt);
+    background: var(--surface-hi);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.8em 1em;
+    padding: var(--space-5) var(--space-6);
     display: flex;
     flex-direction: column;
-    gap: 0.6em;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    gap: var(--space-3);
+    box-shadow: var(--shadow-overlay);
     font-family: var(--font-mono);
   }
   .projection-header {
     display: flex;
     align-items: baseline;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .projection-title {
     color: var(--fg-strong);
-    font-size: 0.9em;
+    font-size: var(--text-sm);
   }
   .projection-input {
-    background: var(--bg);
+    background: var(--bg-elev);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    border-radius: 2px;
-    padding: 0.4em 0.6em;
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
     font: inherit;
-    font-size: 0.9em;
+    font-size: var(--text-sm);
     font-family: var(--font-mono);
   }
   .projection-input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .projection-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .projection-btn {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg-strong);
-    padding: 0.3em 0.9em;
+    padding: var(--space-2) var(--space-5);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     cursor: pointer;
-    border-radius: 2px;
+    border-radius: var(--radius);
   }
   .projection-btn.cancel {
     color: var(--fg-dim);
@@ -773,14 +773,14 @@
   }
   .projection-btn.confirm {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .projection-btn.confirm:hover:not(:disabled) {
-    background: rgba(72, 138, 203, 0.12);
+    background: var(--accent-subtle);
   }
   .projection-btn.confirm:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
 </style>

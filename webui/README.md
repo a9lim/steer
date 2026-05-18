@@ -28,11 +28,11 @@ This is a desktop research cockpit, not a landing page and not a thin chat wrapp
 - far-left workspace rail — a loom-sidebar toggle plus three category icons (vectors / analysis / session) that open fly-out tool lists; this is the single home for the ~19 tool drawers
 - optional loom sidebar for tree navigation and filtering
 - center branch canvas plus chat/token surface — the chat panel header carries a ⋮ menu for the live conversation actions (clear / rewind / transcript / auto-regen) and the input row carries send / stop / regen
-- right inspector with runtime meters, sampling controls, steering rack, and probe rack
+- right inspector — one flat panel split into two edge-to-edge sections, the steering rack above the probe rack, divided by a single hairline
 - a thin topbar holding only the brand, session status, and the pending-actions badge
 - drawer overlays for tools that need width or dense tables — sized narrow (~480px) for forms and pickers, wide (~980px) for analysis views
 
-The visual language is ported from a9l.im's "volcanic glass": flat obsidian surfaces, sharp 2px geometry, magma-red primary affordances, blue data/status accents, Recursive-family monospace, and subtle grain. Tokens, motion curves, and the segmented control come from `shared-tokens.js` / `shared-base.css`; dark mode only. Keep the interface information-rich, but keep controls visible and directly operable with the mouse.
+The visual language is one flat dark theme, dark mode only. Surfaces separate by background shade rather than outlines; the only border is a single faint hairline, and corners stay a sharp 2px throughout. A blue accent is the one chrome hue — selection, focus, and primary actions — while green, amber, red, yellow, and purple are reserved for state and data, never decoration. Type comes from the `--text-*` scale, spacing from `--space-*`, weight from `--weight-*`; all of it lives in `src/lib/style/tokens.css`, which is the source of truth and documents the rules in its header. Colour values and motion curves still mirror a9l.im's dark palette (`shared-tokens.js`), but the webui drops the site's magma-red accent and its film-grain texture for a calmer, fully flat surface. Keep the interface information-rich, but keep controls visible and directly operable with the mouse.
 
 ## Layout
 

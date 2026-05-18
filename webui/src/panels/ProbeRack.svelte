@@ -95,16 +95,17 @@
 </section>
 
 <style>
-  /* Fixed chrome + one scrollable middle, matching SteeringRack.  The
+  /* A flat section of the inspector panel — no border box, no own
+   * background; it reads as the lower half of one flat panel, divided
+   * from the steering section above by that section's border-bottom.
+   * Fixed chrome + one scrollable middle, matching SteeringRack.  The
    * inspector constrains this rack, then only .strips may scroll. */
   .rack {
     display: flex;
     flex-direction: column;
-    gap: 0.4em;
-    padding: var(--panel-pad);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    gap: var(--space-3);
+    padding: var(--space-5);
+    background: transparent;
     height: 100%;
     max-height: 100%;
     min-height: 0;
@@ -115,21 +116,21 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    border-bottom: 1px solid var(--border-dim);
-    padding-bottom: 0.3em;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: var(--space-3);
   }
   .header-text {
     display: flex;
     align-items: baseline;
-    gap: 0.5em;
+    gap: var(--space-3);
     min-width: 0;
   }
   /* Match SteeringRack's title — bold accent-blue so the two racks look
    * like siblings, not strangers. */
   .title {
-    font-weight: bold;
+    font-weight: var(--weight-bold);
     color: var(--accent-blue);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     letter-spacing: 0;
     text-transform: uppercase;
   }
@@ -137,7 +138,7 @@
    * the mirror copy.  Two subtitles buy the whole mental model. */
   .subtitle {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -145,20 +146,20 @@
   .sort {
     display: inline-flex;
     align-items: center;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .sort-label {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .sort-select {
-    background: var(--bg-alt);
+    background: var(--bg-elev);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.15em 0.35em;
+    padding: var(--space-1) var(--space-2);
     border-radius: var(--radius);
     font: inherit;
-    font-size: 0.85em;
+    font-size: var(--text-sm);
   }
 
   /* Strips own the scroll inside the rack — with 26 auto-loaded probes
@@ -167,12 +168,12 @@
   .strips {
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
     flex: 1 1 0;
     min-height: 2.4rem;
     max-height: 100%;
     overflow-y: auto;
-    padding-right: 0.2em;
+    padding-right: var(--space-1);
   }
   .strips.is-empty {
     align-items: center;
@@ -184,14 +185,14 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.7em;
-    padding: 1em 0.6em;
+    gap: var(--space-4);
+    padding: var(--space-5) var(--space-4);
     text-align: center;
   }
   .empty-copy {
     margin: 0;
     color: var(--fg-dim);
-    font-size: 0.9em;
+    font-size: var(--text-sm);
     line-height: 1.5;
     max-width: 30ch;
   }
@@ -205,29 +206,23 @@
   .actions {
     flex: 0 0 auto;
     display: flex;
-    gap: 0.4em;
-    border-top: 1px solid var(--border-dim);
-    padding-top: 0.4em;
+    gap: var(--space-3);
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-3);
   }
   .add {
     flex: 1 1 100%;
-    background: var(--secondary-subtle);
+    background: var(--accent-subtle);
     color: var(--accent-blue);
-    border: 1px solid var(--accent-blue);
-    padding: 0.4em 0.8em;
+    border: 1px solid var(--border);
+    padding: var(--space-3) var(--space-5);
     border-radius: var(--radius);
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     line-height: 1.3;
     cursor: pointer;
-    transition:
-      background var(--dur) var(--ease-out),
-      transform var(--dur-fast) var(--ease-out);
+    transition: background var(--dur) var(--ease-out);
   }
   .add:hover {
-    background: rgba(72, 138, 203, 0.22);
-    transform: translateY(-1px);
-  }
-  .add:active {
-    transform: translateY(0);
+    background: var(--accent-glow);
   }
 </style>

@@ -343,13 +343,13 @@
     min-height: 0;
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
   }
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.6em 1em;
+    padding: var(--space-4) var(--space-5);
     border-bottom: 1px solid var(--border);
   }
   .title {
@@ -360,9 +360,9 @@
     background: transparent;
     border: 0;
     color: var(--fg-dim);
-    font-size: 1em;
+    font-size: var(--text);
     line-height: 1;
-    padding: 0.25em 0.4em;
+    padding: var(--space-2) var(--space-3);
     cursor: pointer;
     transition: color var(--dur) var(--ease-out);
   }
@@ -373,35 +373,35 @@
   .body {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 0.7em 1em 1em;
+    padding: var(--space-4) var(--space-5) var(--space-5);
     display: flex;
     flex-direction: column;
-    gap: 0.7em;
+    gap: var(--space-4);
     min-height: 0;
   }
   .error {
     color: var(--accent-error);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
     word-break: break-word;
   }
 
   /* ---- custom extraction ---- */
   .custom {
-    border-top: 1px solid var(--border-dim);
-    padding-top: 0.4em;
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-3);
     display: flex;
     flex-direction: column;
   }
   .custom-header {
     display: flex;
     align-items: baseline;
-    gap: 0.45em;
+    gap: var(--space-3);
     width: 100%;
     text-align: left;
     background: transparent;
     border: 0;
-    padding: 0.3em 0.2em;
+    padding: var(--space-2) var(--space-1);
     color: var(--fg-muted);
     cursor: pointer;
     transition: color var(--dur) var(--ease-out);
@@ -410,13 +410,13 @@
     color: var(--fg-strong);
   }
   .caret {
-    font-size: 0.7em;
+    font-size: var(--text-xs);
   }
   .custom-name {
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: var(--font-size-small);
-    font-weight: 600;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
   }
   .custom.open .custom-name {
     color: var(--accent-blue);
@@ -424,29 +424,29 @@
   .custom-hint {
     flex: 1 1 auto;
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-align: right;
   }
 
   .form {
     display: flex;
     flex-direction: column;
-    gap: 0.55em;
-    padding: 0.5em 0.2em 0.2em;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-1) var(--space-1);
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
   }
   .label {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     letter-spacing: 0;
   }
   .opt {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     font-style: italic;
   }
   .input {
@@ -454,43 +454,43 @@
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.5em;
+    padding: var(--space-3) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
     transition: border-color var(--dur) var(--ease-out);
   }
   .input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .input:disabled {
     opacity: 0.6;
   }
   .field-hint {
-    margin: -0.15em 0 0;
+    margin: calc(-1 * var(--space-1)) 0 0;
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
 
   .method {
-    border: 1px solid var(--border-dim);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.6em;
+    padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.3em;
+    gap: var(--space-2);
     margin: 0;
   }
   .method legend {
-    padding: 0 0.3em;
+    padding: 0 var(--space-2);
   }
   .radio,
   .check {
     display: flex;
     align-items: center;
-    gap: 0.45em;
+    gap: var(--space-3);
     color: var(--fg-strong);
-    font-size: 0.92em;
+    font-size: var(--text-sm);
     cursor: pointer;
   }
   .radio input,
@@ -500,26 +500,30 @@
 
   .validation {
     color: var(--accent-yellow);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
   }
   .extract-btn {
-    background: transparent;
-    color: var(--accent-blue);
-    border: 1px solid var(--accent-blue);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    border: 1px solid var(--accent);
     border-radius: var(--radius);
-    padding: 0.5em 0.9em;
+    padding: var(--space-3) var(--space-5);
     font: inherit;
     font-family: var(--font-mono);
     cursor: pointer;
-    transition: background var(--dur) var(--ease-out);
+    transition:
+      background var(--dur) var(--ease-out),
+      border-color var(--dur) var(--ease-out);
   }
   .extract-btn:hover:not(:disabled) {
-    background: var(--secondary-subtle);
+    background: var(--accent-light);
+    border-color: var(--accent-light);
   }
   .extract-btn:disabled {
+    background: var(--bg-elev);
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
 
@@ -527,11 +531,11 @@
     background: var(--bg-deep);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.5em;
+    padding: var(--space-3) var(--space-3);
     max-height: 180px;
     overflow-y: auto;
     color: var(--fg-dim);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     line-height: 1.4;
     white-space: pre-wrap;
   }
@@ -543,14 +547,14 @@
     align-self: flex-start;
     background: transparent;
     border: 0;
-    border-top: 1px solid var(--border-dim);
+    border-top: 1px solid var(--border);
     width: 100%;
     text-align: left;
     color: var(--fg-dim);
-    padding: 0.6em 0.2em 0.2em;
+    padding: var(--space-4) var(--space-1) var(--space-1);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
     transition: color var(--dur) var(--ease-out);
   }

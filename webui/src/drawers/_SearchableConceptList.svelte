@@ -315,13 +315,13 @@
   .picker {
     display: flex;
     flex-direction: column;
-    gap: 0.5em;
+    gap: var(--space-3);
     min-height: 0;
     flex: 1 1 auto;
   }
   .search-row {
     display: flex;
-    gap: 0.4em;
+    gap: var(--space-3);
     align-items: stretch;
   }
   .search {
@@ -330,24 +330,24 @@
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.45em 0.6em;
+    padding: var(--space-3) var(--space-4);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     transition: border-color var(--dur) var(--ease-out);
   }
   .search:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .refresh {
     flex: 0 0 auto;
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg-dim);
-    padding: 0 0.7em;
+    padding: 0 var(--space-4);
     border-radius: var(--radius);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     cursor: pointer;
     transition: color var(--dur) var(--ease-out),
       border-color var(--dur) var(--ease-out);
@@ -367,11 +367,11 @@
   .catalog {
     display: flex;
     flex-direction: column;
-    gap: 0.2em;
+    gap: var(--space-1);
     overflow-y: auto;
     min-height: 0;
     flex: 1 1 auto;
-    padding-right: 0.15em;
+    padding-right: var(--space-1);
   }
   /* Parent-scroll mode: let the catalog grow to its natural height. */
   .picker.flow .catalog {
@@ -386,13 +386,13 @@
   .cat-header {
     display: flex;
     align-items: center;
-    gap: 0.45em;
+    gap: var(--space-3);
     width: 100%;
     text-align: left;
     background: transparent;
     border: 0;
-    border-bottom: 1px solid var(--border-dim);
-    padding: 0.4em 0.2em 0.3em;
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-3) var(--space-1) var(--space-2);
     color: var(--fg-muted);
     cursor: pointer;
     transition: color var(--dur) var(--ease-out);
@@ -404,32 +404,32 @@
     cursor: default;
   }
   .caret {
-    font-size: 0.7em;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
   .cat-name {
     flex: 1 1 auto;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: var(--font-size-small);
-    font-weight: 600;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
   }
   .cat-header.open .cat-name {
     color: var(--accent-blue);
   }
   .cat-count {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
   }
 
   .rows {
     list-style: none;
     margin: 0;
-    padding: 0.25em 0 0.35em;
+    padding: var(--space-2) 0 var(--space-2);
     display: flex;
     flex-direction: column;
-    gap: 0.25em;
+    gap: var(--space-2);
   }
   /* Pole · slider · pole · α readout · add.  The bipolar axis frames the
    * row; the slider is live so the strength is set before committing. */
@@ -438,17 +438,17 @@
     grid-template-columns:
       minmax(2.6em, 1fr) minmax(70px, 2.4fr) minmax(2.6em, 1fr) auto auto;
     align-items: center;
-    gap: 0.5em;
+    gap: var(--space-3);
     background: var(--bg-deep);
-    border: 1px solid var(--border-dim);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.4em 0.6em;
+    padding: var(--space-3) var(--space-4);
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     transition: border-color var(--dur) var(--ease-out);
   }
   .row:hover {
-    border-color: var(--border);
+    border-color: var(--accent);
   }
   /* Probe picker — no strength slider, just the concept axis + action. */
   .row.compact {
@@ -457,7 +457,7 @@
   .concept {
     display: inline-flex;
     align-items: baseline;
-    gap: 0.4em;
+    gap: var(--space-3);
     min-width: 0;
   }
   .axis-sep {
@@ -469,7 +469,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.92em;
+    font-size: var(--text-sm);
   }
   .pole.neg {
     color: var(--fg-muted);
@@ -481,31 +481,25 @@
 
   .alpha {
     font-variant-numeric: tabular-nums;
-    font-size: 0.85em;
+    font-size: var(--text-sm);
     min-width: 3.4em;
     text-align: right;
   }
 
   .add-btn {
-    background: var(--secondary-subtle);
+    background: var(--accent-subtle);
     color: var(--accent-blue);
-    border: 1px solid var(--accent-blue);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.25em 0.7em;
+    padding: var(--space-2) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     cursor: pointer;
-    transition:
-      background var(--dur) var(--ease-out),
-      transform var(--dur-fast) var(--ease-out);
+    transition: background var(--dur) var(--ease-out);
   }
   .add-btn:hover:not(:disabled) {
-    background: rgba(72, 138, 203, 0.22);
-    transform: translateY(-1px);
-  }
-  .add-btn:active:not(:disabled) {
-    transform: translateY(0);
+    background: var(--accent-glow);
   }
   .add-btn:disabled {
     opacity: 0.55;
@@ -514,12 +508,12 @@
 
   .muted {
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
   }
   .error {
     color: var(--accent-error);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     margin: 0;
     word-break: break-word;
   }

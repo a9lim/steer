@@ -27,9 +27,9 @@
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 0.12em;
-    padding: 0.55em 0.6em;
-    border-top: 1px solid var(--border-dim);
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--border);
     background: var(--bg-deep);
   }
 
@@ -37,15 +37,15 @@
   .sub {
     margin: 0;
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: 0;
   }
 
   h2 {
-    margin: 0.1em 0 0;
+    margin: var(--space-1) 0 0;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     line-height: 1.25;
     color: var(--fg-strong);
     overflow: hidden;

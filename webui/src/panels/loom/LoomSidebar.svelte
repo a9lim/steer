@@ -1213,17 +1213,17 @@
     border-right: 1px solid var(--border);
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     min-width: 0;
     overflow: hidden;
   }
 
   .filter-bar {
     display: flex;
-    gap: 0.3em;
+    gap: var(--space-2);
     align-items: center;
-    padding: 0.35em 0.5em;
-    border-bottom: 1px solid var(--border-dim);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
     background: var(--bg-deep);
   }
   .filter-input {
@@ -1231,19 +1231,19 @@
     background: var(--bg-alt);
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.25em 0.45em;
+    padding: var(--space-2) var(--space-3);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     min-width: 0;
   }
   .filter-input:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .filter-status {
     color: var(--accent-yellow);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     min-width: 1.5em;
     text-align: right;
   }
@@ -1253,15 +1253,15 @@
 
   /* Logit-pass: help affordance, help popover, weight-mode picker. */
   .help-btn.on {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .filter-help {
     background: var(--bg-alt);
-    border-bottom: 1px solid var(--border-dim);
-    padding: 0.5em 0.7em;
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-3) var(--space-4);
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     line-height: 1.45;
     max-height: 14em;
     overflow: auto;
@@ -1270,29 +1270,29 @@
     color: var(--fg);
   }
   .filter-help code {
-    color: var(--accent-blue);
+    color: var(--accent);
     background: transparent;
     font-family: var(--font-mono);
   }
   .filter-help ul {
-    margin: 0.2em 0 0.4em 1.2em;
+    margin: var(--space-1) 0 var(--space-3) 1.2em;
     padding: 0;
     list-style: disc;
   }
   .filter-help li {
-    margin: 0.15em 0;
+    margin: var(--space-1) 0;
   }
   .filter-help .examples code {
     color: var(--fg-strong);
   }
   .weight-bar {
     display: flex;
-    gap: 0.4em;
+    gap: var(--space-3);
     align-items: center;
-    padding: 0.3em 0.5em;
-    border-bottom: 1px solid var(--border-dim);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
     background: var(--bg-deep);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     color: var(--fg-dim);
   }
   .weight-label {
@@ -1303,51 +1303,51 @@
   .selection-bar {
     display: flex;
     align-items: center;
-    gap: 0.5em;
-    padding: 0.3em 0.5em;
-    border-bottom: 1px solid var(--border-dim);
-    background: rgba(72, 138, 203, 0.10);
-    color: var(--accent-blue);
-    font-size: var(--font-size-tiny);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-size: var(--text-xs);
   }
   .action-btn {
     background: transparent;
     color: var(--fg-strong);
     border: 1px solid var(--border);
-    padding: 0.15em 0.55em;
+    padding: var(--space-1) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     cursor: pointer;
   }
   .action-btn:hover:not(:disabled) {
     background: var(--bg-elev);
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .action-btn:disabled {
     color: var(--fg-muted);
-    border-color: var(--border-dim);
+    border-color: var(--border);
     cursor: not-allowed;
   }
 
   .loom-header {
     display: flex;
     align-items: center;
-    gap: 0.5em;
-    padding: 0.4em 0.6em;
-    border-bottom: 1px solid var(--border-dim);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
     background: var(--bg-deep);
   }
   .title {
     color: var(--accent-green);
-    font-weight: bold;
+    font-weight: var(--weight-bold);
     letter-spacing: 0;
     text-transform: lowercase;
     flex: 0 0 auto;
   }
   .rev {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     flex: 1 1 auto;
   }
   .icon-btn {
@@ -1355,18 +1355,18 @@
     border: 0;
     color: var(--fg-dim);
     cursor: pointer;
-    padding: 0.1em 0.3em;
+    padding: var(--space-1) var(--space-2);
     font: inherit;
     font-family: var(--font-mono);
   }
   .icon-btn:hover {
-    color: var(--accent-blue);
+    color: var(--accent);
   }
 
   .tree-scroll {
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 0.3em 0.2em;
+    padding: var(--space-2) var(--space-1);
     min-height: 0;
     flex: 1 1 auto;
   }
@@ -1411,15 +1411,15 @@
   }
 
   .empty {
-    padding: 1em;
+    padding: var(--space-5);
     color: var(--fg-muted);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     display: flex;
     flex-direction: column;
-    gap: 0.4em;
+    gap: var(--space-3);
   }
   .empty .hint {
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     color: var(--fg-subtle);
   }
   .empty.err {
@@ -1428,9 +1428,9 @@
   .empty button {
     align-self: flex-start;
     background: transparent;
-    border: 1px solid var(--accent-red);
+    border: 1px solid var(--border);
     color: var(--accent-red);
-    padding: 0.2em 0.6em;
+    padding: var(--space-1) var(--space-4);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);
@@ -1438,15 +1438,15 @@
 
   .hint {
     color: var(--fg-muted);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
   .modal-error {
-    color: var(--err, #d83b3b);
-    font-size: var(--font-size-small);
-    margin-top: 0.5em;
+    color: var(--accent-red);
+    font-size: var(--text-sm);
+    margin-top: var(--space-3);
     background: var(--err-bg, rgba(216, 59, 59, 0.08));
-    border-left: 2px solid var(--err, #d83b3b);
-    padding: 0.4em 0.6em;
+    border-left: 2px solid var(--accent-red);
+    padding: var(--space-3) var(--space-4);
     font-family: var(--font-mono);
   }
 
@@ -1456,19 +1456,19 @@
     background: var(--bg-alt);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.25em 0;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    padding: var(--space-2) 0;
+    box-shadow: var(--shadow-overlay);
     min-width: 180px;
     display: flex;
     flex-direction: column;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
   }
   .loom-menu button {
     background: transparent;
     border: 0;
     text-align: left;
-    padding: 0.35em 0.8em;
+    padding: var(--space-2) var(--space-5);
     color: var(--fg-strong);
     cursor: pointer;
     font: inherit;
@@ -1476,7 +1476,7 @@
   }
   .loom-menu button:hover:not(:disabled) {
     background: var(--bg-elev);
-    color: var(--accent-blue);
+    color: var(--accent);
   }
   .loom-menu button.danger {
     color: var(--accent-red);
@@ -1490,8 +1490,8 @@
   }
   .loom-menu hr {
     border: 0;
-    border-top: 1px solid var(--border-dim);
-    margin: 0.2em 0;
+    border-top: 1px solid var(--border);
+    margin: var(--space-1) 0;
   }
 
   .loom-modal-backdrop {
@@ -1511,42 +1511,42 @@
     background: var(--bg-alt);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--shadow-overlay);
     min-width: 420px;
     max-width: min(640px, 90vw);
     display: flex;
     flex-direction: column;
     font-family: var(--font-mono);
-    font-size: var(--font-size-base);
+    font-size: var(--text);
     color: var(--fg);
   }
   .modal-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.6em 1em;
-    border-bottom: 1px solid var(--border-dim);
-    color: var(--accent-blue);
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--border);
+    color: var(--accent);
     text-transform: lowercase;
     letter-spacing: 0;
   }
   .modal-body {
-    padding: 1em;
+    padding: var(--space-5);
     display: flex;
     flex-direction: column;
-    gap: 0.6em;
+    gap: var(--space-4);
   }
   .modal-body label {
     display: flex;
     flex-direction: column;
-    gap: 0.3em;
+    gap: var(--space-2);
   }
   .modal-body input,
   .modal-body textarea {
     background: var(--bg-deep);
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 0.4em 0.6em;
+    padding: var(--space-3) var(--space-4);
     font: inherit;
     font-family: var(--font-mono);
     resize: vertical;
@@ -1554,13 +1554,13 @@
   .modal-body input:focus,
   .modal-body textarea:focus {
     outline: none;
-    border-color: var(--accent-blue);
+    border-color: var(--accent);
   }
   .modal-body code {
     color: var(--accent-yellow);
     background: var(--bg-elev);
-    padding: 0.1em 0.3em;
-    border-radius: 2px;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
   }
   .modal-body .danger {
     color: var(--accent-red);
@@ -1568,15 +1568,15 @@
   .modal-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 0.5em;
-    padding: 0.6em 1em;
-    border-top: 1px solid var(--border-dim);
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5);
+    border-top: 1px solid var(--border);
   }
   .modal-footer button {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg-strong);
-    padding: 0.4em 1em;
+    padding: var(--space-3) var(--space-5);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);

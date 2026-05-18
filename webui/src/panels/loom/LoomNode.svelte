@@ -121,18 +121,18 @@
      * to zero width. */
     grid-template-columns: auto auto auto 1fr auto auto auto;
     align-items: center;
-    gap: 0.4em;
-    padding: 0.2em 0.5em;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-3);
     border-left: 2px solid transparent;
-    border-radius: 2px;
+    border-radius: var(--radius);
     cursor: pointer;
     font: inherit;
     font-family: var(--font-mono);
-    font-size: var(--font-size-small);
+    font-size: var(--text-sm);
     line-height: 1.35;
     color: var(--fg-strong);
     background: transparent;
-    transition: background 0.08s ease;
+    transition: background var(--dur-fast) var(--ease-out);
     min-width: 0;
     user-select: none;
   }
@@ -140,16 +140,16 @@
     background: var(--bg-elev);
   }
   .node:focus-visible {
-    outline: 1px solid var(--accent-blue);
+    outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
   .node.focused {
-    background: rgba(72, 138, 203, 0.12);
-    outline: 1px solid var(--accent-blue);
+    background: var(--accent-subtle);
+    outline: 1px solid var(--accent);
     outline-offset: -1px;
   }
   .node.active {
-    font-weight: 600;
+    font-weight: var(--weight-medium);
     color: var(--fg);
     border-left-color: var(--accent-green);
   }
@@ -181,10 +181,10 @@
     color: var(--fg-muted);
   }
   .glyph {
-    font-weight: bold;
+    font-weight: var(--weight-bold);
     width: 1ch;
     text-align: center;
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     text-transform: uppercase;
   }
   .preview {
@@ -195,18 +195,18 @@
   }
   .star {
     color: var(--accent-yellow);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
   }
   /* Steering-delta chip — trailing, truncated so a long delta can't
    * blow out the row or collide with the preview text. */
   .steer {
     color: var(--accent-yellow);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     background: var(--bg-alt);
-    border: 1px solid var(--border-dim);
-    padding: 0 0.3em;
-    border-radius: 2px;
+    border: 1px solid var(--border);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius);
     max-width: 11ch;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -214,7 +214,7 @@
   }
   .note-mark {
     color: var(--accent-purple);
-    font-size: 0.5em;
+    font-size: var(--text-2xs);
     line-height: 1;
   }
   /* Phase-5 hook: a thin colored ring around the role glyph keyed off
@@ -224,7 +224,7 @@
     width: 0.9em;
     height: 0.9em;
     border-radius: 50%;
-    border: 1.5px solid transparent;
+    border: 1px solid transparent;
     display: inline-block;
   }
   /* Logit-pass: numeric ``mean_logprob`` badge.  Tabular-nums so the
@@ -232,11 +232,11 @@
      them; subdued color so the badge reads as metadata, not content. */
   .weight {
     color: var(--fg-dim);
-    font-size: var(--font-size-tiny);
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     background: var(--bg-alt);
-    border: 1px solid var(--border-dim);
-    padding: 0 0.3em;
-    border-radius: 2px;
+    border: 1px solid var(--border);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius);
   }
 </style>
