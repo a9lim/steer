@@ -357,6 +357,10 @@ export interface WSTokenEvent {
    *  The chosen token may or may not appear in this list depending on
    *  K. */
   top_alts?: TokenAltJSON[] | null;
+  /** Logit-pass: raw decode-step index — the join key a logit fork slices
+   *  ``raw_token_ids`` on.  Rides the ``token`` event directly; absent on
+   *  legacy / replayed events. */
+  raw_index?: number | null;
   /** Loom: node id this token belongs to.  Routes the token to the right
    * sibling render during n-way regen.  Optional. */
   node_id?: string | null;
@@ -425,7 +429,7 @@ export interface LoomNodeJSON {
   edit_count?: number;
   /** Logit-pass: mean chosen-token logprob over the response span when
    *  logprob capture was live; absent on legacy / replayed nodes.  Drives
-   *  the loom sidebar's confidence / surprise weight mode and the
+   *  the loom sidebar's surprise edge-weighting and the
    *  ``sort:surprise`` / ``sort:confidence`` filter grammar. */
   mean_logprob?: number | null;
 }
@@ -747,8 +751,8 @@ export interface GenStatus {
 
 /** Actions queued during in-flight generation.  ``apply`` is the closure
  * the store invokes once the WS ``done`` event arrives (or immediately
- * if the user hits "apply now").  ``label`` shows in the topbar pending
- * badge for traceability. */
+ * if the user hits "apply now").  ``label`` shows in the status-footer
+ * pending badge for traceability. */
 export interface PendingAction {
   id: string;
   label: string;
@@ -769,7 +773,6 @@ export type DrawerName =
   | "merge"
   | "clone"
   | "system_prompt"
-  | "model_info"
   | "token_drilldown"
   | "correlation"
   | "layer_norms"

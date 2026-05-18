@@ -26,6 +26,7 @@
     vectorRack,
   } from "../lib/stores.svelte";
   import { pushToast } from "../lib/stores/toasts.svelte";
+  import { serializeExpression } from "../lib/expression";
   import { apiVectors } from "../lib/api";
   import { polesOf } from "../lib/concepts";
   import Slider from "../lib/Slider.svelte";
@@ -248,7 +249,6 @@
 
   async function copyTermExpression(): Promise<void> {
     menuOpen = false;
-    const { serializeExpression } = await import("../lib/expression");
     const oneRack = new Map<string, VectorRackEntry>();
     oneRack.set(name, { ...entry, enabled: true });
     const expr = serializeExpression(oneRack);

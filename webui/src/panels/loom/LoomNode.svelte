@@ -25,9 +25,7 @@
     /** Optional probe ring fill in [-1, 1] (phase 5; null for now). */
     ring?: number | null;
     /** Logit-pass: per-turn ``mean_logprob`` to render as a numeric
-     *  badge.  Null suppresses the badge entirely.  Sidebar passes the
-     *  value only when ``loomUiState.weightMode !== "none"`` so the
-     *  default render shape is unchanged. */
+     *  badge.  Null (capture wasn't live) suppresses the badge. */
     weightBadge?: number | null;
     /** Steering-delta label for the edge into this node (e.g.
      *  ``0.45 angry.calm``).  Rendered as a trailing chip — it used to

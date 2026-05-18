@@ -51,25 +51,23 @@ webui/src/
     tokens.ts                 # HIGHLIGHT_SAT + scoreToRgb + twoStripeStyle
     charts.ts                 # bucketize() port of saklas.core.histogram
     charts/{Bar,Sparkline,Histogram,HeatmapCell}.svelte
-    Segmented.svelte          # shared segmented control
     Slider.svelte             # shared range slider
     Toaster.svelte            # toast host (bottom-right, TTL-dismissed)
     style/{tokens.css,global.css}
   panels/
-    Topbar.svelte             # brand + session status + pending-actions badge
-    WorkspaceRail.svelte      # left rail: loom toggle + category fly-outs
-    BranchCanvas.svelte       # active path + sibling/child lanes + fan/compare controls
-    InspectorPanel.svelte     # runtime meters + sampling + steering/probe racks
-    StatusFooter.svelte       # gen progress · t/s · elapsed · ppl
-    Chat.svelte               # thinking-collapsible, probe-tinted tokens, inline actions
-    SamplingStrip.svelte      # T / P / K / max / seed / thinking + apply-mode
+    WorkspaceRail.svelte      # left rail: category fly-outs
+    InspectorPanel.svelte     # right rack: steering + probe racks (full column height)
+    WorkbenchCard.svelte      # active-workbench card (model + device); bottom of threads column
+    StatusFooter.svelte       # gen progress · t/s · elapsed · ppl + pending-actions badge; mounted inside Chat above the input row
+    Chat.svelte               # thinking-collapsible, probe-tinted tokens, inline actions (clear/save/load/transcript), status footer
+    SamplingStrip.svelte      # T / P / K / max / pres / freq / seed / thinking / alts + advanced/system-prompt buttons; foot of the threads column, below WorkbenchCard
     SteeringRack.svelte       # vector strips + "+ add steering" + canonical expression
     VectorStrip.svelte        # enable + α slider + trigger + variant + projection modal
     ProbeRack.svelte          # probe strips + sort + "+ add probe"
     ProbeStrip.svelte         # select-for-highlight + sparkline + per-layer reading strip
-    loom/{LoomSidebar,LoomNode,LoomEdge}.svelte
+    loom/{LoomSidebar,LoomNode,LoomEdge}.svelte  # permanent "threads" column
   drawers/
-    {Load,SaveConversation,LoadConversation,Compare,SystemPrompt,ModelInfo,
+    {Load,SaveConversation,LoadConversation,Compare,SystemPrompt,
      Help,Export,Pack,Merge,Clone,VectorPicker,ProbePicker,TokenDrilldown,
      ExperimentLab,ActivationAtlas,RecipeBuilder,AdvancedSampling,Health,
      SessionAdmin,Correlation,LayerNorms,NodeCompare,Transcript}Drawer.svelte

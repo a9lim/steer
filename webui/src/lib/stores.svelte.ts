@@ -1007,11 +1007,6 @@ export interface SamplingState {
   frequency_penalty: number;
   /** ``null`` = auto, true/false = explicit override. */
   thinking: boolean | null;
-  /** When true, the next generate sends these values as a one-shot
-   * SamplingConfig (per-call override) instead of PATCHing the session
-   * defaults.  TUI parity with the "session default vs. next message"
-   * radio in the sampling strip. */
-  oneShotOverride: boolean;
   /** Logit-pass: top-K alternatives to capture per token (``0`` = off,
    *  matches the engine's chosen-only mode).  When ``> 0`` the WS ``token``
    *  event carries ``top_alts`` and the drilldown's logits tab + the
@@ -1038,7 +1033,6 @@ export const samplingState: SamplingState = $state({
   // the model template defaults to — for thinking-capable templates that
   // meant the model thought even though the box was visually off.
   thinking: false,
-  oneShotOverride: true,
   // Logit-pass: top-K alternatives on by default — the drilldown logits
   // tab and the inline surprise highlight want them.  The SamplingStrip's
   // "alts" toggle flips this between 0 and 8 (Decision 1 in
@@ -1105,17 +1099,15 @@ function nonDefaultSamplingOverrides(): Partial<WSSampling> {
 }
 
 function buildSamplingPayload(): WSSampling | null {
-  const extras = nonDefaultSamplingOverrides();
-  const payload: WSSampling = samplingState.oneShotOverride
-    ? {
-        temperature: samplingState.temperature,
-        top_p: samplingState.top_p,
-        top_k: samplingState.top_k,
-        max_tokens: samplingState.max_tokens,
-        seed: samplingState.seed,
-        ...extras,
-      }
-    : extras;
+  // temperature / top-p / top-k / max-tokens / thinking are PATCHed to
+  // the session as the user edits them, so they ride the server's own
+  // defaults and aren't echoed here.  Seed has no PATCH path and the
+  // advanced extras (penalties, stop, logit-bias, return_top_k) aren't
+  // PATCH-able either — both always ride per-call.
+  const payload: WSSampling = {
+    ...nonDefaultSamplingOverrides(),
+    ...(samplingState.seed !== null ? { seed: samplingState.seed } : {}),
+  };
   return Object.keys(payload).length > 0 ? payload : null;
 }
 
@@ -1533,7 +1525,7 @@ function handleWsMessage(msg: WSServerMessage): void {
         turn.tokensSoFar = msg.result?.tokens ?? genStatus.tokensSoFar;
         // Logit-pass: per-turn mean chosen-token logprob (response span
         // only).  Null when capture wasn't live; the inline surprise
-        // mode + loom weight mode null-guard on this directly.
+        // mode + loom edge-weighting null-guard on this directly.
         turn.meanLogprob = msg.result?.mean_logprob ?? null;
       }
 
@@ -1676,13 +1668,10 @@ export async function sendGenerate(
     opts.steering === undefined ? currentSteeringExpression() : opts.steering;
   const steeringPayload =
     opts.steering === undefined ? (steering || null) : steering;
-  // Build the sampling payload.  ``oneShotOverride`` picks between
-  // session-default mode (null payload, server reads its own defaults)
-  // and next-message mode (full payload from local state).  Logit-pass:
-  // ``return_top_k`` always rides along when non-zero so the "show alts"
-  // toggle works regardless of mode — the server's PATCH endpoint doesn't
-  // accept ``return_top_k`` today, so without this branch the toggle
-  // would be silently ignored in session-default mode.
+  // Build the sampling payload — seed + the advanced extras (penalties,
+  // stop, logit-bias, return_top_k).  temperature / top-p / top-k /
+  // max-tokens are PATCHed to the session as the user edits them, so the
+  // server reads its own (now-updated) defaults for those.
   const sampling = buildSamplingPayload();
   // Update genStatus.maxTokens locally so the progress bar widths know
   // their target before the first token lands.
@@ -2228,7 +2217,6 @@ export type LoomModalKind =
   | "search";
 
 export interface LoomUiState {
-  sidebarOpen: boolean;
   /** Request flag: when the App's Ctrl+R/etc handlers want to open a
    *  modal inside the sidebar, they bump this counter and the sidebar
    *  reacts.  Counter lets the same modal be re-requested back-to-back
@@ -2240,13 +2228,6 @@ export interface LoomUiState {
     text: string;
     n: number;
   };
-  /** Logit-pass (Phase 4 of docs/plans/logit-pass.md): drive the loom
-   *  edge stroke-width / opacity and the per-node mean_logprob badge.
-   *  ``"none"`` (default) renders today's flat shape.  ``"confidence"``
-   *  thickens edges to confident children (low surprise); ``"surprise"``
-   *  thickens edges to surprising children.  Nodes without
-   *  ``mean_logprob`` render unchanged regardless of mode. */
-  weightMode: "none" | "confidence" | "surprise";
   /** Logit-pass: sibling sort key derived from filter grammar
    *  ``sort:surprise`` / ``sort:confidence``.  ``"default"`` preserves
    *  server insertion order.  Parsed client-side out of the filter
@@ -2257,13 +2238,11 @@ export interface LoomUiState {
   filterHelpOpen: boolean;
 }
 
-/** Visibility toggle for the LoomSidebar — wired to a Topbar button.
- *  Persisted in-memory only; collapsed-by-default keeps the first-paint
- *  shape stable for users who don't care about loom. */
+/** Loom (threads) UI state.  The threads column is a permanent part of
+ *  the layout, so this carries no open/closed flag — only the modal
+ *  request signal and the sort / filter-help knobs. */
 export const loomUiState: LoomUiState = $state({
-  sidebarOpen: true,
   modalRequest: { seq: 0, kind: null, nodeId: null, text: "", n: 1 },
-  weightMode: "none",
   siblingSort: "default",
   filterHelpOpen: false,
 });
@@ -2524,17 +2503,12 @@ export function currentRecipeOverride(): string | null {
   return autoRegenState.mode;
 }
 
-export function toggleLoomSidebar(): void {
-  loomUiState.sidebarOpen = !loomUiState.sidebarOpen;
-}
-
 /** Bump the modalRequest signal so the LoomSidebar opens the named
- *  modal with the given seed values.  Auto-opens the sidebar. */
+ *  modal with the given seed values. */
 export function requestLoomModal(
   kind: LoomModalKind,
   opts: { nodeId?: string | null; text?: string; n?: number } = {},
 ): void {
-  loomUiState.sidebarOpen = true;
   loomUiState.modalRequest = {
     seq: loomUiState.modalRequest.seq + 1,
     kind,

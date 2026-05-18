@@ -13,7 +13,6 @@
 //   "load_conversation"  → LoadConversation
 //   "compare"            → Compare
 //   "system_prompt"      → SystemPrompt
-//   "model_info"         → ModelInfo
 //   "help"               → Help
 //
 // Standalone custom extraction was retired in the webui overhaul — the
@@ -26,7 +25,6 @@ export { default as SaveConversation } from "./SaveConversationDrawer.svelte";
 export { default as LoadConversation } from "./LoadConversationDrawer.svelte";
 export { default as Compare } from "./CompareDrawer.svelte";
 export { default as SystemPrompt } from "./SystemPromptDrawer.svelte";
-export { default as ModelInfo } from "./ModelInfoDrawer.svelte";
 export { default as Help } from "./HelpDrawer.svelte";
 export { default as Export } from "./ExportDrawer.svelte";
 export { default as Correlation } from "./CorrelationDrawer.svelte";

@@ -20,6 +20,7 @@
     highlightState,
     closeDrawer,
     refreshVectorList,
+    vectorsState,
   } from "../lib/stores.svelte";
   import type {
     ChatTurn,
@@ -171,9 +172,7 @@
       // for vectors that aren't currently registered.  This is purely
       // informational — the rack carries them as-is.
       try {
-        const known = await import("../lib/stores.svelte").then(
-          (m) => m.vectorsState.names,
-        );
+        const known = vectorsState.names;
         for (const row of parsed.vectorRack) {
           if (typeof row?.name !== "string") continue;
           if (known.length > 0 && !known.includes(row.name)) {

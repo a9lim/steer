@@ -21,11 +21,8 @@
      *  string; phase-5 fetches lazily when this is unset. */
     label?: string | null;
     /** Logit-pass: child's per-turn ``mean_logprob``.  Null when capture
-     *  wasn't live; the edge then renders flat regardless of mode. */
+     *  wasn't live; the edge then renders flat. */
     weight?: number | null;
-    /** Logit-pass: ``"none"`` / ``"confidence"`` / ``"surprise"`` — see
-     *  ``loomUiState.weightMode``. */
-    weightMode?: "none" | "confidence" | "surprise";
   }
 
   let {
@@ -35,22 +32,20 @@
     childId = null,
     label = null,
     weight = null,
-    weightMode = "none",
   }: Props = $props();
 
-  /** Logit-pass: map ``mean_logprob`` (≤ 0) to a [0, 1] intensity for
-   *  edge stroke-width / opacity scaling.
+  /** Logit-pass: map ``mean_logprob`` (≤ 0) to a [0, 1] surprise
+   *  intensity for edge stroke-width / opacity scaling.
    *
    *  confidence = 1 / (1 - logprob)   # logprob → 0 ⇒ 1; logprob → -∞ ⇒ 0
    *  surprise   = 1 - confidence
    *
-   *  Both branches return ``null`` when the input is missing — caller
-   *  then renders flat (today's shape). */
+   *  Returns ``null`` when the input is missing — caller then renders
+   *  flat (the unweighted shape). */
   const intensity = $derived.by<number | null>(() => {
-    if (weightMode === "none") return null;
     if (weight == null || !Number.isFinite(weight) || weight > 0) return null;
     const conf = 1 / (1 - weight);
-    return weightMode === "confidence" ? conf : 1 - conf;
+    return 1 - conf;
   });
 
   /** Scale the line's CSS variables.  Width grows from 1px → 3px,

@@ -16,6 +16,7 @@
 
   import { onMount, untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
+  import StatusFooter from "./StatusFooter.svelte";
   import {
     autoRegenState,
     chatLog,
@@ -225,10 +226,11 @@
 
   // -------------------------------------------------- conversation actions --
   //
-  // clear / rewind / regen / transcript / auto-regen used to live on the
-  // Topbar; they act on the conversation, so they belong here.  The
-  // mutating ones route through ``enqueuePending`` so clicking them mid-
-  // gen queues rather than racing the WS.
+  // clear / regen / transcript / auto-regen used to live on the Topbar;
+  // they act on the conversation, so they belong here.  The mutating
+  // ones route through ``enqueuePending`` so clicking them mid-gen
+  // queues rather than racing the WS.  (regen still rewinds internally —
+  // the standalone "rewind" button was vestigial and was removed.)
 
   const AUTO_REGEN_MODES: { value: AutoRegenMode; label: string }[] = [
     { value: "unsteered", label: "unsteered" },
@@ -262,14 +264,6 @@
     }
   }
 
-  function rewindChat(): void {
-    if (genStatus.active) {
-      enqueuePending({ label: "rewind", apply: () => void rewindSession() });
-    } else {
-      void rewindSession();
-    }
-  }
-
   function regenAction(): void {
     // Capture the input now — a queued action fires later, by which point
     // the local log may have shifted.
@@ -288,6 +282,11 @@
     openDrawer("transcript");
   }
 
+  // Save / load act on the whole conversation tree; they live here at
+  // the chat's edge rather than buried in a rail menu.  Regenerate-N and
+  // fan-out used to sit here too — both were redundant (the loom right-
+  // click menu carries "regenerate…" and "fan out…", and the experiment
+  // lab is one click away in the analysis menu) so they were removed.
   function onAutoRegenModeChange(ev: Event): void {
     setAutoRegenMode(
       (ev.currentTarget as HTMLSelectElement).value as AutoRegenMode,
@@ -643,14 +642,28 @@
       </label>
     {/if}
 
-    <!-- Conversation actions — clear / rewind / transcript / auto-regen
-         sit inline at the end of the header so they're one click away. -->
+    <!-- Conversation actions — clear / save / load / transcript / auto-
+         regen sit inline at the end of the header so they're one click
+         away. -->
     <div class="header-actions">
       <button type="button" class="hbtn" onclick={clearChat}>
         clear chat
       </button>
-      <button type="button" class="hbtn" onclick={rewindChat}>
-        rewind last turn
+      <button
+        type="button"
+        class="hbtn"
+        onclick={() => openDrawer("save_conversation")}
+        title="Save this conversation tree to disk"
+      >
+        save conversation…
+      </button>
+      <button
+        type="button"
+        class="hbtn"
+        onclick={() => openDrawer("load_conversation")}
+        title="Load a saved conversation tree"
+      >
+        load conversation…
       </button>
       <button type="button" class="hbtn" onclick={openTranscript}>
         transcript…
@@ -747,6 +760,8 @@
       {/each}
     {/if}
   </div>
+
+  <StatusFooter />
 
   <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(); }}>
     <textarea
@@ -951,10 +966,15 @@
       border-color var(--dur) var(--ease-out),
       color var(--dur) var(--ease-out);
   }
-  .hbtn:hover {
+  .hbtn:hover:not(:disabled) {
     background: var(--bg-elev);
     border-color: var(--accent-blue);
     color: var(--accent-blue);
+  }
+  .hbtn:disabled {
+    color: var(--fg-muted);
+    border-color: var(--border-dim);
+    cursor: not-allowed;
   }
   .ctl-input {
     background: var(--bg-deep);
@@ -1154,8 +1174,8 @@
     display: flex;
     gap: 0.5em;
     align-items: flex-end;
-    border-top: 1px solid var(--border-dim);
-    padding-top: 0.5em;
+    /* No border-top — the status footer directly above already caps
+     * the input region with its own hairline. */
   }
   .input {
     flex: 1 1 auto;

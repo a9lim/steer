@@ -7,7 +7,35 @@
   // real to report.
 
   import Bar from "../lib/charts/Bar.svelte";
-  import { genStatus, geometricMeanPpl } from "../lib/stores.svelte";
+  import {
+    genStatus,
+    geometricMeanPpl,
+    pendingActions,
+    applyPendingActions,
+    sendStop,
+    onWsMessage,
+  } from "../lib/stores.svelte";
+
+  // Pending-actions badge — relocated here from the retired Topbar.  It
+  // interrupts an in-flight gen to flush queued rack/sampling changes.
+  const pendingCount = $derived(pendingActions.queue.length);
+
+  // Stop-then-flush.  Subscribes once to the WS done event, sends stop,
+  // then drains the queue when done lands.  If no gen is active, flush
+  // immediately.
+  function applyNow(): void {
+    if (!genStatus.active) {
+      applyPendingActions();
+      return;
+    }
+    const off = onWsMessage((msg) => {
+      if (msg.type === "done" || msg.type === "error") {
+        // Store's own handler already drains the queue on done/error.
+        off();
+      }
+    });
+    sendStop();
+  }
 
   // Live elapsed counter — ticks while gen is active, freezes on done so
   // the user can still read the final timing after the generation lands.
@@ -71,20 +99,33 @@
       <span class="text muted">{genStatus.finishReason}</span>
     {/if}
   {/if}
+
+  {#if pendingCount > 0}
+    <button
+      class="pending-badge"
+      type="button"
+      onclick={applyNow}
+      title="Apply queued rack/sampling changes; interrupts in-flight gen if needed"
+    >
+      {pendingCount} change{pendingCount === 1 ? "" : "s"} pending — apply now
+    </button>
+  {/if}
 </footer>
 
 <style>
+  /* Embedded in the chat column, directly above the input row — a thin
+   * status line.  Horizontal padding is zero so it aligns with the log
+   * and input box; the hairline above separates it from the log. */
   .status-footer {
     display: flex;
     align-items: center;
     gap: 0.5em;
-    padding: 0.3em 1em;
-    background: var(--bg-deep);
-    border-top: 1px solid var(--border);
+    padding: 0.35em 0;
+    border-top: 1px solid var(--border-dim);
     color: var(--fg-dim);
     font-size: var(--font-size-small);
     font-family: var(--font-mono);
-    min-height: 24px;
+    min-height: 22px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -107,5 +148,22 @@
   .bar-wrap {
     display: inline-flex;
     align-items: center;
+  }
+
+  /* Pending-actions badge — pushed to the right edge of the footer. */
+  .pending-badge {
+    margin-left: auto;
+    background: rgba(242, 184, 75, 0.12);
+    color: var(--accent-amber);
+    border: 1px solid rgba(242, 184, 75, 0.5);
+    padding: 0.1rem 0.5rem;
+    border-radius: var(--radius);
+    font-size: var(--font-size-small);
+    font-family: var(--font-ui);
+    cursor: pointer;
+    transition: background var(--dur) var(--ease-out);
+  }
+  .pending-badge:hover {
+    background: rgba(242, 184, 75, 0.2);
   }
 </style>

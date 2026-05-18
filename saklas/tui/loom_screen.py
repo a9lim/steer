@@ -110,7 +110,7 @@ _HELP_TEXT = (
     "  f             fan out — <vector> <alpha-grid> as siblings\n"
     "\n"
     "[b ansi_yellow]analysis[/]\n"
-    "  c             compare this node with its assistant siblings\n"
+    "  c             compare the assistant replies of this turn\n"
     "  /             search node text / notes\n"
     "  n / N         jump to the next / previous search match\n"
     "  p             edit the prune filter (dims non-matching nodes)\n"

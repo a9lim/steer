@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Collapsible left-edge loom sidebar.  Mounted from App.svelte when
-  // ``loomUiState.sidebarOpen`` is true.  Renders the tree as an
+  // Left-edge loom (threads) column.  A permanent part of the layout,
+  // mounted from App.svelte.  Renders the tree as an
   // indented list — recursive component composition would be cleaner
   // visually but produces a deep DOM nesting; a flat depth-first walk
   // with per-node indentation is fast enough for the trees we expect
@@ -44,11 +44,12 @@
     pinNodeForComparison,
     pinnedComparison,
     refreshLoomTree,
-    toggleLoomSidebar,
     toggleNodeSelection,
   } from "../../lib/stores.svelte";
   import LoomNode from "./LoomNode.svelte";
   import LoomEdge from "./LoomEdge.svelte";
+  import WorkbenchCard from "../WorkbenchCard.svelte";
+  import SamplingStrip from "../SamplingStrip.svelte";
   import type { LoomNodeJSON } from "../../lib/types";
 
   // ----------------------------------------- flat tree walk + depth --
@@ -68,6 +69,40 @@
 
   const activePathSet = $derived(new Set(loomTree.activePath));
   const selectionSet = $derived(new Set(nodeSelection.ids));
+
+  // --------------------------------------- compare bar (active node) --
+  //
+  // A single role-aware "compare" — the loom alternates user/assistant,
+  // so "compare siblings" (assistant node) and "compare children" (user
+  // node) were never both live and always meant the same thing: diff
+  // the assistant continuations of one user turn.  We resolve that user
+  // turn from the active node (user → itself, assistant → its parent)
+  // and compare its assistant children.
+
+  /** The user turn whose assistant continuations the compare acts on. */
+  const compareUserParentId = $derived.by<string | null>(() => {
+    const id = loomTree.active_node_id;
+    const n = id ? (loomTree.nodes.get(id) ?? null) : null;
+    if (!n) return null;
+    if (n.role === "user") return n.id;
+    if (n.role === "assistant") return n.parent_id;
+    return null;
+  });
+
+  const comparableNodes = $derived.by<LoomNodeJSON[]>(() => {
+    if (!compareUserParentId) return [];
+    return (loomTree.children_of.get(compareUserParentId) ?? [])
+      .map((id) => loomTree.nodes.get(id))
+      .filter((n): n is LoomNodeJSON => n != null && n.role === "assistant");
+  });
+
+  function compareBranch(): void {
+    if (!compareUserParentId || comparableNodes.length < 2) return;
+    openDrawer("node_compare", {
+      node_ids: comparableNodes.map((n) => n.id),
+      parent_id: compareUserParentId,
+    });
+  }
 
   /** Logit-pass: order children by ``mean_logprob`` when the sibling-sort
    *  filter directive is active.  Returns the children list in the order
@@ -160,10 +195,9 @@
   }
 
   /** Logit-pass: the badge value to render on a node — the node's own
-   *  ``mean_logprob`` when weight mode is on, else null (which suppresses
+   *  ``mean_logprob``, or null when capture wasn't live (which suppresses
    *  the badge entirely in ``LoomNode``). */
   function weightBadgeFor(node: LoomNodeJSON): number | null {
-    if (loomUiState.weightMode === "none") return null;
     const v = node.mean_logprob;
     return typeof v === "number" && Number.isFinite(v) ? v : null;
   }
@@ -178,10 +212,9 @@
   }
 
   /** Logit-pass: per-edge weight is the child's ``mean_logprob``.  The
-   *  edge component picks confidence vs surprise from ``weightMode`` so
-   *  the same number drives both modes. */
+   *  edge component maps it to a surprise intensity that thickens edges
+   *  to surprising children. */
   function edgeWeightFor(node: LoomNodeJSON): number | null {
-    if (loomUiState.weightMode === "none") return null;
     const v = node.mean_logprob;
     return typeof v === "number" && Number.isFinite(v) ? v : null;
   }
@@ -637,12 +670,8 @@
       return;
     }
     if (k === "Escape") {
-      // v2.3: Esc inside the sidebar defocuses the active element /
-      // search input rather than collapsing the whole panel.  Most
-      // users hit Esc to back out of a focused control; auto-closing
-      // the sidebar surprised people who just wanted to dismiss a
-      // modal/menu/search.  The topbar's "loom" button still toggles
-      // the panel; only an open menu/modal short-circuits this branch
+      // Esc inside the threads column defocuses the active element /
+      // search input.  An open menu/modal short-circuits this branch
       // (handled in ``onWindowKey``).
       ev.preventDefault();
       const active = document.activeElement as HTMLElement | null;
@@ -738,19 +767,25 @@
     void openModal("fanout", anchorId, "0.0, 0.3, 0.6", 1);
   }
 
-  function menuCompareChildren(): void {
+  function menuCompareBranch(): void {
     const nid = menu.nodeId;
     closeMenu();
     if (!nid) return;
-    const childIds = loomTree.children_of.get(nid) ?? [];
-    const assistantChildren = childIds.filter((id) => {
-      const c = loomTree.nodes.get(id);
-      return c?.role === "assistant";
-    });
+    const node = loomTree.nodes.get(nid);
+    // Resolve the user turn: a user node compares its own assistant
+    // children; an assistant node compares its sibling set (its
+    // parent's assistant children).
+    let parentId: string | null = null;
+    if (node?.role === "user") parentId = nid;
+    else if (node?.role === "assistant") parentId = node.parent_id;
+    if (!parentId) return;
+    const assistantChildren = (loomTree.children_of.get(parentId) ?? []).filter(
+      (id) => loomTree.nodes.get(id)?.role === "assistant",
+    );
     if (assistantChildren.length < 2) return;
     openDrawer("node_compare", {
       node_ids: assistantChildren,
-      parent_id: nid,
+      parent_id: parentId,
     });
   }
 
@@ -796,13 +831,13 @@
 <aside
   class="loom-sidebar"
   role="tree"
-  aria-label="Loom tree"
+  aria-label="Threads"
   onkeydown={onSidebarKey}
   tabindex="-1"
   bind:this={asideEl}
 >
   <header class="loom-header">
-    <span class="title">loom</span>
+    <span class="title">threads</span>
     <span class="rev" title="server tree revision">rev {loomTree.rev}</span>
     <button
       type="button"
@@ -811,13 +846,6 @@
       title="Refresh tree from server"
       aria-label="Refresh"
     >↻</button>
-    <button
-      type="button"
-      class="icon-btn"
-      onclick={toggleLoomSidebar}
-      title="Close sidebar"
-      aria-label="Close"
-    >✕</button>
   </header>
 
   <div class="filter-bar">
@@ -890,29 +918,34 @@
     </div>
   {/if}
 
-  <!-- Logit-pass: edge weight mode picker (Phase 4).  ``none`` keeps the
-       v2.3 flat shape; ``confidence`` / ``surprise`` thicken edges + show
-       the ``mean_logprob`` badge per node. -->
-  <div class="weight-bar" title="Loom edge weighting by mean chosen-token logprob">
-    <span class="weight-label">edges</span>
-    <select
-      class="weight-select"
-      value={loomUiState.weightMode}
-      onchange={(ev) => {
-        loomUiState.weightMode = (ev.currentTarget as HTMLSelectElement)
-          .value as "none" | "confidence" | "surprise";
-      }}
-      aria-label="Edge weight mode"
-    >
-      <option value="none">none</option>
-      <option value="confidence">confidence</option>
-      <option value="surprise">surprise</option>
-    </select>
-    {#if loomUiState.siblingSort !== "default"}
+  <!-- Logit-pass: edges are always surprise-weighted — stroke width and
+       opacity thicken toward surprising children (low mean_logprob), and
+       every node carries its mean_logprob badge.  Only surfaces a bar
+       when a ``sort:`` filter directive is active. -->
+  {#if loomUiState.siblingSort !== "default"}
+    <div class="weight-bar">
       <span class="weight-label" title="active sibling sort directive">
-        · sort:{loomUiState.siblingSort}
+        sort:{loomUiState.siblingSort}
       </span>
-    {/if}
+    </div>
+  {/if}
+
+  <!-- Compare bar — diffs the assistant continuations of the active
+       node's user turn.  One role-aware action: works whether the
+       cursor sits on the user node or one of its assistant replies. -->
+  <div class="weight-bar compare-bar">
+    <span class="weight-label">compare</span>
+    <button
+      type="button"
+      class="action-btn"
+      onclick={compareBranch}
+      disabled={comparableNodes.length < 2}
+      title="Compare the assistant continuations of the current user turn"
+    >
+      {comparableNodes.length >= 2
+        ? `${comparableNodes.length} continuations`
+        : "continuations"}
+    </button>
   </div>
 
   {#if nodeSelection.ids.length > 0}
@@ -963,7 +996,6 @@
               parentId={row.node.parent_id}
               childId={row.node.id}
               weight={edgeWeightFor(row.node)}
-              weightMode={loomUiState.weightMode}
             />
           {/if}
           <LoomNode
@@ -983,18 +1015,23 @@
     </div>
   {/if}
 
-  <footer class="loom-footer">
-    <span class="hint">j/k siblings · h/l up/down · Enter activate · s star · n note · / search</span>
-  </footer>
+  <WorkbenchCard />
+  <SamplingStrip />
 </aside>
 
 {#if menu.open && menu.nodeId}
   {@const menuNode = loomTree.nodes.get(menu.nodeId)}
-  {@const menuChildren = loomTree.children_of.get(menu.nodeId) ?? []}
-  {@const assistantChildCount = menuChildren.filter((id) => {
-    const c = loomTree.nodes.get(id);
-    return c?.role === "assistant";
-  }).length}
+  {@const cmpParentId =
+    menuNode?.role === "user"
+      ? menu.nodeId
+      : menuNode?.role === "assistant"
+        ? menuNode.parent_id
+        : null}
+  {@const cmpCount = cmpParentId
+    ? (loomTree.children_of.get(cmpParentId) ?? []).filter(
+        (id) => loomTree.nodes.get(id)?.role === "assistant",
+      ).length
+    : 0}
   <div
     class="loom-menu"
     style="left: {menu.x}px; top: {menu.y}px"
@@ -1023,15 +1060,13 @@
           : "select for compare"}
       </button>
     {/if}
-    {#if menuNode?.role === "user"}
-      <button
-        type="button"
-        role="menuitem"
-        onclick={menuCompareChildren}
-        disabled={assistantChildCount < 2}
-        title={assistantChildCount < 2 ? "needs ≥2 assistant children" : ""}
-      >compare children…</button>
-    {/if}
+    <button
+      type="button"
+      role="menuitem"
+      onclick={menuCompareBranch}
+      disabled={cmpCount < 2}
+      title={cmpCount < 2 ? "needs ≥2 assistant continuations" : ""}
+    >compare continuations…</button>
     <button type="button" role="menuitem" onclick={menuFanOut}>fan out…</button>
     <hr />
     <button type="button" role="menuitem" onclick={menuDelete} class="danger">delete subtree…</button>
@@ -1264,15 +1299,6 @@
     text-transform: uppercase;
     letter-spacing: 0;
   }
-  .weight-select {
-    background: var(--bg-alt);
-    color: var(--fg-strong);
-    border: 1px solid var(--border);
-    padding: 0.1em 0.4em;
-    font: inherit;
-    font-family: var(--font-mono);
-    font-size: var(--font-size-tiny);
-  }
 
   .selection-bar {
     display: flex;
@@ -1344,6 +1370,15 @@
     min-height: 0;
     flex: 1 1 auto;
   }
+
+  /* Sampling strip lives at the foot of this column (below the
+     workbench card).  Cap its height and let it scroll so a wrapped
+     strip on a short viewport never fully crushes the tree above. */
+  .loom-sidebar :global(.sampling-strip) {
+    flex: 0 0 auto;
+    max-height: 50%;
+    overflow-y: auto;
+  }
   .tree-row {
     padding-top: 1px;
     padding-bottom: 1px;
@@ -1401,11 +1436,6 @@
     font-family: var(--font-mono);
   }
 
-  .loom-footer {
-    padding: 0.3em 0.6em;
-    border-top: 1px solid var(--border-dim);
-    background: var(--bg-deep);
-  }
   .hint {
     color: var(--fg-muted);
     font-size: var(--font-size-tiny);

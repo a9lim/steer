@@ -1,15 +1,13 @@
 <script lang="ts">
   // saklas workbench shell.  The primary frame is a desktop research
-  // cockpit: rail navigation, optional loom tree, central chat/canvas,
-  // right-side inspector, and a wide drawer host for deep tools.
+  // cockpit: rail navigation, the threads (loom) column, central
+  // chat/canvas, right-side inspector, and a wide drawer host for deep
+  // tools.
 
   import { onMount } from "svelte";
 
-  import Topbar from "./panels/Topbar.svelte";
-  import StatusFooter from "./panels/StatusFooter.svelte";
   import WorkspaceRail from "./panels/WorkspaceRail.svelte";
   import InspectorPanel from "./panels/InspectorPanel.svelte";
-  import BranchCanvas from "./panels/BranchCanvas.svelte";
   import Chat from "./panels/Chat.svelte";
   import LoomSidebar from "./panels/loom/LoomSidebar.svelte";
   import Toaster from "./lib/Toaster.svelte";
@@ -76,9 +74,7 @@
   });
 
   // Global keyboard accelerators.  Esc → stop (matches TUI).  Cmd/Ctrl-
-  // Shift-R → regen (handled in Topbar via its button + this accelerator
-  // duplicates the regen click).  Cmd/Ctrl-Enter is left for the chat
-  // input to handle locally.
+  // Enter is left for the chat input to handle locally.
   //
   // Loom (phase 3): Ctrl/Cmd+R/E/B/N/D fire the corresponding tree op
   // via the sidebar's modal flow.  Browser Ctrl+B (bold) is suppressed
@@ -114,9 +110,8 @@
     if (loomTree.unavailable) return;
     const mod = ev.ctrlKey || ev.metaKey;
     if (!mod) return;
-    // Shift+ctrl combos are reserved for the topbar regen button
-    // (Cmd-Shift-R is the existing meaning); the loom shortcuts use
-    // bare Cmd/Ctrl+key.
+    // Shift+ctrl combos fall through to the browser; the loom shortcuts
+    // use bare Cmd/Ctrl+key.
     if (ev.shiftKey) return;
     const k = ev.key.toLowerCase();
 
@@ -179,21 +174,16 @@
   </div>
 {:else}
   <div class="shell" class:loading={bootStatus === "loading"}>
-    <Topbar />
-
-    <main class="layout" class:loom-open={loomUiState.sidebarOpen && !loomTree.unavailable}>
+    <main class="layout">
       <section class="rail-zone" aria-label="Workspace navigation">
         <WorkspaceRail />
       </section>
 
-      {#if loomUiState.sidebarOpen && !loomTree.unavailable}
-        <section class="loom-zone" aria-label="Loom sidebar">
-          <LoomSidebar />
-        </section>
-      {/if}
+      <section class="loom-zone" aria-label="Threads">
+        <LoomSidebar />
+      </section>
 
       <section class="chat-zone" aria-label="Chat">
-        <BranchCanvas />
         <Chat />
       </section>
 
@@ -231,8 +221,6 @@
             <Drawers.Compare params={drawerState.params} />
           {:else if drawerState.open === "system_prompt"}
             <Drawers.SystemPrompt params={drawerState.params} />
-          {:else if drawerState.open === "model_info"}
-            <Drawers.ModelInfo params={drawerState.params} />
           {:else if drawerState.open === "help"}
             <Drawers.Help params={drawerState.params} />
           {:else if drawerState.open === "export"}
@@ -283,7 +271,6 @@
       {/if}
     </main>
 
-    <StatusFooter />
     <Toaster />
   </div>
 {/if}
@@ -291,7 +278,7 @@
 <style>
   .shell {
     display: grid;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: 1fr;
     height: 100vh;
     width: 100vw;
     min-width: 1280px;
@@ -305,9 +292,12 @@
      * without us blocking the entire frame. */
     opacity: 0.85;
   }
+  /* Four permanent columns: rail · threads · chat · rack.  The threads
+   * (loom) column is a fixed 310px; min-width 1280px keeps the chat
+   * column comfortable (1280 − 64 − 310 − 420 ≈ 486px floor). */
   .layout {
     display: grid;
-    grid-template-columns: 64px minmax(0, 1fr) minmax(400px, 0.46fr);
+    grid-template-columns: 64px 310px minmax(0, 1fr) minmax(420px, 0.46fr);
     grid-template-rows: 1fr;
     min-height: 0; /* let children scroll inside */
     position: relative; /* drawer sits over rack-zone via absolute pos */
@@ -318,13 +308,6 @@
      * overflow by ~640px, the body scrolls during the 160ms animation,
      * and the chat/rack content visibly shifts left then snaps back. */
     overflow: hidden;
-  }
-  /* Loom sidebar (phase 3) prepends a 280px column on the left when
-   * ``loomUiState.sidebarOpen`` is true.  Min-width 1280px stays
-   * comfortable: 280 + chat + rack still fits ≥ 1000 across the two
-   * existing zones. */
-  .layout.loom-open {
-    grid-template-columns: 64px 310px minmax(0, 1fr) minmax(420px, 0.46fr);
   }
   .rail-zone {
     background: var(--bg-deep);
@@ -349,7 +332,7 @@
   }
   /* Two-row grid: steering rack and probe rack.  Reference views
    * (correlation N×N, per-name layer norms) live in drawer overlays
-   * launched from the topbar tools menu — keeping them out of the rack
+   * launched from the workspace rail — keeping them out of the rack
    * zone gives both racks the full vertical budget.  Each rack handles
    * its own internal scroll so its actions row stays anchored. */
   .rack-zone {

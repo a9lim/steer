@@ -381,41 +381,62 @@ def format_compare(session: Any, node_id: str) -> str:
     ``session`` is duck-typed — only ``.tree`` and ``.diff_nodes`` are
     touched — so a stand-in works as well as a real ``SaklasSession``.
 
-    Walks the node's assistant siblings under the shared user-parent and
-    emits, per sibling: the steering delta, the top-5 probe-reading
-    deltas, and the word-level text diff — the TUI analog of the webui's
-    NodeCompare drawer.  Returns a short advisory string when the node
-    is not an assistant or has no assistant siblings.
+    The loom alternates user/assistant turns, so "compare" always means
+    one thing: diff the assistant continuations of a single user turn.
+    The anchor is resolved role-aware — an assistant node anchors on
+    itself; a user node anchors on the assistant reply on the active
+    path (falling back to its first assistant reply).  Emits, per other
+    continuation: the steering delta, the top-5 probe-reading deltas,
+    and the word-level text diff — the TUI analog of the webui's
+    NodeCompare drawer.  Returns a short advisory string when no user
+    turn with ≥2 assistant continuations can be resolved.
     """
     from saklas.core.loom_diff import steering_delta
 
     tree = session.tree
     node = tree.get(node_id)
-    parent_id = node.parent_id
-    if node.role != "assistant" or parent_id is None:
-        return "[dim](compare — select an assistant node with siblings)[/]"
+
+    # Resolve the anchor assistant node + the user turn it continues.
+    if node.role == "assistant" and node.parent_id is not None:
+        anchor_id = node_id
+        parent_id = node.parent_id
+    elif node.role == "user":
+        parent_id = node_id
+        kids = [
+            cid for cid in tree.child_ids(parent_id)
+            if tree.get(cid).role == "assistant"
+        ]
+        if not kids:
+            return "[dim](compare — this turn has no assistant replies)[/]"
+        # Prefer the reply on the active path; else the first one.
+        on_path = {n.id for n in tree.active_path()}
+        anchor_id = next((k for k in kids if k in on_path), kids[0])
+    else:
+        return "[dim](compare — select a user turn or assistant reply)[/]"
+
+    anchor = tree.get(anchor_id)
 
     sib_ids = [
         cid for cid in tree.child_ids(parent_id)
-        if cid != node_id and tree.get(cid).role == "assistant"
+        if cid != anchor_id and tree.get(cid).role == "assistant"
     ]
     if not sib_ids:
-        return "[dim](compare — this node has no assistant siblings)[/]"
+        return "[dim](compare — this turn has only one assistant reply)[/]"
 
     def _expr(n: LoomNode) -> str:
         if n.recipe is not None and n.recipe.steering is not None:
             return n.recipe.steering
         return n.applied_steering or ""
 
-    self_expr = _expr(node)
+    self_expr = _expr(anchor)
     lines: list[str] = [
-        f"[b]compare[/b] {node_id[:8]} vs {len(sib_ids)} sibling(s)",
+        f"[b]compare[/b] {anchor_id[:8]} vs {len(sib_ids)} sibling(s)",
         f"this : {escape(self_expr) or '(unsteered)'}",
         "",
     ]
     for idx, sid in enumerate(sib_ids, 1):
         sib = tree.get(sid)
-        diff = session.diff_nodes(sid, node_id)  # a=sibling, b=this node
+        diff = session.diff_nodes(sid, anchor_id)  # a=sibling, b=anchor
         delta = steering_delta(_expr(sib), self_expr) or "(identical steering)"
         lines.append(f"[b]── sibling {idx} · {sid[:8]} ──[/b]")
         lines.append(f"Δ steering : {escape(delta)}")

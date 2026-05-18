@@ -65,6 +65,63 @@
     </section>
 
     <section class="block">
+      <h3>loom tree</h3>
+      <p class="prose">
+        the single-letter keys fire while the loom sidebar is focused;
+        the <kbd>{modKey}</kbd>-combos act on the active node from
+        anywhere.
+      </p>
+      <table class="kb">
+        <tbody>
+          <tr>
+            <td><kbd>j</kbd> / <kbd>k</kbd></td>
+            <td>focus the previous / next sibling</td>
+          </tr>
+          <tr>
+            <td><kbd>h</kbd> / <kbd>l</kbd></td>
+            <td>focus the parent / first child</td>
+          </tr>
+          <tr>
+            <td><kbd>Enter</kbd></td>
+            <td>activate the focused node</td>
+          </tr>
+          <tr>
+            <td><kbd>s</kbd></td>
+            <td>star / unstar the focused node</td>
+          </tr>
+          <tr>
+            <td><kbd>n</kbd></td>
+            <td>add or edit a note</td>
+          </tr>
+          <tr>
+            <td><kbd>/</kbd></td>
+            <td>search node text</td>
+          </tr>
+          <tr>
+            <td><kbd>{modKey}</kbd> + <kbd>R</kbd></td>
+            <td>regenerate the active node</td>
+          </tr>
+          <tr>
+            <td><kbd>{modKey}</kbd> + <kbd>E</kbd></td>
+            <td>edit the active node's text</td>
+          </tr>
+          <tr>
+            <td><kbd>{modKey}</kbd> + <kbd>B</kbd></td>
+            <td>branch a new sibling</td>
+          </tr>
+          <tr>
+            <td><kbd>{modKey}</kbd> + <kbd>N</kbd></td>
+            <td>navigate by node-id prefix</td>
+          </tr>
+          <tr>
+            <td><kbd>{modKey}</kbd> + <kbd>D</kbd></td>
+            <td>delete the active node's subtree</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="block">
       <h3>steering grammar</h3>
       <p class="prose">
         the same grammar speaks Python, YAML, the chat input, and this UI's

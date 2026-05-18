@@ -431,7 +431,7 @@ def test_format_compare_renders_sibling_diff():
     assert "two" in out            # word-level text diff
 
 
-def test_format_compare_no_siblings_is_advisory():
+def test_format_compare_one_reply_is_advisory():
     from saklas.tui.loom_helpers import format_compare
 
     tree = LoomTree()
@@ -439,18 +439,41 @@ def test_format_compare_no_siblings_is_advisory():
     aid = tree.begin_assistant(uid)
     tree.finalize_assistant(aid, text="lonely")
     session = SimpleNamespace(tree=tree)
-    out = format_compare(session, aid)  # type: ignore[arg-type]
-    assert "no assistant siblings" in out
+    # A turn with a single reply has nothing to compare — same advisory
+    # whether the cursor sits on the assistant reply or the user node.
+    assert "one assistant reply" in format_compare(session, aid)  # type: ignore[arg-type]
+    assert "one assistant reply" in format_compare(session, uid)  # type: ignore[arg-type]
 
 
-def test_format_compare_non_assistant_is_advisory():
+def test_format_compare_user_turn_with_no_replies_is_advisory():
     from saklas.tui.loom_helpers import format_compare
 
     tree = LoomTree()
     uid = tree.add_user_turn("hi")
     session = SimpleNamespace(tree=tree)
     out = format_compare(session, uid)  # type: ignore[arg-type]
-    assert "assistant node" in out
+    assert "no assistant replies" in out
+
+
+def test_format_compare_from_user_node_diffs_replies():
+    """A user node resolves to its assistant continuations — the role-
+    aware fold of the old "compare children"; standing on the user node
+    compares the same set as standing on either assistant reply."""
+    from saklas.tui.loom_helpers import format_compare
+
+    tree = LoomTree()
+    uid = tree.add_user_turn("hi")
+    aid = tree.begin_assistant(uid, recipe=Recipe(steering="0.3 honest"))
+    tree.finalize_assistant(aid, text="answer one", aggregate_readings={"calm": 0.5})
+    bid = tree.begin_assistant(uid, recipe=Recipe(steering="0.6 honest"))
+    tree.finalize_assistant(bid, text="answer two", aggregate_readings={"calm": 0.1})
+    session = SimpleNamespace(tree=tree)
+    _wire_real_diff(session, tree)
+
+    out = format_compare(session, uid)  # type: ignore[arg-type]
+    assert "compare" in out
+    assert "honest" in out         # steering delta term
+    assert "calm" in out           # reading delta
 
 
 # ---------------------------------------------------------------------------

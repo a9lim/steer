@@ -1,20 +1,14 @@
 <script lang="ts">
-  // SamplingStrip: T / top-p / top-k / max / seed sliders + thinking toggle +
-  // session-default-vs-next-message radio + system-prompt drawer button.
+  // SamplingStrip: T / top-p / top-k / max / pres / freq / seed + a
+  // thinking toggle + an alts (top-K capture) count + advanced /
+  // system-prompt drawer buttons.
   //
-  // Two modes via ``samplingState.oneShotOverride``:
-  // - ``true``  (next-message-only): mutations write to ``samplingState`` only.
-  //             ``sendGenerate`` reads the slice and packs it as a per-call
-  //             ``SamplingConfig`` override; the server's session defaults
-  //             stay untouched.
-  // - ``false`` (session-default):  mutations write to ``samplingState`` AND
-  //             PATCH the server.  Subsequent generations send ``sampling: null``
-  //             so the server uses the (now-updated) session defaults.
-  //
-  // Thinking is a special case — it's not a sampling field, it lives on the
-  // session and on each generate as ``thinking: bool|null``.  Same dual mode:
-  // session-default mode PATCHes; one-shot mode mutates local state which
-  // ``sendGenerate`` forwards as the WS ``thinking`` field.
+  // Every edit applies immediately.  temperature / top-p / top-k /
+  // max-tokens / thinking PATCH the session defaults as the user moves
+  // them; seed and the advanced extras (penalties, stop strings, logit
+  // bias, return_top_k) have no PATCH path, so ``sendGenerate`` packs
+  // them onto each call's ``SamplingConfig``.  Either way the value the
+  // strip shows is the value the next generation uses.
   //
   // Empty seed = null = no per-call seed pin (model RNG).  The 🎲 button
   // fills with a fresh ``Math.floor(Math.random() * 2**31)`` integer.
@@ -26,7 +20,6 @@
     patchSessionDefaults,
     openDrawer,
   } from "../lib/stores.svelte";
-  import Segmented from "../lib/Segmented.svelte";
   import Slider from "../lib/Slider.svelte";
 
   // ------------------------------------------------------------------- consts
@@ -50,6 +43,9 @@
   const TOP_K_MAX = 4096;
   const MAX_TOK_MIN = 1;
   const MAX_TOK_MAX = 8192;
+  const PENALTY_MIN = -2;
+  const PENALTY_MAX = 2;
+  const ALTS_MAX = 256;
   const SEED_MAX = 2 ** 31; // exclusive — ``Math.random() * 2**31`` matches the prompt.
 
   // ------------------------------------------------------------------- ready
@@ -67,30 +63,24 @@
   //
   // Each control's *display* value reads ``samplingState`` first (which the
   // store's bootstrap populates from session config) and falls back to a
-  // placeholder when it's still null.  Writes go through ``onChange`` —
-  // which decides between session-default PATCH and one-shot local-only.
+  // placeholder when it's still null.
 
   const tempView = $derived(samplingState.temperature ?? PLACEHOLDER.temperature);
   const topPView = $derived(samplingState.top_p ?? PLACEHOLDER.top_p);
   const topKView = $derived(samplingState.top_k ?? PLACEHOLDER.top_k);
   const maxView = $derived(samplingState.max_tokens || PLACEHOLDER.max_tokens);
+  const presenceView = $derived(samplingState.presence_penalty);
+  const frequencyView = $derived(samplingState.frequency_penalty);
   const seedView = $derived(
     samplingState.seed === null ? "" : String(samplingState.seed),
   );
   const thinkingView = $derived(samplingState.thinking ?? false);
 
-  /** Logit-pass: top-K alts toggle.  ``return_top_k > 0`` is the "show
-   *  alts" mode that lights up the token drilldown's logits tab + the
-   *  inline ``surprise`` highlight mode.  Canonical ``on`` value is 8
-   *  per Decision 1 of docs/plans/logit-pass.md. */
-  const altsOn = $derived(samplingState.return_top_k > 0);
-  const ALTS_K = 8;
-
   // ------------------------------------------------------------------- writes
 
-  /** PATCH the server with a single field when in session-default mode.
-   * Errors surface as a console.warn — the strip itself stays usable
-   * (local state already updated; user can retry). */
+  /** PATCH the server with a single field.  Errors surface as a
+   * console.warn — the strip itself stays usable (local state already
+   * updated; user can retry). */
   async function persistDefault(
     body: Partial<{
       temperature: number;
@@ -109,12 +99,12 @@
 
   function onTemp(v: number): void {
     setSampling("temperature", v);
-    if (!samplingState.oneShotOverride) void persistDefault({ temperature: v });
+    void persistDefault({ temperature: v });
   }
 
   function onTopP(v: number): void {
     setSampling("top_p", v);
-    if (!samplingState.oneShotOverride) void persistDefault({ top_p: v });
+    void persistDefault({ top_p: v });
   }
 
   function onTopK(ev: Event): void {
@@ -122,7 +112,7 @@
     if (!Number.isFinite(raw)) return;
     const v = Math.max(TOP_K_MIN, Math.min(TOP_K_MAX, Math.floor(raw)));
     setSampling("top_k", v);
-    if (!samplingState.oneShotOverride) void persistDefault({ top_k: v });
+    void persistDefault({ top_k: v });
   }
 
   function onMax(ev: Event): void {
@@ -130,7 +120,19 @@
     if (!Number.isFinite(raw)) return;
     const v = Math.max(MAX_TOK_MIN, Math.min(MAX_TOK_MAX, Math.floor(raw)));
     setSampling("max_tokens", v);
-    if (!samplingState.oneShotOverride) void persistDefault({ max_tokens: v });
+    void persistDefault({ max_tokens: v });
+  }
+
+  function onPenalty(
+    key: "presence_penalty" | "frequency_penalty",
+    ev: Event,
+  ): void {
+    const raw = Number((ev.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(raw)) return;
+    const v = Math.max(PENALTY_MIN, Math.min(PENALTY_MAX, raw));
+    setSampling(key, v);
+    // No session-PATCH path: the penalties ride on the per-call sampling
+    // payload only, same as the (now-removed) advanced-drawer control.
   }
 
   function onSeed(ev: Event): void {
@@ -142,10 +144,9 @@
     const v = Number(raw);
     if (!Number.isFinite(v)) return;
     setSampling("seed", Math.floor(v));
-    // Note: there's no PATCH-able ``seed`` on the session — seed is always
-    // a per-call SamplingConfig field.  Persisting nothing in default mode
-    // is intentional: a "default seed" would lock every generation to the
-    // same number, which isn't what the user means by "session default".
+    // There's no PATCH-able ``seed`` on the session — seed always rides
+    // per-call (``buildSamplingPayload``).  A set seed pins every
+    // generation to that number; clear it (✕) to unpin.
   }
 
   function rollSeed(): void {
@@ -160,39 +161,21 @@
   function onThinking(ev: Event): void {
     const v = (ev.currentTarget as HTMLInputElement).checked;
     setSampling("thinking", v);
-    if (!samplingState.oneShotOverride) void persistDefault({ thinking: v });
+    void persistDefault({ thinking: v });
   }
 
-  /** Logit-pass: flip the top-K-alts capture on/off.  No PATCH — the
-   *  server's session-PATCH endpoint doesn't accept ``return_top_k``;
-   *  the value rides on the WS sampling payload directly (see
+  /** Logit-pass: number of top-K alternative tokens to capture per
+   *  position.  ``0`` disables capture; ``> 0`` lights up the token
+   *  drilldown's logits tab + the inline ``surprise`` highlight.  No
+   *  PATCH — the server's session-PATCH endpoint doesn't accept
+   *  ``return_top_k``; it rides the WS sampling payload directly (see
    *  ``stores.svelte.ts::sendGenerate``).  Effective on the next
    *  generation; running gens keep their captured shape. */
   function onAlts(ev: Event): void {
-    const v = (ev.currentTarget as HTMLInputElement).checked;
-    setSampling("return_top_k", v ? ALTS_K : 0);
-  }
-
-  // Apply-mode segmented control — "default" persists to the session,
-  // "oneshot" scopes a change to the next message only.
-  const MODE_OPTIONS = [
-    {
-      value: "default",
-      label: "session default",
-      title: "Persist changes to the session defaults",
-    },
-    {
-      value: "oneshot",
-      label: "next message only",
-      title: "Apply only to the next message; session defaults untouched",
-    },
-  ];
-  const modeValue = $derived(
-    samplingState.oneShotOverride ? "oneshot" : "default",
-  );
-
-  function onModeChange(v: string): void {
-    setSampling("oneShotOverride", v === "oneshot");
+    const raw = Number((ev.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(raw)) return;
+    const v = Math.max(0, Math.min(ALTS_MAX, Math.floor(raw)));
+    setSampling("return_top_k", v);
   }
 
   function openSystemPrompt(): void {
@@ -269,6 +252,42 @@
     />
   </label>
 
+  <!-- Presence penalty -->
+  <label
+    class="control narrow"
+    title="Presence penalty — discourages tokens already present (−2…2)"
+  >
+    <span class="label">pres</span>
+    <input
+      type="number"
+      min={PENALTY_MIN}
+      max={PENALTY_MAX}
+      step="0.05"
+      value={presenceView}
+      disabled={!ready}
+      onchange={(ev) => onPenalty("presence_penalty", ev)}
+      aria-label="presence penalty"
+    />
+  </label>
+
+  <!-- Frequency penalty -->
+  <label
+    class="control narrow"
+    title="Frequency penalty — discourages tokens by repeat count (−2…2)"
+  >
+    <span class="label">freq</span>
+    <input
+      type="number"
+      min={PENALTY_MIN}
+      max={PENALTY_MAX}
+      step="0.05"
+      value={frequencyView}
+      disabled={!ready}
+      onchange={(ev) => onPenalty("frequency_penalty", ev)}
+      aria-label="frequency penalty"
+    />
+  </label>
+
   <!-- Seed -->
   <div class="control seed" title="RNG seed — empty means model picks">
     <span class="label">seed</span>
@@ -323,20 +342,23 @@
     />
   </label>
 
-  <!-- Top-K alternatives toggle (logit-pass).  Off by default to keep
-       the wire shape minimal; flip on to populate the drilldown logits
-       tab + the inline surprise highlight mode.  K=8 per Decision 1. -->
+  <!-- Top-K alternatives count (logit-pass).  0 disables capture; >0
+       populates the drilldown logits tab + the inline surprise highlight
+       mode.  Default 8 per Decision 1. -->
   <label
-    class="control toggle"
-    title={`Capture top-${ALTS_K} alternative tokens per position (drilldown logits tab + surprise highlight)`}
+    class="control narrow"
+    title="Top-K alternative tokens to capture per position (0 disables; feeds the drilldown logits tab + surprise highlight)"
   >
     <span class="label">alts</span>
     <input
-      type="checkbox"
-      checked={altsOn}
+      type="number"
+      min="0"
+      max={ALTS_MAX}
+      step="1"
+      value={samplingState.return_top_k}
       disabled={!ready}
       onchange={onAlts}
-      aria-label="capture top-K alternatives"
+      aria-label="top-K alternatives to capture"
     />
   </label>
 
@@ -345,7 +367,7 @@
     class="sys-btn"
     disabled={!ready}
     onclick={openAdvanced}
-    title="Open stop strings, penalties, logit bias, and numeric top-K alternatives"
+    title="Open stop strings, logit bias, and numeric top-K alternatives"
   >
     advanced
   </button>
@@ -360,17 +382,6 @@
   >
     <span aria-hidden="true">⚙</span> system prompt
   </button>
-
-  <!-- Apply-mode toggle -->
-  <div class="mode">
-    <Segmented
-      options={MODE_OPTIONS}
-      value={modeValue}
-      onChange={onModeChange}
-      disabled={!ready}
-      ariaLabel="sampling apply mode"
-    />
-  </div>
 </section>
 
 <style>
@@ -507,22 +518,10 @@
     cursor: not-allowed;
   }
 
-  /* Apply-mode segmented control — pulled to the right end of the strip on
-   * desktop, wraps back to row 2 on narrow viewports. */
-  .mode {
-    display: inline-flex;
-    align-items: center;
-    margin-left: auto;
-  }
-
-  /* Narrow viewports — strip wraps to two rows; the mode radio drops below
-   * by losing its auto-margin push (already wrapping fills the row). */
+  /* Narrow viewports — strip wraps to two rows. */
   @media (max-width: 900px) {
     .sampling-strip {
       gap: 0.5em 0.8em;
-    }
-    .mode {
-      margin-left: 0;
     }
     .slider-cell {
       width: 6em;

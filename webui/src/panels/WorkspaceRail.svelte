@@ -1,20 +1,15 @@
 <script lang="ts">
   // Workspace rail — the primary navigation surface.  A slim 64px icon
-  // strip: a loom-sidebar toggle plus three category icons, each opening
-  // a fly-out list of that category's tools.  This is where the old
-  // Topbar "tools ▾" menu's ~19 drawer launchers now live, so the topbar
-  // can stay a thin brand + status strip.
+  // strip: three category icons, each opening a fly-out list of that
+  // category's tools.  This is where the old Topbar "tools ▾" menu's
+  // ~19 drawer launchers now live, so the topbar can stay a thin
+  // brand + status strip.
   //
   // Fly-outs are ``position: fixed`` (the rail-zone clips overflow) and
   // anchored off the clicked icon's bounding rect.
 
   import { onMount } from "svelte";
-  import {
-    openDrawer,
-    loomTree,
-    loomUiState,
-    toggleLoomSidebar,
-  } from "../lib/stores.svelte";
+  import { openDrawer } from "../lib/stores.svelte";
   import type { DrawerName } from "../lib/types";
 
   interface Tool {
@@ -29,16 +24,12 @@
     tools: Tool[];
   }
 
-  // Loom-sidebar toggle glyph (three stacked branches).
-  const LOOM_ICON = "M4 5h16M4 12h10M4 19h16";
-
   const CATEGORIES: Category[] = [
     {
       key: "vectors",
       label: "Steering & vectors",
       icon: "M5 19L19 5M19 5h-7M19 5v7",
       tools: [
-        { label: "add steering…", drawer: "vector_picker" },
         { label: "load vector…", drawer: "load" },
         { label: "merge vector…", drawer: "merge" },
         { label: "clone vector…", drawer: "clone" },
@@ -63,13 +54,8 @@
       label: "Session & model",
       icon: "M5 21v-6M5 11V3M12 21v-9M12 8V3M19 21v-4M19 13V3M2 15h6M9 8h6M16 13h6",
       tools: [
-        { label: "advanced sampling…", drawer: "advanced_sampling" },
-        { label: "system prompt…", drawer: "system_prompt" },
-        { label: "model info…", drawer: "model_info" },
         { label: "model health…", drawer: "health" },
         { label: "session / auth…", drawer: "session_admin" },
-        { label: "save conversation…", drawer: "save_conversation" },
-        { label: "load conversation…", drawer: "load_conversation" },
         { label: "help / shortcuts…", drawer: "help" },
       ],
     },
@@ -101,11 +87,6 @@
     openDrawer(drawer);
   }
 
-  function onLoom(): void {
-    openKey = null;
-    if (!loomTree.unavailable) toggleLoomSidebar();
-  }
-
   // Close the fly-out on any outside click or Escape.
   function onDocClick(ev: MouseEvent): void {
     if (openKey === null) return;
@@ -129,24 +110,6 @@
 
 <nav class="rail" aria-label="saklas workspace rail">
   <div class="items">
-    <button
-      type="button"
-      class="rail-btn"
-      class:active={loomUiState.sidebarOpen}
-      disabled={loomTree.unavailable}
-      title={loomTree.unavailable ? "Loom unavailable on this server" : "Toggle loom sidebar"}
-      aria-label="Toggle loom sidebar"
-      aria-pressed={loomUiState.sidebarOpen}
-      onclick={onLoom}
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d={LOOM_ICON}></path>
-      </svg>
-      <span>loom</span>
-    </button>
-
-    <div class="divider" role="presentation"></div>
-
     {#each CATEGORIES as cat (cat.key)}
       <button
         type="button"
@@ -202,11 +165,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-  }
-  .divider {
-    height: 1px;
-    background: var(--border-dim);
-    margin: 0.15rem 0.3rem;
   }
 
   .rail-btn {
