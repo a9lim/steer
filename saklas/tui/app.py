@@ -945,6 +945,67 @@ class SaklasApp(App[None]):
         self._refresh_trait_why()
         self._chat_panel.add_system_message("Chat history cleared.")
 
+    def _repaint_chat_from_active_path(self) -> None:
+        """Rebuild the chat log to show only the loom tree's active path.
+
+        Called after any navigation (loom screen, ``/nav``, ``/load``) so
+        the chat panel reflects the active branch rather than whatever
+        turns happened to be streamed into it last.  Per-token probe
+        scores aren't persisted on loom nodes, so navigated-to history
+        renders without probe highlight; surprise highlight survives
+        because per-token logprobs ride along in the node token rows.
+        """
+        from saklas.tui.chat_panel import SURPRISE_PROBE
+
+        chat = self._chat_panel
+        # Navigating the loom tree mid-generation logically abandons the
+        # in-flight turn — the active pointer has moved elsewhere.  Stop
+        # the worker so its tokens stop chasing a widget we're about to
+        # detach; its ``("done",)`` sentinel still drains cleanly through
+        # ``_poll_generation`` (which reads ``_current_assistant_widget``,
+        # set to ``None`` just below).
+        if self._session.is_generating:
+            self._session.stop()
+        chat.clear_log()
+        self._assistant_messages.clear()
+        self._row_for_widget.clear()
+        self._current_assistant_widget = None
+        # Resolve the highlight probe the same way ``_apply_highlight_to_all``
+        # does, then seed it on each widget *before* mount — ``_apply_static``
+        # (deferred to ``on_mount``) reads ``_highlight_on`` / ``_highlight_probe``
+        # when it renders, so the navigated-to history comes up already
+        # tinted without a post-mount sweep.  Probe scores aren't persisted
+        # on loom nodes, so probe-mode falls back to plain text; surprise
+        # mode survives on the per-token logprobs carried in the token rows.
+        if self._highlighting and self._highlight_probe != SURPRISE_PROBE:
+            nav_probe = self._trait_panel.get_selected_probe()
+            if nav_probe is not None:
+                self._highlight_probe = nav_probe
+        probe = self._highlight_probe if self._highlighting else None
+        tree = self._session.tree
+        for node in tree.active_path():
+            if node.id == tree.root_id:
+                continue
+            if node.role == "user":
+                chat.add_user_message(node.text)
+            elif node.role == "assistant":
+                resp_rows = node.tokens or []
+                think_rows = node.thinking_tokens or []
+                resp_tokens = [str(r.get("text", "")) for r in resp_rows]
+                think_tokens = [str(r.get("text", "")) for r in think_rows]
+                thinking_text = "".join(think_tokens)
+                row, widget = chat.add_finalized_assistant(
+                    node.text, thinking_text,
+                    response_tokens=resp_tokens or None,
+                    thinking_tokens=think_tokens or None,
+                    response_logprobs=[r.get("logprob") for r in resp_rows] or None,
+                    thinking_logprobs=[r.get("logprob") for r in think_rows] or None,
+                )
+                widget.apply_highlight(self._highlighting, probe)
+                self._assistant_messages.append(widget)
+                self._row_for_widget[id(widget)] = row
+        chat.scroll_to_bottom()
+
     def _do_rewind(self) -> None:
         if not self._messages:
             self._chat_panel.add_system_message("Nothing to rewind.")
@@ -1905,9 +1966,9 @@ class SaklasApp(App[None]):
         Loads ``~/.saklas/conversations/<name>.json`` (written by
         ``/save``) and swaps it in wholesale — all branches restored.
         The deserialized tree has no event bus or conflict-check hook,
-        so both are rewired here.  The chat log is cleared; it
-        re-renders along the loaded tree's active path on the next
-        message (``Ctrl+L`` inspects the tree immediately).
+        so both are rewired here.  The chat log is repainted along the
+        loaded tree's active path immediately (``Ctrl+L`` inspects the
+        full tree).
         """
         from saklas.core.loom import LoomTree, LoomTreeError
 
@@ -1944,15 +2005,14 @@ class SaklasApp(App[None]):
         if self._session._monitor is not None:
             self._session._monitor.reset_history()
 
-        # Drop the stale chat log + assistant-widget bookkeeping; the
-        # loaded tree's active path renders on the next turn.
-        self._chat_panel.clear_log()
-        self._assistant_messages.clear()
-        self._row_for_widget.clear()
+        # Repaint the chat log along the loaded tree's active path so the
+        # conversation is visible immediately (loaded nodes carry no
+        # per-token scores — see ``_repaint_chat_from_active_path``).
+        self._repaint_chat_from_active_path()
         self._refresh_left_panel()
         chat.add_system_message(
             f"loaded tree from {path} ({len(loaded.nodes)} nodes) — "
-            f"chat re-renders on next message; Ctrl+L to view the tree"
+            f"Ctrl+L to view the tree"
         )
 
     def _handle_export(self, arg: str) -> None:
@@ -2385,6 +2445,7 @@ class SaklasApp(App[None]):
         except Exception as e:
             chat.add_system_message(f"navigate failed: {e}")
             return
+        self._repaint_chat_from_active_path()
         chat.add_system_message(f"navigated to {match.node_id[:8]}")
 
     def action_nav_picker(self) -> None:

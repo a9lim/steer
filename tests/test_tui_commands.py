@@ -91,6 +91,13 @@ def _make_app():
     chat = MagicMock()
     chat.messages = []
     chat.add_system_message = lambda msg: chat.messages.append(msg)
+    # ``_repaint_chat_from_active_path`` (loom navigation / ``/load``)
+    # unpacks the ``(row, widget)`` tuple ``add_finalized_assistant``
+    # returns — give the default mock a real tuple so the repaint path
+    # doesn't trip over MagicMock's empty ``__iter__``.
+    chat.add_finalized_assistant = MagicMock(
+        return_value=(MagicMock(), MagicMock()),
+    )
     app._chat_panel = chat
 
     trait = MagicMock()

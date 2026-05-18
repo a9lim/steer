@@ -119,6 +119,11 @@ class _AssistantMessage(Vertical):
         self._highlight_on: bool = False
         self._highlight_probe: str | None = None
 
+        # Finalized content staged before the content Statics are wired.
+        # Textual mounts asynchronously, so ``set_static_content`` (the
+        # loom-repaint path) stashes here and ``on_mount`` applies it.
+        self._pending_static: dict[str, Any] | None = None
+
     def compose(self) -> ComposeResult:
         yield Static("[bold ansi_green]Assistant:[/]")
         with Collapsible(title="Thinking...", id="thinking-block", classes="hidden"):
@@ -129,6 +134,9 @@ class _AssistantMessage(Vertical):
         self._thinking_block = self.query_one("#thinking-block", Collapsible)
         self._thinking_view = self.query_one("#thinking-view", Static)
         self._response_view = self.query_one("#response-view", Static)
+        if self._pending_static is not None:
+            self._apply_static(self._pending_static)
+            self._pending_static = None
 
     # -- Streaming --
 
@@ -151,6 +159,77 @@ class _AssistantMessage(Vertical):
         tb = self._thinking_block
         if tb is not None and not tb.collapsed and not tb.has_class("hidden"):
             tb.collapsed = True
+
+    # -- Static (finalized) content --
+
+    def set_static_content(
+        self,
+        response_text: str,
+        thinking_text: str = "",
+        *,
+        response_tokens: list[str] | None = None,
+        thinking_tokens: list[str] | None = None,
+        response_logprobs: list[float | None] | None = None,
+        thinking_logprobs: list[float | None] | None = None,
+    ) -> None:
+        """Populate a finalized assistant message in one shot.
+
+        Used when repainting the chat log along a navigated loom path —
+        the node's text is already complete, so there's no streaming.
+        Per-token strings / logprobs are optional: when present they let
+        surprise-mode highlighting survive a navigation; per-probe scores
+        aren't persisted on loom nodes, so probe highlight stays plain.
+        Deferred to ``on_mount`` when the content widgets aren't wired
+        yet (Textual mounts asynchronously).
+        """
+        payload: dict[str, Any] = {
+            "response_text": response_text,
+            "thinking_text": thinking_text,
+            "response_tokens": list(response_tokens or []),
+            "thinking_tokens": list(thinking_tokens or []),
+            "response_logprobs": list(response_logprobs or []),
+            "thinking_logprobs": list(thinking_logprobs or []),
+        }
+        if self._response_view is None:
+            self._pending_static = payload
+        else:
+            self._apply_static(payload)
+
+    def _apply_static(self, payload: dict[str, Any]) -> None:
+        resp_tokens = payload["response_tokens"]
+        think_tokens = payload["thinking_tokens"]
+        # Prefer per-token text so the escaped body matches the highlight
+        # token list exactly (loaded trees carry no tokens — fall back to
+        # the node's canonical text).
+        if resp_tokens:
+            self._escaped_chat_text = "".join(_rich_escape(t) for t in resp_tokens)
+        else:
+            self._escaped_chat_text = _rich_escape(payload["response_text"])
+        if think_tokens:
+            self._escaped_thinking_text = "".join(
+                _rich_escape(t) for t in think_tokens
+            )
+        else:
+            self._escaped_thinking_text = _rich_escape(payload["thinking_text"])
+        self._streamed_response_tokens = list(resp_tokens)
+        self._streamed_thinking_tokens = list(think_tokens)
+        self.response_token_strs = list(resp_tokens)
+        self.thinking_token_strs = list(think_tokens)
+        self._response_logprobs = list(payload["response_logprobs"])
+        self._thinking_logprobs = list(payload["thinking_logprobs"])
+        self._response_probe_scores = {}
+        self._thinking_probe_scores = {}
+        self._response_markup_cache.clear()
+        self._thinking_markup_cache.clear()
+        tb = self._thinking_block
+        if tb is not None:
+            if payload["thinking_text"] or think_tokens:
+                tb.remove_class("hidden")
+                tb.collapsed = True
+            else:
+                tb.add_class("hidden")
+        self._render_response()
+        self._render_thinking()
 
     # -- Highlight data --
 
@@ -536,6 +615,39 @@ class ChatPanel(Widget):
         Returns ``(row, primary_widget)``.
         """
         widget = _AssistantMessage(classes="assistant-message")
+        placeholder = _build_shadow_placeholder()
+        row = _TurnRow(
+            kind="assistant", primary_child=widget, shadow_child=placeholder,
+        )
+        self._log_mounted.mount(row)
+        return row, widget
+
+    def add_finalized_assistant(
+        self,
+        response_text: str,
+        thinking_text: str = "",
+        *,
+        response_tokens: list[str] | None = None,
+        thinking_tokens: list[str] | None = None,
+        response_logprobs: list[float | None] | None = None,
+        thinking_logprobs: list[float | None] | None = None,
+    ) -> tuple[_TurnRow, _AssistantMessage]:
+        """Mount a fully-rendered (non-streaming) assistant turn-row.
+
+        Counterpart to ``start_assistant_message`` for the loom-repaint
+        path — the node's text is complete, so the widget is populated
+        in one shot rather than token-by-token.  Returns ``(row, widget)``
+        so the caller can keep the same widget / row bookkeeping it does
+        for streamed turns.
+        """
+        widget = _AssistantMessage(classes="assistant-message")
+        widget.set_static_content(
+            response_text, thinking_text,
+            response_tokens=response_tokens,
+            thinking_tokens=thinking_tokens,
+            response_logprobs=response_logprobs,
+            thinking_logprobs=thinking_logprobs,
+        )
         placeholder = _build_shadow_placeholder()
         row = _TurnRow(
             kind="assistant", primary_child=widget, shadow_child=placeholder,

@@ -572,7 +572,7 @@ class LoomScreen(Screen[None]):
             self._refresh_detail()
             self._refresh_header()
             return
-        self._app.pop_screen()
+        self._return_to_chat()
 
     def action_cursor_down(self) -> None:
         if self._tree_widget is not None:
@@ -666,6 +666,21 @@ class LoomScreen(Screen[None]):
                 self._session.tree.navigate(cur)
             except UnknownNodeError:
                 pass
+        self._return_to_chat()
+
+    def _return_to_chat(self) -> None:
+        """Pop back to the chat screen, repainting the chat log so it
+        shows the (possibly newly-navigated / mutated) active path.
+
+        Every exit from the loom screen routes through here — navigation
+        via ``Space``/``Enter`` and structural mutations (edit, branch,
+        delete) all change the active path, and the chat panel must
+        reflect it rather than the turns last streamed into it.
+        """
+        try:
+            self._app._repaint_chat_from_active_path()
+        except Exception:
+            pass
         self._app.pop_screen()
 
     def action_set_active(self) -> None:
