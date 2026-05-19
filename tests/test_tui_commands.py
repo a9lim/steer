@@ -1015,14 +1015,50 @@ def test_handle_unprobe_namespace_keeps_highlight_when_seed_outside_namespace():
 # ---- Input history (↑/↓ recall) ----
 
 
+class _FakeDocument:
+    """Minimal stand-in for ``textual.document.Document`` — enough of
+    the TextArea-side API for the input-history helpers to land cursor
+    placement and read line counts.  Lines are split on ``\\n`` so an
+    empty buffer reads as a single empty line (matches Textual)."""
+
+    def __init__(self, text: str = "") -> None:
+        self._lines = text.split("\n") if text else [""]
+
+    @property
+    def line_count(self) -> int:
+        return len(self._lines)
+
+    def get_line(self, row: int) -> str:
+        return self._lines[row]
+
+    def _set(self, text: str) -> None:
+        self._lines = text.split("\n") if text else [""]
+
+
 class _FakeInput:
-    """Stand-in for Textual ``Input`` exposing only what the recall
-    helpers touch — ``value`` and ``cursor_position``. Avoids mounting
-    a Textual app for unit-level coverage."""
+    """Stand-in for the :class:`ChatInput` (TextArea subclass) exposing
+    only the recall-helper surface: ``text`` (full buffer), ``load_text``
+    (replace), ``cursor_location`` (``(row, col)``), and ``document``
+    (line count + per-line access).  Avoids mounting a Textual app for
+    unit-level coverage of ``_history_navigate`` + ``_set_input_text``.
+    """
 
     def __init__(self, value: str = "") -> None:
-        self.value = value
-        self.cursor_position = len(value)
+        self._document = _FakeDocument(value)
+        last_row = self._document.line_count - 1
+        last_col = len(self._document.get_line(last_row))
+        self.cursor_location: tuple[int, int] = (last_row, last_col)
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self._document._lines)
+
+    @property
+    def document(self) -> _FakeDocument:
+        return self._document
+
+    def load_text(self, text: str) -> None:
+        self._document._set(text)
 
 
 def _wire_fake_input(app, value: str = "") -> _FakeInput:
@@ -1065,22 +1101,22 @@ def test_history_navigate_up_walks_back_and_stashes_draft():
 
     # First ↑: stash draft, jump to newest entry.
     app._history_navigate(-1)
-    assert inp.value == "three"
-    assert inp.cursor_position == len("three")
+    assert inp.text == "three"
+    assert inp.cursor_location == (0, len("three"))
     assert app._history_index == 2
     assert app._history_stash == "draft-in-progress"
 
     app._history_navigate(-1)
-    assert inp.value == "two"
+    assert inp.text == "two"
     assert app._history_index == 1
 
     app._history_navigate(-1)
-    assert inp.value == "one"
+    assert inp.text == "one"
     assert app._history_index == 0
 
     # Past the oldest pins to entry 0 — bash semantics, no wrap.
     app._history_navigate(-1)
-    assert inp.value == "one"
+    assert inp.text == "one"
     assert app._history_index == 0
 
 
@@ -1092,14 +1128,14 @@ def test_history_navigate_down_restores_stash_at_bottom():
     # Walk up twice then back down twice — should hit the stash.
     app._history_navigate(-1)  # → "beta"
     app._history_navigate(-1)  # → "alpha"
-    assert inp.value == "alpha"
+    assert inp.text == "alpha"
 
     app._history_navigate(+1)  # → "beta"
-    assert inp.value == "beta"
+    assert inp.text == "beta"
     assert app._history_index == 1
 
     app._history_navigate(+1)  # → restore stash, clear index
-    assert inp.value == "my draft"
+    assert inp.text == "my draft"
     assert app._history_index is None
     assert app._history_stash == ""
 
@@ -1111,7 +1147,7 @@ def test_history_navigate_down_at_live_slot_is_noop():
 
     app._history_navigate(+1)
     # No recall in flight — ↓ leaves the input alone.
-    assert inp.value == "fresh"
+    assert inp.text == "fresh"
     assert app._history_index is None
 
 
@@ -1121,7 +1157,7 @@ def test_history_navigate_empty_history_is_noop():
 
     app._history_navigate(-1)
     app._history_navigate(+1)
-    assert inp.value == "x"
+    assert inp.text == "x"
     assert app._history_index is None
 
 

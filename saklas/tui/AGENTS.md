@@ -6,7 +6,7 @@ Textual frontend over `SaklasSession`. Three panels — left (vectors), center (
 
 - `app.py` — `SaklasApp`; UI state, `BINDINGS`, `on_key`, slash-command handlers, generation workers, polling.
 - `commands.py` — slash-command registry (`SlashCommand` table + `dispatch`). Slash handling lives here, not in `app.py`'s dispatch.
-- `chat_panel.py` — `ChatPanel`, `_AssistantMessage`, `_TurnRow`; per-token highlight markup.
+- `chat_panel.py` — `ChatPanel`, `ChatInput`, `_AssistantMessage`, `_TurnRow`; per-token highlight markup.
 - `vector_panel.py` — `LeftPanel`; `MAX_ALPHA = 1.0`.
 - `trait_panel.py` — `TraitPanel`; probe list + WHY/LAYERS histogram.
 - `loom_screen.py` / `loom_helpers.py` — full-screen loom navigator + formatting helpers.
@@ -38,9 +38,11 @@ Namespace bulk forms (`/steer ns/`, `/probe ns/`, `/unsteer ns/`, `/unprobe ns/`
 
 Chat-screen `BINDINGS` (`SaklasApp`): `Ctrl+Q` quit · `Backspace`/`Delete` remove vector · `Ctrl+A` A/B · `Esc` stop gen · `Ctrl+R` regen · `Ctrl+C` copy · `Ctrl+T` thinking · `Ctrl+S` sort · `Ctrl+Y` / `Ctrl+Shift+Y` highlight-mode cycle · `Ctrl+L` loom · `Ctrl+E` edit · `Ctrl+B` branch · `Ctrl+N` nav · `Ctrl+D` delete · `Ctrl+Enter` / `Alt+Enter` commit (no-gen send) · `[` `]` temp · `{` `}` top-p.
 
-`Ctrl+Enter` and `Alt+Enter` are bound with `priority=True` so the Input widget can't swallow them when the chat input is focused. `Alt+Enter` is the cross-terminal fallback — legacy stacks without the CSI-u / kitty keyboard protocol collapse `Ctrl+Enter` to bare `Enter`, but `Alt+Enter` reaches the app on every common terminal.
+`Ctrl+Enter` and `Alt+Enter` are bound with `priority=True` so the chat input widget can't swallow them. `Alt+Enter` is the cross-terminal fallback — but on stock macOS Terminal.app and iTerm2 neither passes through without a config tweak: Terminal.app needs "Use Option as Meta key" enabled, iTerm2 needs the "Esc+" mode for the Option key. Modern terminals with the CSI-u / kitty keyboard protocol (Ghostty, Kitty, WezTerm) get both for free.
 
-`on_key` handles the rest contextually. Input-focused: `Tab`/`Shift+Tab` switch panels; `↑`/`↓` recall input history (chat input only). Panel-focused: `Tab` cycle panels, `↑`/`↓` nav within panel, `←`/`→` nudge alpha by `_ALPHA_STEP_FINE = 0.01`, `Shift+←`/`Shift+→` by `_ALPHA_STEP_COARSE = 0.1` (both clamp to `MAX_ALPHA`), `Enter` toggle vector. The shift-arrow variants live in `on_key`, not `BINDINGS`, because arrow handling is already context-gated.
+Most app-level `Ctrl+letter` shortcuts that collide with the `ChatInput` editor bindings (`Ctrl+A` → line-start, `Ctrl+C` → copy, `Ctrl+D` → delete-right, `Ctrl+E` → line-end, `Ctrl+Y` → redo) carry `priority=True` so the app shortcut wins when the input is focused. The non-colliding editor verbs TextArea ships with (`Ctrl+W` delete-word-left, `Ctrl+U` delete-to-line-start, `Ctrl+K` delete-to-line-end, `Ctrl+V`/`Ctrl+X`/`Ctrl+Z` clipboard + undo) keep working — nothing at the app layer claims them.
+
+`on_key` handles the rest contextually. Input-focused: `Tab`/`Shift+Tab` switch panels; `↑`/`↓` recall input history (chat input only, *edge-only* — recall fires when the cursor sits on the first/last row of the multi-line buffer, otherwise the arrow falls through to TextArea's cursor nav). Panel-focused: `Tab` cycle panels, `↑`/`↓` nav within panel, `←`/`→` nudge alpha by `_ALPHA_STEP_FINE = 0.01`, `Shift+←`/`Shift+→` by `_ALPHA_STEP_COARSE = 0.1` (both clamp to `MAX_ALPHA`), `Enter` toggle vector. The shift-arrow variants live in `on_key`, not `BINDINGS`, because arrow handling is already context-gated.
 
 Gotcha: `Ctrl+H` can never fire — terminals send `0x08`, which Textual hard-maps to `backspace` before binding resolution. Same byte collision hits `Ctrl+Shift+H` on terminals without shift reporting; this is why the highlight cycle is on `Ctrl+Y`.
 
@@ -105,6 +107,8 @@ Gotchas:
 **Trait panel** (`trait_panel.py`): two lines per probe — `> <name> <sparkline>` then `<bar> <val><arrow>`. Full untruncated names; `_nav_items` is `list[str]`. The bottom WHY footer (`#why-header`, set to literal `LAYERS` by `update_why`) shows `||baked||` per layer as a horizontal histogram bucketed into `HIST_BUCKETS = 16` groups (from `saklas.core.histogram`, shared with `cli vector why`). Driven by `_refresh_trait_why()` on trait nav / probe add-remove / finalize / clear / mount — not per streamed token. No `/why` command.
 
 **Chat panel** (`chat_panel.py`): Markdown-free — user + assistant messages are plain `Static` widgets with Rich-escaped text. `_AssistantMessage` holds two content `Static`s (`#thinking-view`, `#response-view`) plus a `Collapsible` for thinking. Tokens escaped once on append. `append_token_score` adds live scores; `set_token_data` overwrites with canonical projected scores at finalize. Highlight saturation is fixed at `_HIGHLIGHT_SAT = 0.5`; zero scores get no background span. `_render_response` lstrips leading whitespace and `_build_highlight_markup` skips leading whitespace-only tokens (models emit `\n\n` after `</think>`). Thinking-block CSS zeroes Textual's `Collapsible` padding; transitions go through idempotent `ensure_thinking_collapsed()`.
+
+**Chat input** (`ChatInput` in `chat_panel.py`): multi-line `TextArea` subclass. `Enter` submits via `ChatInput.Submitted` (re-posted by `ChatPanel.on_chat_input_submitted` as `ChatPanel.UserSubmitted`); `Shift+Enter` inserts a literal newline. Both behaviors live in an `_on_key` override — TextArea's default `_on_key` only treats bare `enter` as a newline insert, so `shift+enter` would otherwise be dropped. `placeholder` carries the modifier-hint cheat sheet. CSS sizes it `height: auto` with `min-height: 3`, `max-height: 10` so the buffer grows with content up to a soft cap.
 
 ## Status footer
 

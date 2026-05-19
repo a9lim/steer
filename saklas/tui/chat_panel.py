@@ -6,9 +6,10 @@ from collections import OrderedDict
 from typing import Any
 
 from rich.markup import escape as _rich_escape
+from textual import events as _textual_events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Static, Input, Collapsible
+from textual.widgets import Static, TextArea, Collapsible
 from textual.widget import Widget
 from textual.message import Message
 
@@ -459,6 +460,50 @@ class _TurnRow(Horizontal):
         return self._shadow
 
 
+class ChatInput(TextArea):
+    """Multi-line chat input on top of ``TextArea``.
+
+    Differs from the underlying widget in two ways:
+
+    - **Enter submits.** Bare ``Enter`` posts a :class:`Submitted`
+      message and clears the buffer.  ``Shift+Enter`` inserts a literal
+      newline (TextArea's default ``Enter`` behavior moved one key over).
+    - **Cursor-aware history pass-through.** ``↑``/``↓`` only walk the
+      input-history ring when the cursor is on the first/last row of
+      the buffer; mid-buffer they fall through to TextArea's cursor
+      navigation.  The history walk itself lives in
+      ``SaklasApp._history_navigate`` — we just gate the event here.
+
+    Submission goes through a widget-local ``Submitted`` message so the
+    enclosing :class:`ChatPanel` re-posts it as ``UserSubmitted`` (the
+    same contract callers depend on for prefill / commit dispatch).
+    """
+
+    class Submitted(Message):
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    async def _on_key(self, event: _textual_events.Key) -> None:
+        # Bare Enter submits; Shift+Enter falls through to a literal
+        # newline insert.  Anything else hands off to TextArea's default
+        # ``_on_key`` (printable chars, etc.).
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            text = self.text.strip()
+            if text:
+                self.load_text("")
+                self.post_message(self.Submitted(text))
+            return
+        if event.key == "shift+enter":
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
+
+
 class ChatPanel(Widget):
 
     class UserSubmitted(Message):
@@ -481,7 +526,15 @@ class ChatPanel(Widget):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="chat-log")
         yield Static("", id="status-bar")
-        yield Input(placeholder="Type a message...", id="chat-input")
+        # Multi-line chat input.  ``show_line_numbers=False`` keeps the
+        # editor chrome out; ``soft_wrap=True`` is the TextArea default
+        # (long lines wrap visually without changing the underlying
+        # newlines).  Height grows with content up to a CSS-side cap.
+        yield ChatInput(
+            placeholder="Type a message...  (shift+enter newline)",
+            id="chat-input",
+            show_line_numbers=False,
+        )
 
     def on_mount(self) -> None:
         self._log = self.query_one("#chat-log", VerticalScroll)
@@ -501,15 +554,16 @@ class ChatPanel(Widget):
         assert self._status_bar is not None, "ChatPanel._status_bar accessed before on_mount"
         return self._status_bar
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
-        event.input.value = ""
-        # The user-row mount is the app's call, not ours: on a user-role
-        # active loom node a typed message is an assistant prefill, not a
-        # new user turn, and only the app knows the active node's role.
-        # ``on_chat_panel_user_submitted`` mounts the row for normal sends.
+        # ChatInput already cleared its buffer; just re-post under the
+        # canonical ChatPanel message.  The user-row mount is the app's
+        # call, not ours: on a user-role active loom node a typed message
+        # is an assistant prefill, not a new user turn, and only the app
+        # knows the active node's role.  ``on_chat_panel_user_submitted``
+        # mounts the row for normal sends.
         self.post_message(self.UserSubmitted(text))
 
     def set_prefill_mode(self, on: bool) -> None:
@@ -522,13 +576,13 @@ class ChatPanel(Widget):
         :meth:`set_ab_mode`'s app-driven-flag shape.
         """
         try:
-            inp = self.query_one("#chat-input", Input)
+            inp = self.query_one("#chat-input", ChatInput)
         except Exception:
             return
         inp.placeholder = (
-            "Prefill the assistant's reply…  (ctrl+enter = commit as full turn)"
+            "Prefill the assistant's reply…  (shift+enter newline · ctrl/alt+enter = commit as full turn)"
             if on
-            else "Type a message...  (ctrl+enter = commit, no generation)"
+            else "Type a message...  (shift+enter newline · ctrl/alt+enter = commit, no generation)"
         )
 
     # -- AB mode --

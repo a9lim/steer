@@ -1149,11 +1149,19 @@ def test_user_submitted_on_user_node_defers_prefill_target_in_pending():
 
 
 def _stub_chat_input(app: SaklasApp, value: str) -> MagicMock:
-    """Wire the chat panel's ``query_one('#chat-input', Input)`` to a
-    MagicMock carrying ``value``.  ``action_commit_text`` reads the
-    input widget directly, so each test needs a one-line stub. """
+    """Wire the chat panel's ``query_one('#chat-input', ChatInput)`` to a
+    MagicMock carrying ``value`` as ``text``.  ``action_commit_text``
+    reads the TextArea-backed widget via ``.text`` and clears it via
+    ``load_text("")``, so the stub needs both attached.  We also keep
+    ``text`` writable (assigning to it updates the backing string) so
+    the post-action assertion ``inp.text == ""`` works after the
+    handler's ``load_text("")`` call.
+    """
     inp = MagicMock()
-    inp.value = value
+    inp.text = value
+    # Make ``load_text`` mutate ``inp.text`` so empty-buffer assertions
+    # after the action match what the real ChatInput does.
+    inp.load_text = MagicMock(side_effect=lambda t: setattr(inp, "text", t))
     app._chat_panel.query_one = MagicMock(return_value=inp)
     return inp
 
@@ -1171,7 +1179,7 @@ def test_commit_action_on_assistant_node_routes_to_commit_user():
     app.action_commit_text()
     app._start_commit_user.assert_called_once_with("new question")
     app._start_commit_assistant.assert_not_called()
-    assert inp.value == ""
+    assert inp.text == ""
     assert "new question" in app._input_history
 
 
@@ -1188,7 +1196,7 @@ def test_commit_action_on_user_node_routes_to_commit_assistant():
     app.action_commit_text()
     app._start_commit_assistant.assert_called_once_with(uid, "the full reply")
     app._start_commit_user.assert_not_called()
-    assert inp.value == ""
+    assert inp.text == ""
 
 
 def test_commit_action_empty_input_is_noop():
@@ -1201,7 +1209,7 @@ def test_commit_action_empty_input_is_noop():
     app.action_commit_text()
     app._start_commit_user.assert_not_called()
     app._start_commit_assistant.assert_not_called()
-    assert inp.value == "   "
+    assert inp.text == "   "
     assert app._input_history == []
 
 

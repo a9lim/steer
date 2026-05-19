@@ -14,7 +14,6 @@ import torch
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Input
 from textual.timer import Timer
 from textual import events as _textual_events
 
@@ -26,7 +25,12 @@ from saklas.io.paths import saklas_home
 from saklas.io.probes_bootstrap import load_defaults
 from saklas.core.results import ResultCollector
 from saklas.core.session import MIN_ELAPSED_FOR_RATE
-from saklas.tui.chat_panel import ChatPanel, _AssistantMessage, _TurnRow
+from saklas.tui.chat_panel import (
+    ChatInput,
+    ChatPanel,
+    _AssistantMessage,
+    _TurnRow,
+)
 from saklas.tui.vector_panel import LeftPanel, MAX_ALPHA
 from saklas.tui.trait_panel import TraitPanel
 
@@ -132,10 +136,21 @@ class SaklasApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("backspace", "remove_vector", "Remove", show=False),
         Binding("delete", "remove_vector", "Remove", show=False),
-        Binding("ctrl+a", "ab_compare", "A/B", show=False),
+        # ``priority=True`` on every Ctrl+letter app shortcut that
+        # collides with the multi-line ``ChatInput`` (TextArea) defaults:
+        # without it, the focused input would steal the key for its own
+        # editor binding.  Concretely TextArea binds ``ctrl+a`` →
+        # line-start, ``ctrl+c`` → copy, ``ctrl+d`` → delete-right,
+        # ``ctrl+e`` → line-end, ``ctrl+y`` → redo — all of which would
+        # otherwise hijack the corresponding app shortcuts while the
+        # chat input is focused.  Non-colliding TextArea editor bindings
+        # (``ctrl+w``/``ctrl+u``/``ctrl+k``/``ctrl+v``/``ctrl+x``/
+        # ``ctrl+z``) keep working — those are useful editor verbs and
+        # nothing at the app layer wants them.
+        Binding("ctrl+a", "ab_compare", "A/B", show=False, priority=True),
         Binding("escape", "stop_generation", "Stop", show=False),
         Binding("ctrl+r", "regenerate", "Regen", show=False),
-        Binding("ctrl+c", "copy_selection", "Copy", show=False),
+        Binding("ctrl+c", "copy_selection", "Copy", show=False, priority=True),
         Binding("ctrl+t", "toggle_thinking", "Think", show=False),
         Binding("ctrl+s", "cycle_sort", "Sort", show=False),
         # Highlight: a single three-state cycle {off → probe → surprise}
@@ -145,16 +160,16 @@ class SaklasApp(App[None]):
         # ``ctrl+h`` binding can never fire.  Ctrl+Shift+Y degrades
         # gracefully to a forward step on terminals that can't report
         # the shift, vs. Ctrl+Shift+H degrading to backspace.
-        Binding("ctrl+y", "cycle_highlight_mode", "HL cycle", show=False),
+        Binding("ctrl+y", "cycle_highlight_mode", "HL cycle", show=False, priority=True),
         Binding(
             "ctrl+shift+y", "cycle_highlight_mode_back",
             "HL cycle back", show=False,
         ),
         Binding("ctrl+l", "open_loom", "Loom", show=False),
-        Binding("ctrl+e", "edit_active", "Edit", show=False),
+        Binding("ctrl+e", "edit_active", "Edit", show=False, priority=True),
         Binding("ctrl+b", "branch_active", "Branch", show=False),
         Binding("ctrl+n", "nav_picker", "Nav", show=False),
-        Binding("ctrl+d", "delete_subtree", "Del", show=False),
+        Binding("ctrl+d", "delete_subtree", "Del", show=False, priority=True),
         # Commit (no-generation send): Ctrl+Enter is the canonical binding
         # — Alt+Enter is the cross-terminal fallback for terminals that
         # don't pass Ctrl+Enter through (legacy stacks without the
@@ -363,7 +378,7 @@ class SaklasApp(App[None]):
     # -- Key Handling --
 
     def on_key(self, event: _textual_events.Key) -> None:
-        if isinstance(self.focused, Input):
+        if isinstance(self.focused, ChatInput):
             if event.key == "tab":
                 event.prevent_default()
                 event.stop()
@@ -372,16 +387,22 @@ class SaklasApp(App[None]):
                 event.prevent_default()
                 event.stop()
                 self.action_focus_prev_panel()
-            elif (
-                event.key in ("up", "down")
-                and getattr(self.focused, "id", None) == "chat-input"
-            ):
-                # Shell-style history recall on the chat input only.
-                # ``Input`` is single-line, so up/down have no native
-                # cursor-movement meaning to override.
-                event.prevent_default()
-                event.stop()
-                self._history_navigate(-1 if event.key == "up" else +1)
+            elif event.key in ("up", "down"):
+                # Shell-style history recall on the chat input — but
+                # *edge-only* so multi-line editing keeps its native
+                # cursor nav.  ``↑`` only recalls when the cursor sits
+                # on the first row; ``↓`` only when it's on the last
+                # row.  Mid-buffer arrows fall through to TextArea's
+                # ``cursor_up`` / ``cursor_down``.
+                inp = self.focused
+                at_edge = (
+                    inp.cursor_at_first_line if event.key == "up"
+                    else inp.cursor_at_last_line
+                )
+                if at_edge:
+                    event.prevent_default()
+                    event.stop()
+                    self._history_navigate(-1 if event.key == "up" else +1)
             return
 
         key = event.key
@@ -1317,15 +1338,14 @@ class SaklasApp(App[None]):
         the commit lands once the current gen finishes — mounting a row
         mid-stream would interleave UI in confusing ways.
         """
-        from textual.widgets import Input as _Input
         try:
-            inp = self._chat_panel.query_one("#chat-input", _Input)
+            inp = self._chat_panel.query_one("#chat-input", ChatInput)
         except Exception:
             return
-        text = inp.value.strip()
+        text = inp.text.strip()
         if not text:
             return
-        inp.value = ""
+        inp.load_text("")
         self._push_input_history(text)
 
         # Role-aware target: ``_prefill_target_node_id`` returns the
@@ -2116,11 +2136,15 @@ class SaklasApp(App[None]):
         so a ↓ past the newest entry restores it. Bounds clamp at the
         top (no error past the oldest); the bottom returns to the live
         stash and clears the recall cursor.
+
+        The chat input is a multi-line :class:`ChatInput` (TextArea), so
+        the recalled text replaces the entire buffer via ``load_text``
+        and the cursor lands at the end of the last line.
         """
         if not self._input_history:
             return
         try:
-            inp = self.query_one("#chat-input", Input)
+            inp = self.query_one("#chat-input", ChatInput)
         except Exception:
             return
 
@@ -2128,7 +2152,7 @@ class SaklasApp(App[None]):
             if delta > 0:
                 # Already at the live slot — ↓ is a no-op.
                 return
-            self._history_stash = inp.value
+            self._history_stash = inp.text
             self._history_index = len(self._input_history) - 1
         else:
             new_idx = self._history_index + delta
@@ -2140,15 +2164,24 @@ class SaklasApp(App[None]):
                 # Walked past the newest entry — restore the stash and
                 # reset the cursor so the next ↑ re-stashes fresh input.
                 self._history_index = None
-                inp.value = self._history_stash
-                inp.cursor_position = len(inp.value)
+                self._set_input_text(inp, self._history_stash)
                 self._history_stash = ""
                 return
             else:
                 self._history_index = new_idx
 
-        inp.value = self._input_history[self._history_index]
-        inp.cursor_position = len(inp.value)
+        self._set_input_text(inp, self._input_history[self._history_index])
+
+    @staticmethod
+    def _set_input_text(inp: ChatInput, text: str) -> None:
+        """Replace the chat input's content and park the cursor at the
+        end of the last line — the equivalent of ``Input.value = text;
+        cursor_position = len(value)`` for the TextArea-backed input.
+        """
+        inp.load_text(text)
+        last_row = inp.document.line_count - 1
+        last_col = len(inp.document.get_line(last_row))
+        inp.cursor_location = (last_row, last_col)
 
     def _handle_seed(self, arg: str) -> None:
         chat = self._chat_panel

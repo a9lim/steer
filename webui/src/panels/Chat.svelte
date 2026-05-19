@@ -104,17 +104,24 @@
   );
   const onUserNode = $derived(activeNode?.role === "user");
 
-  // --- Ctrl/Cmd modifier ------------------------------------------------
-  // Held Ctrl (or Cmd on macOS) flips the input into "commit" mode:
-  // the typed text lands as the next turn but no generation runs.  On
-  // an assistant/root node, that turn is a new user node; on a user
-  // node, it's an authored assistant turn (the full reply, not a
-  // prefilled seed).  Tracked at the window level so the modifier state
-  // survives focus blur on the textarea and we can swap the send-button
-  // caption without waiting for a keypress.
-  let ctrlHeld = $state(false);
-  /** True when the modifier is held *and* there's something to commit. */
-  const commitMode = $derived(ctrlHeld && input.trim() !== "");
+  // --- Commit modifier (Ctrl / Cmd / Option) ----------------------------
+  // Any of Ctrl, Cmd (⌘), or Option (⌥) held flips the input into
+  // "commit" mode: the typed text lands as the next turn but no
+  // generation runs.  On an assistant/root node, that turn is a new user
+  // node; on a user node, it's an authored assistant turn (the full
+  // reply, not a prefilled seed).  Tracked at the window level so the
+  // state survives textarea blur and we can swap the send-button caption
+  // the moment the modifier comes down — without needing the user to
+  // type anything first.
+  let modHeld = $state(false);
+  /** True whenever the modifier is held, regardless of input content —
+   *  so the label flips and gives the user visual confirmation that the
+   *  modifier registered.  The button's disabled gate (below) still
+   *  refuses to submit an empty commit. */
+  const commitMode = $derived(modHeld);
+  /** Empty input in commit mode is a no-op (we can't commit nothing).
+   *  Used by both the disabled gate and tryCommit's early return. */
+  const canCommit = $derived(commitMode && input.trim() !== "");
 
   const inputPlaceholder = $derived(
     commitMode
@@ -122,25 +129,28 @@
           ? "commit as the assistant turn (no generation)…"
           : "commit as a user turn (no generation)…")
       : (onUserNode
-          ? "prefill the assistant's reply…  (enter on empty = generate fresh · ctrl-enter = commit as full turn · shift-enter newline)"
-          : "message…  (enter to send · ctrl-enter = commit, no generation · shift-enter newline)"),
+          ? "prefill the assistant's reply…  (enter on empty = generate fresh · ctrl/⌘/⌥-enter = commit as full turn · shift-enter newline)"
+          : "message…  (enter to send · ctrl/⌘/⌥-enter = commit, no generation · shift-enter newline)"),
   );
-  /** Send-button caption tracks the role-aware action; the Ctrl modifier
-   *  overrides both prefill and send with a "commit" register. */
+  /** Send-button caption tracks the role-aware action; any held commit
+   *  modifier overrides both prefill and send with a "commit" register. */
   const sendLabel = $derived(
     commitMode
       ? (onUserNode ? "commit assistant" : "commit user")
       : (onUserNode ? (input.trim() ? "prefill" : "generate") : "send"),
   );
 
-  /** Shared commit dispatch — used by both Ctrl+Enter and a Ctrl-click
-   *  on the send button.  Returns true when it claimed the action so the
-   *  caller knows not to fall through to the normal send/prefill path. */
+  /** Shared commit dispatch — used by both Ctrl/Cmd/Option+Enter and a
+   *  modified-click on the send button.  Returns true when it claimed
+   *  the action (including the empty-input no-op), so the caller knows
+   *  not to fall through to the normal send/prefill path: the modifier
+   *  explicitly means "don't generate," so an empty commit silently
+   *  consumes rather than degrading to a regenerate. */
   function tryCommit(): boolean {
     const text = input.trim();
-    if (!text) return false;
+    if (!text) return true;  // no-op, but consume
     if (onUserNode) {
-      if (!activeNodeId) return false;
+      if (!activeNodeId) return true;
       pushInputHistory(text);
       input = "";
       void sendCommit("assistant", activeNodeId, text);
@@ -160,9 +170,9 @@
   }
 
   function doSend(commit: boolean = false): void {
-    // Ctrl-modified path: commit the text as the next turn without
-    // running a decode.  Falls through to the normal send/prefill flow
-    // when the commit can't apply (empty / no active node).
+    // Modifier-held path: commit the text as the next turn without
+    // running a decode.  tryCommit always consumes the action when
+    // commit is true — empty input no-ops silently.
     if (commit && tryCommit()) return;
     // Role-aware branch: on a user node the input seeds the assistant
     // reply rather than appending a new user turn.
@@ -232,11 +242,14 @@
 
   function onKeydown(ev: KeyboardEvent): void {
     if (ev.key === "Enter") {
-      // Shift-Enter is a newline; Ctrl/Cmd-Enter is the commit modifier
-      // (no generation); bare Enter is the normal send/prefill path.
+      // Shift-Enter is a newline; Ctrl/Cmd/Option-Enter is the commit
+      // modifier (no generation); bare Enter is the normal send/prefill
+      // path.  Reading the modifier flags off the event directly is
+      // more reliable than ``modHeld`` (which lags on focus-blur edge
+      // cases) — at the moment of Enter the event carries the truth.
       if (ev.shiftKey) return;
       ev.preventDefault();
-      doSend(ev.ctrlKey || ev.metaKey);
+      doSend(ev.ctrlKey || ev.metaKey || ev.altKey);
       return;
     }
     if (ev.key === "Escape" && genStatus.active) {
@@ -478,17 +491,21 @@
     scrollToBottom();
     textareaRef?.focus();
 
-    // Track Ctrl/Cmd at the window level so the send-button label flips
-    // the moment the user presses the modifier, not only when they hit
-    // Enter.  ``ev.ctrlKey``/``ev.metaKey`` are also present on the
-    // synthetic event flag, so we read both to cover modifier-only
-    // presses on every platform (Mac Cmd uses ``metaKey``; Linux/Windows
-    // Ctrl uses ``ctrlKey``).
+    // Track any commit modifier at the window level so the send-button
+    // label flips the moment the user presses it, not only when they
+    // hit Enter.  We read all three flags off the event so the modifier
+    // works across platforms and key layouts:
+    //   Ctrl → ``ctrlKey``  — Linux / Windows / Mac Ctrl
+    //   Cmd  → ``metaKey``  — Mac (⌘)
+    //   Option / Alt → ``altKey``  — Mac (⌥) / non-Mac Alt
+    // Browsers report all three correctly for both modifier-only
+    // keydown and the keydown of a non-modifier key while the modifier
+    // is held — and they go false on keyup of the modifier.
     const setHeld = (ev: KeyboardEvent) => {
-      ctrlHeld = ev.ctrlKey || ev.metaKey;
+      modHeld = ev.ctrlKey || ev.metaKey || ev.altKey;
     };
     const clearHeld = () => {
-      ctrlHeld = false;
+      modHeld = false;
     };
     window.addEventListener("keydown", setHeld);
     window.addEventListener("keyup", setHeld);
@@ -843,7 +860,7 @@
 
   <StatusFooter />
 
-  <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(ctrlHeld); }}>
+  <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(modHeld); }}>
     <textarea
       class="input"
       class:prefill-mode={onUserNode}
@@ -858,10 +875,10 @@
       <button
         type="submit"
         class="send"
-        disabled={!input.trim() && !onUserNode}
+        disabled={!input.trim() && (commitMode || !onUserNode)}
         title={onUserNode
-          ? "On a user node: empty = generate a fresh reply, text = prefill the reply · Ctrl-click = commit as the full assistant turn (no generation)"
-          : "Enter to send · Ctrl-click = commit as a user turn (no generation) · Shift-Enter newline"}
+          ? "On a user node: empty = generate a fresh reply, text = prefill the reply · Ctrl/⌘/⌥-click = commit as the full assistant turn (no generation)"
+          : "Enter to send · Ctrl/⌘/⌥-click = commit as a user turn (no generation) · Shift-Enter newline"}
       >{sendLabel}</button>
       <button
         type="button"

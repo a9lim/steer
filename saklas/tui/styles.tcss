@@ -121,8 +121,18 @@ Widget {
     padding: 0 1;
 }
 
+/* ChatInput (TextArea subclass): single visible row by default, grows
+ * with content up to a small cap so the chat log stays the focus of the
+ * screen.  ``height: auto`` lets the widget hug its content; the
+ * min/max bound the visible rows.  ``dock: bottom`` pins it under the
+ * status bar.  Background/border match the surrounding ansi theme so
+ * the multi-line variant blends in the same way the old single-line
+ * Input did.
+ */
 #chat-input {
-    height: 3;
+    height: auto;
+    min-height: 3;
+    max-height: 10;
     dock: bottom;
     border: solid ansi_default;
     background: ansi_default;
@@ -134,7 +144,11 @@ Widget {
     border: solid ansi_default;
 }
 
-#chat-input > .input--selection {
+/* TextArea exposes its selection style through ``.text-area--selection``
+ * (vs the old ``Input.input--selection``).  Keep the inverted look so
+ * a selection stays visible against the ansi background.
+ */
+#chat-input > .text-area--selection {
     background: ansi_white;
     color: ansi_black;
 }
