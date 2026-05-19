@@ -306,6 +306,17 @@ export interface WSGenerateRequest {
    *  answer).  ``steering`` / ``sampling`` / ``n`` ride through. */
   prefill_node_id?: string | null;
   prefill_text?: string | null;
+  /** Commit (Ctrl+Enter on either surface): land a turn under
+   *  ``parent_node_id`` without running a decode.  ``commit_role="user"``
+   *  routes to ``session.append_user_turn`` (active node must not be a
+   *  user node); ``commit_role="assistant"`` routes to
+   *  ``session.append_assistant_turn`` (``parent_node_id`` must be the
+   *  user node the authored turn hangs off).  Mutually exclusive with
+   *  prefill and fork; ``input`` / ``steering`` / ``sampling`` /
+   *  ``thinking`` / ``n`` are ignored.  Both fields must travel
+   *  together. */
+  commit_role?: "user" | "assistant" | null;
+  commit_text?: string | null;
 }
 
 export interface WSStopRequest {

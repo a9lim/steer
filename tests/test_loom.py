@@ -501,6 +501,153 @@ def test_d15_engine_check_passes_for_explicit_grandparent():
 
 
 # ---------------------------------------------------------------------------
+# Authored turns — session.append_user_turn / append_assistant_turn
+# ---------------------------------------------------------------------------
+# These exercise the Ctrl+Enter "commit" primitives.  Both methods only
+# touch ``self.tree`` and ``self._tokenizer``; binding them onto a minimal
+# stub lets us unit-test the contract without loading a model.
+
+
+def _bind_commit_methods(tree: LoomTree, tokenizer):
+    from saklas.core.session import SaklasSession
+    stub = type(
+        "S", (),
+        {
+            "tree": tree,
+            "_tokenizer": tokenizer,
+            # ``append_user_turn`` reaches into ``_check_user_send_target``
+            # for the D15 guard; bind the unbound method onto the same
+            # stub so the lookup chain resolves.
+            "_check_user_send_target":
+                SaklasSession._check_user_send_target,
+        },
+    )()
+    return (
+        SaklasSession.append_user_turn.__get__(stub, type(stub)),
+        SaklasSession.append_assistant_turn.__get__(stub, type(stub)),
+    )
+
+
+def test_append_user_turn_lands_under_root():
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    append_user, _ = _bind_commit_methods(t, MagicMock())
+    new_id = append_user(None, "hi")
+    assert t.nodes[new_id].role == "user"
+    assert t.nodes[new_id].text == "hi"
+    assert t.active_node_id == new_id
+
+
+def test_append_user_turn_refuses_under_user_node():
+    """D15 — sending a user turn under a user node is forbidden, same
+    rule the normal-send path enforces."""
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    t.add_user_turn("hi")  # active = u1, a user node
+    append_user, _ = _bind_commit_methods(t, MagicMock())
+    with pytest.raises(InvalidNodeOperationError, match="cannot send a new user turn"):
+        append_user(None, "more")
+
+
+def test_append_user_turn_dedups_same_text_sibling():
+    """``add_user_turn``'s dedup applies — re-issuing the same text under
+    the same parent returns the existing sibling rather than growing
+    the tree."""
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    u1 = t.add_user_turn("hi")
+    a1 = t.begin_assistant(u1)
+    t.finalize_assistant(a1, text="hello")
+    t.navigate(a1)
+    append_user, _ = _bind_commit_methods(t, MagicMock())
+    u2 = append_user(None, "more")
+    t.navigate(a1)
+    u2b = append_user(None, "more")
+    assert u2b == u2
+
+
+def test_append_user_turn_empty_text_raises():
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    append_user, _ = _bind_commit_methods(t, MagicMock())
+    with pytest.raises(InvalidNodeOperationError, match="non-empty"):
+        append_user(None, "")
+
+
+def test_append_assistant_turn_lands_under_user_with_tokenization():
+    """Happy path — an authored assistant turn lands as a sibling under
+    the user node, ``raw_token_ids`` is populated by the tokenizer, and
+    ``recipe`` stays ``None`` as the implicit authored marker."""
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    u1 = t.add_user_turn("hi")
+    tok = MagicMock()
+    tok.encode.return_value = [10, 20, 30]
+    _, append_assistant = _bind_commit_methods(t, tok)
+    new_id = append_assistant(u1, "the reply")
+    node = t.nodes[new_id]
+    assert node.role == "assistant"
+    assert node.text == "the reply"
+    assert node.raw_token_ids == [10, 20, 30]
+    assert node.recipe is None
+    assert node.finish_reason == "stop"
+    # Authored turns carry no per-token scores — clearing the empty
+    # blobs that ``begin_assistant`` seeded matches the transcript-loaded
+    # node shape so renderers treat them the same.
+    assert node.tokens is None
+    assert node.thinking_tokens is None
+    assert t.active_node_id == new_id
+    tok.encode.assert_called_once_with("the reply", add_special_tokens=False)
+
+
+def test_append_assistant_turn_refuses_non_user_parent():
+    from unittest.mock import MagicMock
+    t = _seed_tree()  # leaf is an assistant
+    aid = t.active_node_id
+    _, append_assistant = _bind_commit_methods(t, MagicMock())
+    with pytest.raises(InvalidNodeOperationError, match="not a user node"):
+        append_assistant(aid, "reply")
+
+
+def test_append_assistant_turn_empty_text_raises():
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    u1 = t.add_user_turn("hi")
+    _, append_assistant = _bind_commit_methods(t, MagicMock())
+    with pytest.raises(InvalidNodeOperationError, match="non-empty"):
+        append_assistant(u1, "")
+
+
+def test_append_assistant_turn_refuses_empty_tokenization():
+    """Whitespace-only text that tokenizes to nothing isn't a turn —
+    refuse rather than land a no-content authored node."""
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    u1 = t.add_user_turn("hi")
+    tok = MagicMock()
+    tok.encode.return_value = []
+    _, append_assistant = _bind_commit_methods(t, tok)
+    with pytest.raises(InvalidNodeOperationError, match="tokenized to an empty"):
+        append_assistant(u1, "   ")
+
+
+def test_append_assistant_turn_lands_sibling_of_in_flight_assistant():
+    """An authored assistant can land alongside an in-flight streaming
+    assistant under the same user — they're independent siblings."""
+    from unittest.mock import MagicMock
+    t = LoomTree()
+    u1 = t.add_user_turn("hi")
+    streaming = t.begin_assistant(u1)  # in-flight, not finalized
+    tok = MagicMock()
+    tok.encode.return_value = [99]
+    _, append_assistant = _bind_commit_methods(t, tok)
+    authored = append_assistant(u1, "manual")
+    assert authored != streaming
+    assert t.nodes[authored].parent_id == u1
+    assert t.nodes[streaming].parent_id == u1
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 

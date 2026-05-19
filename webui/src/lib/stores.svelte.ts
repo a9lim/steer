@@ -1807,6 +1807,32 @@ export async function sendPrefill(
   else sock.addEventListener("open", send, { once: true });
 }
 
+/** Commit — land a turn without generating.  ``role`` decides which
+ *  session method routes: ``"user"`` for ``append_user_turn`` (called
+ *  on an assistant/root active node — ``parentNodeId`` is that node, or
+ *  null to fall through to the active node server-side); ``"assistant"``
+ *  for ``append_assistant_turn`` (``parentNodeId`` is the user node the
+ *  authored turn hangs off — required).  The server emits a single
+ *  ``done`` event with the new node id; the loom's ``node_created`` /
+ *  ``tree_mutated`` subscriptions land the node in the UI.  No token
+ *  streaming, no steering, no sampling — just a tree mutation. */
+export async function sendCommit(
+  role: "user" | "assistant",
+  parentNodeId: string | null,
+  text: string,
+): Promise<void> {
+  const sock = await ensureWebSocket();
+  const payload: WSClientMessage = {
+    type: "generate",
+    commit_role: role,
+    commit_text: text,
+    parent_node_id: parentNodeId,
+  };
+  const send = () => sock.send(JSON.stringify(payload));
+  if (sock.readyState === WebSocket.OPEN) send();
+  else sock.addEventListener("open", send, { once: true });
+}
+
 export function sendStop(): void {
   if (
     wsConn.socket &&

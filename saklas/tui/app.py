@@ -155,6 +155,14 @@ class SaklasApp(App[None]):
         Binding("ctrl+b", "branch_active", "Branch", show=False),
         Binding("ctrl+n", "nav_picker", "Nav", show=False),
         Binding("ctrl+d", "delete_subtree", "Del", show=False),
+        # Commit (no-generation send): Ctrl+Enter is the canonical binding
+        # — Alt+Enter is the cross-terminal fallback for terminals that
+        # don't pass Ctrl+Enter through (legacy stacks without the
+        # CSI-u / kitty keyboard protocol collapse Ctrl+Enter to bare
+        # Enter).  Priority so the Input widget can't swallow them when
+        # the chat input is focused.
+        Binding("ctrl+enter", "commit_text", "Commit", show=False, priority=True),
+        Binding("alt+enter", "commit_text", "Commit", show=False, priority=True),
         Binding("[", "temp_down", show=False),
         Binding("]", "temp_up", show=False),
         Binding("{", "top_p_down", show=False),
@@ -1294,6 +1302,109 @@ class SaklasApp(App[None]):
 
         self.run_worker(_prefill, thread=True)
 
+    # -- Commit (no-generation send) --
+
+    def action_commit_text(self) -> None:
+        """Commit chat-input text as the next turn without generating.
+
+        ``Ctrl+Enter`` / ``Alt+Enter`` from the chat input.  Role-aware:
+        on a user-role active node the text becomes the full assistant
+        turn (``session.append_assistant_turn``); on any non-user active
+        node it becomes a new user turn
+        (``session.append_user_turn``).  No decode, no streaming.
+
+        Queues behind an in-flight generation via ``_pending_action`` so
+        the commit lands once the current gen finishes — mounting a row
+        mid-stream would interleave UI in confusing ways.
+        """
+        from textual.widgets import Input as _Input
+        try:
+            inp = self._chat_panel.query_one("#chat-input", _Input)
+        except Exception:
+            return
+        text = inp.value.strip()
+        if not text:
+            return
+        inp.value = ""
+        self._push_input_history(text)
+
+        # Role-aware target: ``_prefill_target_node_id`` returns the
+        # active user-node id when on a user turn; the commit there
+        # authors the whole assistant reply.  Otherwise we commit a new
+        # user turn under the active node.
+        user_node_id = self._prefill_target_node_id()
+
+        if self._session.is_generating:
+            kind = (
+                "commit_assistant" if user_node_id is not None else "commit_user"
+            )
+            payload = (kind, text, user_node_id) if user_node_id is not None else (kind, text)
+            self._pending_action = payload
+            self._session.stop()
+            return
+        if user_node_id is not None:
+            self._start_commit_assistant(user_node_id, text)
+        else:
+            self._start_commit_user(text)
+
+    def _start_commit_user(self, text: str) -> None:
+        """Land a user turn under the active node without generating.
+
+        Mounts the user row up front so the commit feels instant; the
+        session method runs on a worker thread to keep the UI responsive
+        even on a slow-tokenize text.  On failure (e.g. active is itself
+        a user node) we surface a system message and skip the mount via
+        a post-mount remove.
+        """
+        row = self._chat_panel.add_user_message(text)
+
+        def _commit() -> None:
+            try:
+                self._session.append_user_turn(None, text)
+                self.call_from_thread(self._refresh_input_mode)
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+
+                def _rollback() -> None:
+                    try:
+                        row.remove()
+                    except Exception:
+                        pass
+                    self._chat_panel.add_system_message(f"commit failed: {msg}")
+                self.call_from_thread(_rollback)
+
+        self.run_worker(_commit, thread=True)
+
+    def _start_commit_assistant(self, user_node_id: str, text: str) -> None:
+        """Land an authored assistant turn under ``user_node_id``.
+
+        Mounts a finalized assistant row with ``text`` already populated
+        (no streaming) and routes through ``session.append_assistant_turn``
+        on a worker thread.  Highlight goes plain — authored turns carry
+        no per-token scores.
+        """
+        row, widget = self._chat_panel.add_finalized_assistant(text)
+        self._row_for_widget[id(widget)] = row
+        if self._highlighting:
+            widget.apply_highlight(True, self._highlight_probe)
+
+        def _commit() -> None:
+            try:
+                self._session.append_assistant_turn(user_node_id, text)
+                self.call_from_thread(self._refresh_input_mode)
+            except BaseException as e:
+                msg = e.user_message()[1] if isinstance(e, SaklasError) else str(e)
+
+                def _rollback() -> None:
+                    try:
+                        row.remove()
+                    except Exception:
+                        pass
+                    self._chat_panel.add_system_message(f"commit failed: {msg}")
+                self.call_from_thread(_rollback)
+
+        self.run_worker(_commit, thread=True)
+
     def _poll_generation(self) -> None:
         chat = self._chat_panel
         tokens_consumed = 0
@@ -2290,6 +2401,16 @@ class SaklasApp(App[None]):
                     self._start_prefill(target, pending[1])
                 else:
                     self._start_generation(pending[1])
+            elif kind == "commit_user":
+                # ``("commit_user", text)`` — Ctrl+Enter from a non-user
+                # active node, queued behind in-flight gen.  The role
+                # decision was made at submit time so we don't re-resolve
+                # it here (the active node may have shifted during gen).
+                self._start_commit_user(pending[1])
+            elif kind == "commit_assistant":
+                # ``("commit_assistant", text, user_node_id)`` — Ctrl+Enter
+                # from a user node, queued behind in-flight gen.
+                self._start_commit_assistant(pending[2], pending[1])
             elif kind == "clear":
                 self._do_clear()
             elif kind == "rewind":

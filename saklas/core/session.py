@@ -2677,6 +2677,101 @@ class SaklasSession:
             forced_prefix=forced_prefix,
         )
 
+    # -- Authored turns (no-generation commits) --
+
+    def append_user_turn(
+        self,
+        parent_node_id: str | None,
+        text: str,
+    ) -> str:
+        """Land a user turn under ``parent_node_id`` without generating.
+
+        The Ctrl+Enter "commit" on the chat surfaces: the typed text
+        lands as a user-role child and the active node advances, but no
+        decode runs.  The follow-up move is usually to type a prefill
+        and hit Enter (which then routes through
+        :meth:`prefill_assistant`) — together these let a user assemble
+        a turn pair manually.
+
+        Refuses anchoring under a user-role parent
+        (:meth:`_check_user_send_target`) — that would corrupt the
+        v2 chat-message flatten by producing user-under-user.  Dedup is
+        on: a same-text user sibling under ``parent_node_id`` is
+        returned without growing the tree, matching the regen workflow.
+        Returns the new (or deduped) user node id.
+
+        ``text`` must be non-empty (whitespace-only is honored, but a
+        completely empty string raises) — empty commits should be
+        no-op'd at the surface, not sent over the wire.
+        """
+        if text == "":
+            raise InvalidNodeOperationError(
+                "append_user_turn: text must be non-empty"
+            )
+        self._check_user_send_target(parent_node_id)
+        return self.tree.add_user_turn(text, parent_id=parent_node_id)
+
+    def append_assistant_turn(
+        self,
+        user_node_id: str,
+        text: str,
+    ) -> str:
+        """Land a user-authored assistant turn under ``user_node_id``.
+
+        The Ctrl+Enter "commit" on a user node: the typed text becomes
+        the whole assistant turn — no sampling, no steering, no
+        thinking.  The result is a sibling assistant under
+        ``user_node_id`` whose ``text`` is exactly the typed text, with
+        ``raw_token_ids`` populated by ``tokenizer.encode(text,
+        add_special_tokens=False)`` so the node remains forkable.
+        ``recipe`` stays ``None`` — that's the implicit "no model run
+        produced this" marker, the same shape transcript-loaded nodes
+        already carry.
+
+        Raises :class:`InvalidNodeOperationError` when ``user_node_id``
+        isn't a user node, when ``text`` is empty, or when it tokenizes
+        to an empty sequence.  Returns the new assistant node id; the
+        loom's active node advances to it.
+        """
+        if text == "":
+            raise InvalidNodeOperationError(
+                "append_assistant_turn: text must be non-empty"
+            )
+        node = self.tree.get(user_node_id)
+        if node.role != "user":
+            raise InvalidNodeOperationError(
+                f"append_assistant_turn: {user_node_id!r} is a "
+                f"{node.role} node, not a user node — an authored "
+                f"assistant turn hangs off a user turn"
+            )
+        raw_token_ids = list(
+            self._tokenizer.encode(text, add_special_tokens=False)
+        )
+        if not raw_token_ids:
+            raise InvalidNodeOperationError(
+                f"append_assistant_turn: {text!r} tokenized to an "
+                f"empty sequence — nothing to commit"
+            )
+
+        new_id = self.tree.begin_assistant(user_node_id, recipe=None)
+        # Drop the empty token blobs ``begin_assistant`` seeded — an
+        # authored turn has no per-token scores; ``None`` matches the
+        # transcript-loaded shape so renderers/saves treat it the same.
+        try:
+            authored = self.tree.nodes[new_id]
+            authored.tokens = None
+            authored.thinking_tokens = None
+        except KeyError:  # pragma: no cover — begin_assistant just added it
+            pass
+        self.tree.finalize_assistant(
+            new_id,
+            text=text,
+            applied_steering=None,
+            finish_reason="stop",
+            raw_token_ids=raw_token_ids,
+        )
+        return new_id
+
     # -- History / loom tree --
 
     def _check_user_send_target(self, parent_node_id: str | None) -> None:

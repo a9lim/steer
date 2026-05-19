@@ -36,7 +36,9 @@ Namespace bulk forms (`/steer ns/`, `/probe ns/`, `/unsteer ns/`, `/unprobe ns/`
 
 ## Keybindings
 
-Chat-screen `BINDINGS` (`SaklasApp`): `Ctrl+Q` quit · `Backspace`/`Delete` remove vector · `Ctrl+A` A/B · `Esc` stop gen · `Ctrl+R` regen · `Ctrl+C` copy · `Ctrl+T` thinking · `Ctrl+S` sort · `Ctrl+Y` / `Ctrl+Shift+Y` highlight-mode cycle · `Ctrl+L` loom · `Ctrl+E` edit · `Ctrl+B` branch · `Ctrl+N` nav · `Ctrl+D` delete · `[` `]` temp · `{` `}` top-p.
+Chat-screen `BINDINGS` (`SaklasApp`): `Ctrl+Q` quit · `Backspace`/`Delete` remove vector · `Ctrl+A` A/B · `Esc` stop gen · `Ctrl+R` regen · `Ctrl+C` copy · `Ctrl+T` thinking · `Ctrl+S` sort · `Ctrl+Y` / `Ctrl+Shift+Y` highlight-mode cycle · `Ctrl+L` loom · `Ctrl+E` edit · `Ctrl+B` branch · `Ctrl+N` nav · `Ctrl+D` delete · `Ctrl+Enter` / `Alt+Enter` commit (no-gen send) · `[` `]` temp · `{` `}` top-p.
+
+`Ctrl+Enter` and `Alt+Enter` are bound with `priority=True` so the Input widget can't swallow them when the chat input is focused. `Alt+Enter` is the cross-terminal fallback — legacy stacks without the CSI-u / kitty keyboard protocol collapse `Ctrl+Enter` to bare `Enter`, but `Alt+Enter` reaches the app on every common terminal.
 
 `on_key` handles the rest contextually. Input-focused: `Tab`/`Shift+Tab` switch panels; `↑`/`↓` recall input history (chat input only). Panel-focused: `Tab` cycle panels, `↑`/`↓` nav within panel, `←`/`→` nudge alpha by `_ALPHA_STEP_FINE = 0.01`, `Shift+←`/`Shift+→` by `_ALPHA_STEP_COARSE = 0.1` (both clamp to `MAX_ALPHA`), `Enter` toggle vector. The shift-arrow variants live in `on_key`, not `BINDINGS`, because arrow handling is already context-gated.
 
@@ -53,6 +55,8 @@ Live probe scores stream only when probe highlighting is active (`_wants_live_pr
 Role-aware send: when the active loom node is a *user* turn, a typed message composes the assistant reply (answer-prefill) rather than a new user turn. `on_chat_panel_user_submitted` resolves `_prefill_target_node_id()` once at submit time and carries it in the `("submit", text, prefill_target)` pending tuple. Prefill routes to `_start_prefill` → `session.prefill_assistant`, streaming through the same `_ui_token_queue` (no live probe scores on this path). `chat_panel.set_prefill_mode(on)` flips the input placeholder; `_refresh_input_mode()` syncs it to the active node.
 
 `chat_panel.on_input_submitted` does not mount the user row (it can't know the active-node role) — it just posts `UserSubmitted`; `on_chat_panel_user_submitted` mounts it for normal sends, skips it for prefills.
+
+`Ctrl+Enter` / `Alt+Enter` is the commit (no-generation) path: `action_commit_text` reads the input value directly off the `#chat-input` widget, branches on `_prefill_target_node_id()` (user-role active node → `_start_commit_assistant` → `session.append_assistant_turn`; otherwise → `_start_commit_user` → `session.append_user_turn`), and mounts the row up front. Mid-gen commits queue behind via `_pending_action = ("commit_user", text)` or `("commit_assistant", text, user_node_id)`; `_dispatch_pending_action` handles both kinds. Commit workers don't stream — the row mounts finalized (via `chat_panel.add_finalized_assistant` for the assistant case, `add_user_message` for the user case) and the session method runs on a thread; on failure the optimistic row is removed and a system message is surfaced.
 
 Any conflicting action (`Ctrl+R`, new message, modifying slash command) calls `session.stop()` and stashes on `_pending_action`; `_poll_generation` consumes the `("done",)` sentinel and runs `_dispatch_pending_action`.
 

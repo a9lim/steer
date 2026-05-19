@@ -38,6 +38,7 @@
     clearSessionHistory,
     rewindSession,
     sendPrefill,
+    sendCommit,
     loomRegenerateFromUser,
     enqueuePending,
     toggleAutoRegen,
@@ -102,17 +103,67 @@
     activeNodeId ? (loomTree.nodes.get(activeNodeId) ?? null) : null,
   );
   const onUserNode = $derived(activeNode?.role === "user");
+
+  // --- Ctrl/Cmd modifier ------------------------------------------------
+  // Held Ctrl (or Cmd on macOS) flips the input into "commit" mode:
+  // the typed text lands as the next turn but no generation runs.  On
+  // an assistant/root node, that turn is a new user node; on a user
+  // node, it's an authored assistant turn (the full reply, not a
+  // prefilled seed).  Tracked at the window level so the modifier state
+  // survives focus blur on the textarea and we can swap the send-button
+  // caption without waiting for a keypress.
+  let ctrlHeld = $state(false);
+  /** True when the modifier is held *and* there's something to commit. */
+  const commitMode = $derived(ctrlHeld && input.trim() !== "");
+
   const inputPlaceholder = $derived(
-    onUserNode
-      ? "prefill the assistant's reply…  (enter on empty = generate fresh · shift-enter newline)"
-      : "message…  (enter to send · shift-enter newline)",
+    commitMode
+      ? (onUserNode
+          ? "commit as the assistant turn (no generation)…"
+          : "commit as a user turn (no generation)…")
+      : (onUserNode
+          ? "prefill the assistant's reply…  (enter on empty = generate fresh · ctrl-enter = commit as full turn · shift-enter newline)"
+          : "message…  (enter to send · ctrl-enter = commit, no generation · shift-enter newline)"),
   );
-  /** Send-button caption tracks the role-aware action. */
+  /** Send-button caption tracks the role-aware action; the Ctrl modifier
+   *  overrides both prefill and send with a "commit" register. */
   const sendLabel = $derived(
-    onUserNode ? (input.trim() ? "prefill" : "generate") : "send",
+    commitMode
+      ? (onUserNode ? "commit assistant" : "commit user")
+      : (onUserNode ? (input.trim() ? "prefill" : "generate") : "send"),
   );
 
-  function doSend(): void {
+  /** Shared commit dispatch — used by both Ctrl+Enter and a Ctrl-click
+   *  on the send button.  Returns true when it claimed the action so the
+   *  caller knows not to fall through to the normal send/prefill path. */
+  function tryCommit(): boolean {
+    const text = input.trim();
+    if (!text) return false;
+    if (onUserNode) {
+      if (!activeNodeId) return false;
+      pushInputHistory(text);
+      input = "";
+      void sendCommit("assistant", activeNodeId, text);
+    } else {
+      // Active node is root/assistant.  Pass it as the parent so the
+      // server anchors the new user node under it (active-node fall-
+      // through would do the same, but explicit avoids races with any
+      // mid-flight active-node swap).
+      pushInputHistory(text);
+      input = "";
+      void sendCommit("user", activeNodeId, text);
+    }
+    scrolledUp = false;
+    queueScrollToBottom();
+    queueMicrotask(autosize);
+    return true;
+  }
+
+  function doSend(commit: boolean = false): void {
+    // Ctrl-modified path: commit the text as the next turn without
+    // running a decode.  Falls through to the normal send/prefill flow
+    // when the commit can't apply (empty / no active node).
+    if (commit && tryCommit()) return;
     // Role-aware branch: on a user node the input seeds the assistant
     // reply rather than appending a new user turn.
     if (onUserNode && activeNodeId) {
@@ -181,10 +232,11 @@
 
   function onKeydown(ev: KeyboardEvent): void {
     if (ev.key === "Enter") {
-      // Cmd/Ctrl-Enter always sends; bare Enter sends; Shift-Enter newline.
+      // Shift-Enter is a newline; Ctrl/Cmd-Enter is the commit modifier
+      // (no generation); bare Enter is the normal send/prefill path.
       if (ev.shiftKey) return;
       ev.preventDefault();
-      doSend();
+      doSend(ev.ctrlKey || ev.metaKey);
       return;
     }
     if (ev.key === "Escape" && genStatus.active) {
@@ -425,6 +477,30 @@
     autosize();
     scrollToBottom();
     textareaRef?.focus();
+
+    // Track Ctrl/Cmd at the window level so the send-button label flips
+    // the moment the user presses the modifier, not only when they hit
+    // Enter.  ``ev.ctrlKey``/``ev.metaKey`` are also present on the
+    // synthetic event flag, so we read both to cover modifier-only
+    // presses on every platform (Mac Cmd uses ``metaKey``; Linux/Windows
+    // Ctrl uses ``ctrlKey``).
+    const setHeld = (ev: KeyboardEvent) => {
+      ctrlHeld = ev.ctrlKey || ev.metaKey;
+    };
+    const clearHeld = () => {
+      ctrlHeld = false;
+    };
+    window.addEventListener("keydown", setHeld);
+    window.addEventListener("keyup", setHeld);
+    // ``blur`` covers tab-out / window-switch where the keyup never
+    // fires — without it the label sticks in "commit" mode after the
+    // user Cmd-Tabs away mid-modifier.
+    window.addEventListener("blur", clearHeld);
+    return () => {
+      window.removeEventListener("keydown", setHeld);
+      window.removeEventListener("keyup", setHeld);
+      window.removeEventListener("blur", clearHeld);
+    };
   });
 
   // ----------------------------------------------------------- token render --
@@ -767,7 +843,7 @@
 
   <StatusFooter />
 
-  <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(); }}>
+  <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(ctrlHeld); }}>
     <textarea
       class="input"
       class:prefill-mode={onUserNode}
@@ -784,8 +860,8 @@
         class="send"
         disabled={!input.trim() && !onUserNode}
         title={onUserNode
-          ? "On a user node: empty = generate a fresh reply, text = prefill the reply"
-          : "Enter to send · Shift-Enter newline"}
+          ? "On a user node: empty = generate a fresh reply, text = prefill the reply · Ctrl-click = commit as the full assistant turn (no generation)"
+          : "Enter to send · Ctrl-click = commit as a user turn (no generation) · Shift-Enter newline"}
       >{sendLabel}</button>
       <button
         type="button"

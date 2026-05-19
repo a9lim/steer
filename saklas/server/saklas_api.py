@@ -30,7 +30,7 @@ import json
 import time
 import uuid
 from dataclasses import replace as _replace
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -153,6 +153,16 @@ class WSGenerateMessage(BaseModel):
     # ``sampling`` / ``n`` are honored as on a normal generate.
     prefill_node_id: str | None = None
     prefill_text: str | None = None
+    # Commit (Ctrl+Enter on either surface): land a turn under
+    # ``parent_node_id`` without running a decode.  ``commit_role="user"``
+    # routes to ``session.append_user_turn`` (active node must not be
+    # user); ``commit_role="assistant"`` routes to
+    # ``session.append_assistant_turn`` (parent must be a user node, the
+    # text becomes the whole turn).  Mutually exclusive with prefill and
+    # fork; ``input`` / ``steering`` / ``sampling`` / ``thinking`` / ``n``
+    # are ignored.  Both fields must travel together.
+    commit_role: Literal["user", "assistant"] | None = None
+    commit_text: str | None = None
 
 
 # --- Loom tree request bodies (phase 2) --------------------------------
@@ -2120,6 +2130,109 @@ async def _ws_handle_generate(
             "message": "a generate message cannot be both a fork and a prefill",
             "code": "ValueError",
             "status": 400,
+        })
+        return
+
+    # Commit (Ctrl+Enter on either surface): land a turn under
+    # ``parent_node_id`` without running a decode.  Short-circuits the
+    # n-way fan-out / streaming worker entirely — one mutation, one
+    # ``done`` event, no token frames.  Mutually exclusive with prefill
+    # and fork (rejected above by symmetry).
+    is_commit = msg.commit_role is not None
+    if is_commit:
+        if msg.commit_text is None or msg.commit_text == "":
+            await send_json({
+                "type": "error",
+                "message": "commit requires commit_role and commit_text together",
+                "code": "ValueError",
+                "status": 400,
+            })
+            return
+        if msg.commit_role not in ("user", "assistant"):
+            await send_json({
+                "type": "error",
+                "message": (
+                    f"commit_role must be 'user' or 'assistant', "
+                    f"got {msg.commit_role!r}"
+                ),
+                "code": "ValueError",
+                "status": 400,
+            })
+            return
+        if is_fork or is_prefill:
+            await send_json({
+                "type": "error",
+                "message": (
+                    "a generate message cannot mix commit with fork or prefill"
+                ),
+                "code": "ValueError",
+                "status": 400,
+            })
+            return
+        if msg.commit_role == "assistant" and parent_node_id is None:
+            await send_json({
+                "type": "error",
+                "message": (
+                    "commit_role='assistant' requires parent_node_id "
+                    "(the user node the authored turn hangs off)"
+                ),
+                "code": "ValueError",
+                "status": 400,
+            })
+            return
+
+        generation_id = uuid.uuid4().hex[:12]
+        commit_text = str(msg.commit_text)
+        await send_json({
+            "type": "started",
+            "generation_id": generation_id,
+            "node_id": None,
+            "sibling_index": 0,
+            "sibling_count": 1,
+        })
+        async with session.lock:
+            try:
+                if msg.commit_role == "user":
+                    new_id = await asyncio.to_thread(
+                        session.append_user_turn,
+                        parent_node_id,
+                        commit_text,
+                    )
+                else:
+                    # ``parent_node_id`` is non-None here (validated above
+                    # for the assistant role); narrow for the type-checker.
+                    assert parent_node_id is not None
+                    new_id = await asyncio.to_thread(
+                        session.append_assistant_turn,
+                        parent_node_id,
+                        commit_text,
+                    )
+            except SaklasError as e:
+                status, message = e.user_message()
+                await send_json({
+                    "type": "error",
+                    "message": message,
+                    "code": type(e).__name__,
+                    "status": status,
+                    "node_id": None,
+                    "sibling_index": 0,
+                })
+                return
+        await send_json({
+            "type": "done",
+            "result": {
+                "kind": "commit",
+                "role": msg.commit_role,
+                "text": commit_text,
+                "node_id": new_id,
+                "finish_reason": "stop",
+                "per_token_probes": [],
+                "mean_logprob": None,
+                "mean_surprise": None,
+            },
+            "node_id": new_id,
+            "sibling_index": 0,
+            "sibling_count": 1,
         })
         return
 

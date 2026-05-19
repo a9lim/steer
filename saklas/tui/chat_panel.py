@@ -526,7 +526,9 @@ class ChatPanel(Widget):
         except Exception:
             return
         inp.placeholder = (
-            "Prefill the assistant's reply…" if on else "Type a message..."
+            "Prefill the assistant's reply…  (ctrl+enter = commit as full turn)"
+            if on
+            else "Type a message...  (ctrl+enter = commit, no generation)"
         )
 
     # -- AB mode --

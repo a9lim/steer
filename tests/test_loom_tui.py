@@ -1141,3 +1141,119 @@ def test_user_submitted_on_user_node_defers_prefill_target_in_pending():
     assert app._pending_action == ("submit", "seed it", uid)
     app._start_prefill.assert_not_called()
     app._session.stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Commit (Ctrl+Enter / Alt+Enter) — no-generation send
+# ---------------------------------------------------------------------------
+
+
+def _stub_chat_input(app: SaklasApp, value: str) -> MagicMock:
+    """Wire the chat panel's ``query_one('#chat-input', Input)`` to a
+    MagicMock carrying ``value``.  ``action_commit_text`` reads the
+    input widget directly, so each test needs a one-line stub. """
+    inp = MagicMock()
+    inp.value = value
+    app._chat_panel.query_one = MagicMock(return_value=inp)
+    return inp
+
+
+def test_commit_action_on_assistant_node_routes_to_commit_user():
+    """Ctrl+Enter on a non-user active node lands a new user turn —
+    no generation — via ``_start_commit_user``."""
+    app = _make_app()
+    tree = app._session.tree
+    _uid, aid = _seed_tree(tree)
+    tree.navigate(aid)
+    inp = _stub_chat_input(app, "new question")
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app.action_commit_text()
+    app._start_commit_user.assert_called_once_with("new question")
+    app._start_commit_assistant.assert_not_called()
+    assert inp.value == ""
+    assert "new question" in app._input_history
+
+
+def test_commit_action_on_user_node_routes_to_commit_assistant():
+    """Ctrl+Enter on a user active node lands an authored assistant
+    turn via ``_start_commit_assistant``."""
+    app = _make_app()
+    tree = app._session.tree
+    uid, _aid = _seed_tree(tree)
+    tree.navigate(uid)
+    inp = _stub_chat_input(app, "the full reply")
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app.action_commit_text()
+    app._start_commit_assistant.assert_called_once_with(uid, "the full reply")
+    app._start_commit_user.assert_not_called()
+    assert inp.value == ""
+
+
+def test_commit_action_empty_input_is_noop():
+    """A whitespace-only commit drops on the floor — no dispatch, no
+    history push, no input clear."""
+    app = _make_app()
+    inp = _stub_chat_input(app, "   ")
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app.action_commit_text()
+    app._start_commit_user.assert_not_called()
+    app._start_commit_assistant.assert_not_called()
+    assert inp.value == "   "
+    assert app._input_history == []
+
+
+def test_commit_action_during_gen_queues_commit_user():
+    """Mid-gen Ctrl+Enter on a non-user node stashes the commit so the
+    deferred dispatch lands it once the streaming sibling finishes."""
+    app = _make_app()
+    tree = app._session.tree
+    _uid, aid = _seed_tree(tree)
+    tree.navigate(aid)
+    _stub_chat_input(app, "next bit")
+    app._session.is_generating = True
+    app._session.stop = MagicMock()
+    app._start_commit_user = MagicMock()
+    app.action_commit_text()
+    assert app._pending_action == ("commit_user", "next bit")
+    app._start_commit_user.assert_not_called()
+    app._session.stop.assert_called_once()
+
+
+def test_commit_action_during_gen_queues_commit_assistant_with_target():
+    """Mid-gen Ctrl+Enter on a user node stashes the user-node target so
+    the deferred dispatch can't re-resolve against a shifted active node."""
+    app = _make_app()
+    tree = app._session.tree
+    uid, _aid = _seed_tree(tree)
+    tree.navigate(uid)
+    _stub_chat_input(app, "the canned reply")
+    app._session.is_generating = True
+    app._session.stop = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app.action_commit_text()
+    assert app._pending_action == ("commit_assistant", "the canned reply", uid)
+    app._start_commit_assistant.assert_not_called()
+    app._session.stop.assert_called_once()
+
+
+def test_dispatch_pending_commit_user_routes_correctly():
+    """``_dispatch_pending_action(("commit_user", text))`` calls
+    ``_start_commit_user`` — the post-gen wakeup path."""
+    app = _make_app()
+    app._start_commit_user = MagicMock()
+    app._dispatch_pending_action(("commit_user", "queued text"))
+    app._start_commit_user.assert_called_once_with("queued text")
+
+
+def test_dispatch_pending_commit_assistant_routes_correctly():
+    """``_dispatch_pending_action(("commit_assistant", text, uid))`` calls
+    ``_start_commit_assistant`` with the stashed user-node target."""
+    app = _make_app()
+    tree = app._session.tree
+    uid, _aid = _seed_tree(tree)
+    app._start_commit_assistant = MagicMock()
+    app._dispatch_pending_action(("commit_assistant", "the reply", uid))
+    app._start_commit_assistant.assert_called_once_with(uid, "the reply")

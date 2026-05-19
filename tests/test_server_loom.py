@@ -256,6 +256,78 @@ class _StubSession:
             self._active_gen_reservation = None
         return result
 
+    # ----- commit entry points (Ctrl+Enter on either surface) ----------
+    def append_user_turn(self, parent_node_id, text):
+        """Stub commit-user.
+
+        Mirrors ``SaklasSession.append_user_turn``: refuses anchoring
+        under a user-role parent (the same D15 rule the normal-send
+        path enforces), otherwise wraps ``LoomTree.add_user_turn`` so
+        dedup + active-node advancement match the real session.
+        """
+        from saklas.core.loom import InvalidNodeOperationError
+        if text == "":
+            raise InvalidNodeOperationError(
+                "append_user_turn: text must be non-empty"
+            )
+        resolved_parent = (
+            parent_node_id
+            if parent_node_id is not None
+            else self.tree.active_node_id
+        )
+        parent = (
+            self.tree.nodes.get(resolved_parent)
+            if resolved_parent is not None
+            else None
+        )
+        if parent is not None and parent.role == "user":
+            raise InvalidNodeOperationError(
+                f"cannot send a new user turn from a user node "
+                f"({resolved_parent}): the active turn is already "
+                f"waiting for an assistant."
+            )
+        return self.tree.add_user_turn(text, parent_id=parent_node_id)
+
+    def append_assistant_turn(self, user_node_id, text):
+        """Stub commit-assistant.
+
+        Mirrors ``SaklasSession.append_assistant_turn``: refuses non-user
+        parents, lands a finalized assistant sibling under the user node
+        with ``text`` as the whole turn and a synthetic ``raw_token_ids``
+        derived from the (mocked) tokenizer.
+        """
+        from saklas.core.loom import InvalidNodeOperationError
+        if text == "":
+            raise InvalidNodeOperationError(
+                "append_assistant_turn: text must be non-empty"
+            )
+        node = self.tree.get(user_node_id)
+        if node.role != "user":
+            raise InvalidNodeOperationError(
+                f"append_assistant_turn: {user_node_id!r} is a "
+                f"{node.role} node, not a user node"
+            )
+        # Stub tokenization: one synthetic id per word so tests can
+        # assert ``raw_token_ids`` was populated without a real model.
+        raw_token_ids = [3000 + i for i, _ in enumerate(text.split())]
+        if not raw_token_ids:
+            raise InvalidNodeOperationError(
+                f"append_assistant_turn: {text!r} tokenized to an "
+                f"empty sequence"
+            )
+        new_id = self.tree.begin_assistant(user_node_id, recipe=None)
+        authored = self.tree.nodes[new_id]
+        authored.tokens = None
+        authored.thinking_tokens = None
+        self.tree.finalize_assistant(
+            new_id,
+            text=text,
+            applied_steering=None,
+            finish_reason="stop",
+            raw_token_ids=raw_token_ids,
+        )
+        return new_id
+
 
 @pytest.fixture
 def session_and_client():
@@ -758,3 +830,157 @@ class TestPrefill:
         assert len(assistant_children) == 1
         assistant = session.tree.get(assistant_children[0])
         assert assistant.text.startswith("It is sunny")
+
+
+# ---------------------------------------------------------------------------
+# WS: commit (Ctrl+Enter — no-generation send)
+# ---------------------------------------------------------------------------
+
+
+class TestCommit:
+    def test_missing_text_400(self, session_and_client):
+        """commit_role without commit_text is rejected before dispatch."""
+        _session, client = session_and_client
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({"type": "generate", "commit_role": "user"})
+            msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["status"] == 400
+        assert "commit" in msg["message"].lower()
+
+    def test_invalid_role_400(self, session_and_client):
+        _session, client = session_and_client
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "system",
+                "commit_text": "anything",
+            })
+            msg = ws.receive_json()
+        # Pydantic rejects the Literal-mismatch at parse time before the
+        # handler runs, so the error frame source can be either layer —
+        # both surface 400.
+        assert msg["type"] == "error"
+
+    def test_assistant_commit_requires_parent_400(self, session_and_client):
+        """``commit_role='assistant'`` without parent_node_id is rejected —
+        the authored turn has to hang off a known user node."""
+        _session, client = session_and_client
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "assistant",
+                "commit_text": "the answer",
+            })
+            msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["status"] == 400
+        assert "parent_node_id" in msg["message"]
+
+    def test_conflicts_with_prefill_400(self, session_and_client):
+        """A message can't be both a commit and a prefill."""
+        session, client = session_and_client
+        uid = session.tree.add_user_turn("seed me")
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "user",
+                "commit_text": "manual",
+                "prefill_node_id": uid,
+                "prefill_text": "It is",
+            })
+            msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["status"] == 400
+
+    def test_commit_user_lands_user_child(self, session_and_client):
+        """Ctrl+Enter on a non-user active node — server creates a user
+        child under the active node and acks with the new node id."""
+        session, client = session_and_client
+        root = session.tree.root_id
+        rev_before = session.tree.rev
+
+        started = None
+        done = None
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "user",
+                "commit_text": "manual user input",
+            })
+            while True:
+                msg = ws.receive_json()
+                t = msg["type"]
+                if t == "started":
+                    started = msg
+                elif t == "done":
+                    done = msg
+                    break
+
+        assert started is not None
+        assert started["node_id"] is None
+        assert done is not None
+        assert done["result"]["kind"] == "commit"
+        assert done["result"]["role"] == "user"
+        assert done["result"]["text"] == "manual user input"
+        assert done["node_id"] == done["result"]["node_id"]
+
+        # The new user node sits under the root (active node at request
+        # time) and the tree advanced its rev.
+        new_id = done["node_id"]
+        assert session.tree.get(new_id).role == "user"
+        assert session.tree.get(new_id).text == "manual user input"
+        assert session.tree.nodes[new_id].parent_id == root
+        assert session.tree.rev > rev_before
+
+    def test_commit_user_refused_under_user_node(self, session_and_client):
+        """Server rejects commit_role=user when the resolved parent is
+        itself a user node — D15 keeps user-under-user out of the tree."""
+        session, client = session_and_client
+        uid = session.tree.add_user_turn("first")  # active = uid
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "user",
+                "commit_text": "second",
+                "parent_node_id": uid,
+            })
+            # Skip the started frame; we want the error.
+            while True:
+                msg = ws.receive_json()
+                if msg["type"] in ("error", "done"):
+                    break
+        assert msg["type"] == "error"
+        assert msg["code"] == "InvalidNodeOperationError"
+
+    def test_commit_assistant_lands_authored_sibling(self, session_and_client):
+        """Ctrl+Enter on a user active node lands a sibling assistant
+        whose text *is* the typed text — no decode, no continuation."""
+        session, client = session_and_client
+        uid = session.tree.add_user_turn("the question?")
+        rev_before = session.tree.rev
+
+        done = None
+        with client.websocket_connect("/saklas/v1/sessions/default/stream") as ws:
+            ws.send_json({
+                "type": "generate",
+                "commit_role": "assistant",
+                "commit_text": "the canned answer",
+                "parent_node_id": uid,
+            })
+            while True:
+                msg = ws.receive_json()
+                if msg["type"] == "done":
+                    done = msg
+                    break
+
+        assert done is not None
+        assert done["result"]["role"] == "assistant"
+        new_id = done["node_id"]
+        assistant = session.tree.get(new_id)
+        assert assistant.role == "assistant"
+        assert assistant.text == "the canned answer"
+        assert assistant.recipe is None  # implicit authored marker
+        assert assistant.raw_token_ids  # tokenized by the stub
+        assert session.tree.nodes[new_id].parent_id == uid
+        assert session.tree.rev > rev_before
