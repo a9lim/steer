@@ -180,7 +180,7 @@
       <span class="label">expression</span>
       <textarea
         rows="4"
-        placeholder={`0.5 honest + 0.3 warm~confident\n— or paste any canonical steering expression.`}
+        placeholder={`0.5 honest + 0.3 warm~confident\nor paste any canonical steering expression.`}
         bind:value={expression}
         spellcheck="false"
         autocomplete="off"
@@ -198,7 +198,7 @@
           {#each unknownTerms as t, i}
             <code>{t}</code>{#if i < unknownTerms.length - 1},{" "}{/if}
           {/each}
-          — server will resolve from installed packs.
+          (server will resolve them from installed packs).
         </p>
       {/if}
     </label>

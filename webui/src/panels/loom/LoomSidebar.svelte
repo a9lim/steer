@@ -479,7 +479,7 @@
         const alphas = parseAlphaList(m.text);
         if (alphas.length === 0) {
           setModalError(
-            "couldn't parse alphas — try a comma list (0.0, 0.3, 0.7) " +
+            "couldn't parse alphas, try a comma list (0.0, 0.3, 0.7) " +
             "or linspace(-1, 1, 5)",
           );
           return;
@@ -838,7 +838,6 @@
 >
   <header class="loom-header">
     <span class="title">threads</span>
-    <span class="rev" title="server tree revision">rev {loomTree.rev}</span>
     <button
       type="button"
       class="icon-btn"
@@ -856,7 +855,7 @@
       onkeydown={onFilterKey}
       placeholder="filter: agg:angry.calm > 0.4"
       aria-label="Filter expression"
-      title="Filter grammar — click ? for help"
+      title="Filter grammar (click ? for help)"
     />
     <!-- Logit-pass (Decision 8): help popover for the filter grammar.
          Clicked-toggle keeps the popover anchored without stealing
@@ -900,12 +899,12 @@
         <strong>Grammar:</strong> comma-separated terms; all must match.
       </p>
       <ul>
-        <li><code>&lt;probe&gt; &gt; &lt;n&gt;</code> — aggregate reading (e.g. <code>angry.calm &gt; 0.4</code>)</li>
-        <li><code>agg:</code>|<code>any:</code>|<code>last:&lt;probe&gt; &lt;op&gt; &lt;n&gt;</code> — pick aggregator</li>
-        <li><code>starred</code> — only starred nodes</li>
-        <li><code>text:&lt;query&gt;</code> — substring search</li>
-        <li><code>sort:surprise</code> — reorder siblings most-surprising first</li>
-        <li><code>sort:confidence</code> — reorder siblings most-confident first</li>
+        <li><code>&lt;probe&gt; &gt; &lt;n&gt;</code>: aggregate reading (e.g. <code>angry.calm &gt; 0.4</code>)</li>
+        <li><code>agg:</code>|<code>any:</code>|<code>last:&lt;probe&gt; &lt;op&gt; &lt;n&gt;</code>: pick aggregator</li>
+        <li><code>starred</code>: only starred nodes</li>
+        <li><code>text:&lt;query&gt;</code>: substring search</li>
+        <li><code>sort:surprise</code>: reorder siblings most-surprising first</li>
+        <li><code>sort:confidence</code>: reorder siblings most-confident first</li>
       </ul>
       <p>
         <strong>Examples:</strong>
@@ -977,7 +976,7 @@
     </div>
   {:else if rows.length === 0}
     <div class="empty">
-      <p>(empty tree — start a conversation)</p>
+      <p>(empty tree, start a conversation)</p>
     </div>
   {:else}
     <div class="tree-scroll">
@@ -1092,7 +1091,7 @@
         {:else if modal.kind === "note"}note
         {:else if modal.kind === "navpicker"}navigate to id-prefix
         {:else if modal.kind === "search"}search node text
-        {:else if modal.kind === "fanout"}fan out — α grid
+        {:else if modal.kind === "fanout"}fan out: α grid
         {:else if modal.kind === "regen_mode"}regen N with mode
         {/if}
       </span>
@@ -1114,7 +1113,7 @@
         <p class="hint">Re-runs the active assistant's parent user turn with the current rack.</p>
       {:else if modal.kind === "delete"}
         <p>Delete node <code>{(modal.nodeId ?? "").slice(0, 12)}</code> and its entire subtree?</p>
-        <p class="hint danger">This is destructive. Ancestors of the active node cannot be deleted — navigate away first.</p>
+        <p class="hint danger">This is destructive. Ancestors of the active node cannot be deleted. Please navigate away first.</p>
       {:else if modal.kind === "navpicker" || modal.kind === "search"}
         <input
           bind:this={modalInput as HTMLInputElement}
@@ -1143,7 +1142,7 @@
             onkeydown={(ev) => { if (ev.key === "Enter") { ev.preventDefault(); void commitModal(); } }}
           />
         </label>
-        <p class="hint">One sibling per α — comma list, linspace(), or start:stop:step.</p>
+        <p class="hint">One sibling per α: a comma list, linspace(), or start:stop:step.</p>
       {:else if modal.kind === "regen_mode"}
         <label>
           <span>mode</span>
@@ -1339,15 +1338,11 @@
     background: var(--bg-deep);
   }
   .title {
-    color: var(--accent-green);
+    color: var(--accent-blue);
     font-weight: var(--weight-bold);
     letter-spacing: 0;
-    text-transform: lowercase;
-    flex: 0 0 auto;
-  }
-  .rev {
-    color: var(--fg-muted);
-    font-size: var(--text-xs);
+    font-size: var(--text-sm);
+    text-transform: uppercase;
     flex: 1 1 auto;
   }
   .icon-btn {

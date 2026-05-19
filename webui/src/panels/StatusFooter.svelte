@@ -105,9 +105,9 @@
       class="pending-badge"
       type="button"
       onclick={applyNow}
-      title="Apply queued rack/sampling changes; interrupts in-flight gen if needed"
+      title="Apply queued rack and sampling changes; interrupts in-flight gen if needed"
     >
-      {pendingCount} change{pendingCount === 1 ? "" : "s"} pending — apply now
+      {pendingCount} change{pendingCount === 1 ? "" : "s"} pending · apply now
     </button>
   {/if}
 </footer>

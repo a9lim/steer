@@ -118,7 +118,7 @@
     if (ng && !p)
       return {
         ok: false,
-        reason: "negative needs a positive — or leave both blank for single-concept",
+        reason: "negative needs a positive, or leave both blank for single-concept",
       } as const;
     return { ok: true, reason: null } as const;
   });
@@ -166,7 +166,7 @@
       });
       await refreshVectorList();
       addVectorToRack(result.canonical);
-      pushToast(`extracted ${result.canonical} — added to rack`, {
+      pushToast(`extracted ${result.canonical}, added to rack`, {
         kind: "info",
       });
       closeDrawer();

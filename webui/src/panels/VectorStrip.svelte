@@ -96,11 +96,11 @@
   };
 
   const TRIGGER_LABEL: Record<Trigger, string> = {
-    BOTH: "both — steer the whole turn (default)",
-    BEFORE: "before — steer thinking + response",
-    AFTER: "after — steer the after-thinking response only",
-    THINKING: "thinking — steer the chain-of-thought only",
-    RESPONSE: "response — steer the generated response only",
+    BOTH: "both: steer the whole turn (default)",
+    BEFORE: "before: steer thinking and response",
+    AFTER: "after: steer the after-thinking response only",
+    THINKING: "thinking: steer the chain-of-thought only",
+    RESPONSE: "response: steer the generated response only",
     PROMPT: "prompt (alias of before)",
     GENERATED: "generated (alias of response)",
   };
@@ -258,9 +258,7 @@
     } catch {
       // Clipboard is gated on user gesture in some browsers — surface an
       // in-app toast rather than a native prompt.
-      pushToast("clipboard blocked — copy from the expression block", {
-        kind: "warning",
-      });
+      pushToast("clipboard blocked by the browser", { kind: "warning" });
     }
   }
 
@@ -297,7 +295,7 @@
     type="button"
     class="enable"
     onclick={toggleEnabled}
-    title={entry.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+    title={entry.enabled ? "Enabled (click to disable)" : "Disabled (click to enable)"}
     aria-pressed={entry.enabled}
     aria-label="Toggle steering for {name}"
   >
@@ -305,14 +303,14 @@
   </button>
 
   {#if entry.ablate}
-    <span class="ablate-mark" title="ablation — concept removed from the residual stream">!</span>
+    <span class="ablate-mark" title="ablation: concept removed from the residual stream">!</span>
   {/if}
 
   <!-- Bipolar axis frame.  The negative pole sits left of the slider, the
        positive right — dragging left/right now means something. -->
   <div class="axis" class:mono={monopolar}>
     {#if !monopolar}
-      <span class="pole neg" title="negative pole — drag left">
+      <span class="pole neg" title="negative pole (drag left)">
         {poles.negative}
       </span>
     {/if}
@@ -323,9 +321,9 @@
       step={0.05}
       oninput={onSliderInput}
       ariaLabel="strength (α) for {name}"
-      title="strength (α) for {name} — drag, ±0.025 snaps to 0"
+      title="strength (α) for {name}: drag, ±0.025 snaps to 0"
     />
-    <span class="pole pos" title="positive pole — drag right">
+    <span class="pole pos" title="positive pole (drag right)">
       {poles.positive}
     </span>
   </div>
@@ -333,7 +331,7 @@
   <span
     class="alpha-display"
     style:color={alphaColor}
-    title="strength (α) — signed steering coefficient"
+    title="strength (α): signed steering coefficient"
   >
     {formatAlpha(entry.alpha)}
   </span>
@@ -342,7 +340,7 @@
     type="button"
     class="trigger-pill"
     onclick={cycleTrigger}
-    title="trigger — {TRIGGER_LABEL[entry.trigger]} (click to cycle)"
+    title="trigger: {TRIGGER_LABEL[entry.trigger]} (click to cycle)"
     aria-label="trigger for {name}: {entry.trigger}"
   >
     {TRIGGER_WORD[entry.trigger]}
@@ -355,7 +353,7 @@
       onclick={toggleVariant}
       aria-haspopup="menu"
       aria-expanded={variantOpen}
-      title="tensor variant — {entry.variant} (click to change)"
+      title="tensor variant: {entry.variant} (click to change)"
       aria-label="variant for {name}: {entry.variant}"
     >
       {entry.variant}

@@ -264,7 +264,7 @@
     }
     if (token == null || token.rawIndex == null) {
       branchError =
-        "this token has no raw-decode index — forking needs a node " +
+        "this token has no raw-decode index; forking needs a node " +
         "generated in this session (legacy / replayed turns can't fork)";
       return;
     }
@@ -490,8 +490,8 @@
       {:else}
         <div class="empty">
           <p>
-            No logprob data captured for this token — either replayed from
-            a transcript that pre-dates logit capture, or capture wasn't
+            No logprob data captured for this token. Either it was replayed
+            from a transcript that pre-dates logit capture, or capture wasn't
             live for the run.
           </p>
           <p>
@@ -514,7 +514,7 @@
   <footer class="drawer-footer">
     <span class="hint">
       {#if tab === "probes"}
-        Tints map score / {HIGHLIGHT_SAT} clamped to ±1 — green = +pole,
+        Tints map score / {HIGHLIGHT_SAT} clamped to ±1. Green = +pole,
         red = −pole, transparent ≈ 0.
       {:else}
         Logprob is the chosen-token natural-log probability under the

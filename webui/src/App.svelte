@@ -293,11 +293,11 @@
     opacity: 0.85;
   }
   /* Four permanent columns: rail · threads · chat · rack.  The threads
-   * (loom) column is a fixed 310px; min-width 1280px keeps the chat
-   * column comfortable (1280 − 64 − 310 − 420 ≈ 486px floor). */
+   * (loom) and rack columns share a fixed 440px width; min-width 1280px
+   * keeps the chat column usable (1280 − 64 − 440 − 440 ≈ 333px floor). */
   .layout {
     display: grid;
-    grid-template-columns: 64px 310px minmax(0, 1fr) minmax(420px, 0.46fr);
+    grid-template-columns: 64px 440px minmax(0, 1fr) 440px;
     grid-template-rows: 1fr;
     min-height: 0; /* let children scroll inside */
     position: relative; /* drawer sits over rack-zone via absolute pos */

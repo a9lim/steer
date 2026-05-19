@@ -54,7 +54,7 @@
             <td>
               <kbd>{modKey}</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>
             </td>
-            <td>regenerate last response (reserved — not yet wired)</td>
+            <td>regenerate last response (reserved, not yet wired)</td>
           </tr>
           <tr>
             <td>click token</td>
@@ -161,7 +161,7 @@ variant  := raw | sae | sae-<release>
           </tr>
           <tr>
             <td><code>!</code></td>
-            <td>mean-ablate — does not compose with projection</td>
+            <td>mean-ablate; does not compose with projection</td>
           </tr>
           <tr>
             <td><code>~</code></td>
@@ -191,7 +191,7 @@ variant  := raw | sae | sae-<release>
           flip sign automatically; <code>ns/concept</code> disambiguates.
         </li>
         <li>
-          dotted bipolar names (<code>happy.sad</code>) are first-class —
+          dotted bipolar names (<code>happy.sad</code>) are first-class;
           <code>.</code> and <code>_</code> are the only allowed
           punctuation in concept identifiers.
         </li>

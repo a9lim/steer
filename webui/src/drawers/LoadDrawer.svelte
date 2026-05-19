@@ -107,8 +107,8 @@
           spellcheck="false"
         />
         <span class="sub">
-          accepts a folder (concept directory) or a single safetensors/gguf
-          file — same surface ``session.load_profile`` consumes.
+          accepts a folder (concept directory) or a single safetensors or
+          gguf file. This is the same surface ``session.load_profile`` consumes.
         </span>
       </label>
 

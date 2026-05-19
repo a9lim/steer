@@ -408,7 +408,7 @@
     {#if ids.length < 2}
       <p class="empty">
         Pick at least two assistant nodes via the sidebar's "select for
-        compare" right-click action — or right-click a user node with
+        compare" right-click action, or right-click a user node with
         ≥2 assistant children and pick "compare children".
       </p>
     {:else if loading && diffs.length === 0}
@@ -641,13 +641,13 @@
                       lp: chosen-token logprob.  Δ lp(A): how B would have
                       scored A's chosen token, minus what A actually gave
                       it (negative = B disagreed).  ≈KL: top-{32}-truncated
-                      KL(A ∥ B) — approximate signal, not measurement.
+                      KL(A ∥ B), approximate signal, not measurement.
                     </p>
                   </div>
                 {:else}
                   <p class="dim small">
                     no byte-aligned assistant tokens between these
-                    branches — cross-evaluation has nothing to score.
+                    branches, so cross-evaluation has nothing to score.
                   </p>
                 {/if}
               {/if}
@@ -682,7 +682,7 @@
               </div>
             {:else}
               <p class="dim small">
-                no readings recorded — either node has empty
+                no readings recorded; either node has empty
                 ``aggregate_readings``.
               </p>
             {/if}

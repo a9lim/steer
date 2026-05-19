@@ -229,7 +229,7 @@
       <span class="label">baseline <em>optional</em></span>
       <input
         type="text"
-        placeholder="(reserved — not used today)"
+        placeholder="(reserved, not used today)"
         bind:value={baseline}
         autocomplete="off"
         spellcheck="false"
@@ -246,7 +246,7 @@
         {#if running}
           <div class="log-head">
             <span class="spinner" aria-hidden="true"></span>
-            <span>cloning, please wait — clone has no per-step progress.</span>
+            <span>cloning, please wait; clone has no per-step progress.</span>
           </div>
         {/if}
         <ol class="log-lines">

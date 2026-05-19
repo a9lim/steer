@@ -256,7 +256,7 @@
             checked={importMode === "default"}
             onchange={() => (importMode = "default")}
           />
-          <span><strong>default</strong> — attach at root (fresh branch)</span>
+          <span><strong>default</strong>: attach at root (fresh branch)</span>
         </label>
         <label class="mode-opt">
           <input
@@ -266,7 +266,7 @@
             checked={importMode === "here"}
             onchange={() => (importMode = "here")}
           />
-          <span><strong>here</strong> — attach at the active node</span>
+          <span><strong>here</strong>: attach at the active node</span>
         </label>
         <label class="mode-opt">
           <input
@@ -276,7 +276,7 @@
             checked={importMode === "merge"}
             onchange={() => (importMode = "merge")}
           />
-          <span><strong>merge</strong> — deepest user-turn prefix match</span>
+          <span><strong>merge</strong>: deepest user-turn prefix match</span>
         </label>
       </div>
 
@@ -335,7 +335,7 @@
       {/if}
       {#if importLeafId && !importError}
         <p class="ok">
-          imported successfully — leaf node
+          imported successfully, leaf node
           <code>{importLeafId.slice(0, 12)}</code>
         </p>
       {/if}

@@ -115,7 +115,7 @@
     }
     if (!isSnapshotShape(json)) {
       parseError =
-        "unrecognized format — expected a saklas conversation JSON with at least one of {chatLog, vectorRack, probeRack, samplingState, highlightState}";
+        "unrecognized format, expected a saklas conversation JSON with at least one of {chatLog, vectorRack, probeRack, samplingState, highlightState}";
       return;
     }
     parsed = json;
@@ -143,7 +143,7 @@
       chatLog.turns = parsed.chatLog;
       appliedTurns = parsed.chatLog.length;
     } else {
-      warnings.push("chatLog missing or invalid — skipped");
+      warnings.push("chatLog missing or invalid, skipped");
     }
 
     if (Array.isArray(parsed.vectorRack)) {
@@ -178,7 +178,7 @@
           if (known.length > 0 && !known.includes(row.name)) {
             skippedVectors++;
             warnings.push(
-              `vector '${row.name}' not registered server-side — present in rack but won't apply at gen time`,
+              `vector '${row.name}' not registered server-side; present in rack but won't apply at gen time`,
             );
           }
         }
@@ -186,7 +186,7 @@
         /* ignore */
       }
     } else {
-      warnings.push("vectorRack missing or invalid — skipped");
+      warnings.push("vectorRack missing or invalid, skipped");
     }
 
     if (parsed.samplingState && typeof parsed.samplingState === "object") {
@@ -224,7 +224,7 @@
   <div class="body">
     <p class="hint">
       restore from a saklas conversation JSON file.  Vectors must already be
-      registered on the server for steering to take effect — missing names
+      registered on the server for steering to take effect; missing names
       stay in the rack but won't apply at gen time.
     </p>
 

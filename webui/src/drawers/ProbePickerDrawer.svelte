@@ -86,7 +86,7 @@
 
   <div class="body">
     <p class="hint">
-      pick a concept to monitor — saklas activates it as a probe (mirrors
+      pick a concept to monitor; saklas activates it as a probe (mirrors
       the TUI's <code>/probe &lt;name&gt;</code>).  if it isn't installed
       locally, install a pack first.
     </p>

@@ -255,7 +255,7 @@
   <!-- Presence penalty -->
   <label
     class="control narrow"
-    title="Presence penalty — discourages tokens already present (−2…2)"
+    title="Presence penalty: discourages tokens already present (−2…2)"
   >
     <span class="label">pres</span>
     <input
@@ -273,7 +273,7 @@
   <!-- Frequency penalty -->
   <label
     class="control narrow"
-    title="Frequency penalty — discourages tokens by repeat count (−2…2)"
+    title="Frequency penalty: discourages tokens by repeat count (−2…2)"
   >
     <span class="label">freq</span>
     <input
@@ -289,7 +289,7 @@
   </label>
 
   <!-- Seed -->
-  <div class="control seed" title="RNG seed — empty means model picks">
+  <div class="control seed" title="RNG seed: empty means the model picks">
     <span class="label">seed</span>
     <input
       type="number"

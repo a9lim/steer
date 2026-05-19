@@ -109,7 +109,7 @@
       if (e instanceof ApiError) {
         if (e.status === 503) {
           searchError =
-            "huggingface_hub not installed on the server — `pip install -e \".[serve]\"` and restart.";
+            "huggingface_hub isn't installed on the server. Run `pip install -e \".[serve]\"` and restart.";
         } else if (e.status === 502) {
           searchError = `HF transport error: ${e.message}`;
         } else {
@@ -144,7 +144,7 @@
       if (e instanceof ApiError) {
         if (e.status === 503) {
           installError =
-            "huggingface_hub not installed on the server — `pip install -e \".[serve]\"` and restart.";
+            "huggingface_hub isn't installed on the server. Run `pip install -e \".[serve]\"` and restart.";
         } else if (e.status === 502) {
           installError = `HF transport error: ${e.message}`;
         } else if (e.status === 409) {

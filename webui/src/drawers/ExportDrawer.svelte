@@ -169,7 +169,7 @@
 
   <div class="body">
     {#if !lastTurn}
-      <p class="dim">no assistant result yet — generate something first.</p>
+      <p class="dim">no assistant result yet, generate something first.</p>
     {:else}
       <p class="hint">
         exports the last assistant turn (text, applied_steering, sampling,

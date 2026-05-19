@@ -228,7 +228,7 @@
     <p class="muted">loading concepts…</p>
   {:else if rows.length === 0}
     <p class="muted">
-      no packs installed locally{emptyHint ? ` — ${emptyHint}` : ""}.
+      no packs installed locally{emptyHint ? `, ${emptyHint}` : ""}.
     </p>
   {:else if sections.length === 0}
     <p class="muted">no concept matches "{query.trim()}".</p>
@@ -263,7 +263,7 @@
                   class="row"
                   class:compact={!showStrength}
                   title={row.description
-                    ? `${sel} — ${row.description}`
+                    ? `${sel}: ${row.description}`
                     : sel}
                 >
                   {#if showStrength}

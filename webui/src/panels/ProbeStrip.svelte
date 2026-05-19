@@ -99,7 +99,7 @@
     <span
       class="select-glyph"
       aria-hidden="true"
-      title={isHighlight ? "Selected — click to deselect" : "Click to select for highlighting"}
+      title={isHighlight ? "Selected (click to deselect)" : "Click to select for highlighting"}
     >{isHighlight ? "●" : "○"}</span>
 
     <span class="name" title={name}>{name}</span>
@@ -125,7 +125,7 @@
 
   <div class="layers" aria-label="Per-layer readings for {name}">
     {#if layerKeys.length === 0}
-      <div class="layers-status">no data — generate a token first</div>
+      <div class="layers-status">no data yet, generate a token first</div>
     {:else}
       <span class="endcap" aria-hidden="true">L{Number(layerKeys[0])}</span>
       <div class="cells">

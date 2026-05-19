@@ -14,7 +14,6 @@
 </script>
 
 <section class="workbench" aria-label="Active workbench">
-  <p class="eyebrow">active workbench</p>
   <h2 title={model}>{model}</h2>
   <p class="sub">{device}</p>
 </section>
@@ -33,7 +32,6 @@
     background: var(--bg-deep);
   }
 
-  .eyebrow,
   .sub {
     margin: 0;
     color: var(--fg-muted);

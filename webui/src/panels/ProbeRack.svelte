@@ -45,7 +45,6 @@
   <header class="header">
     <div class="header-text">
       <span class="title">PROBES</span>
-      <span class="subtitle">watch concepts activate</span>
     </div>
     <label class="sort">
       <span class="sort-label">sort</span>
@@ -66,8 +65,8 @@
     {#if sortedProbes.length === 0}
       <div class="empty">
         <p class="empty-copy">
-          Probes watch concepts activate as the model generates —
-          they observe, they don't steer.
+          Probes watch concepts activate as the model generates.
+          They read the model's state without changing it.
         </p>
         <button type="button" class="add empty-add" onclick={onAddProbe}>
           + add probe
@@ -82,16 +81,18 @@
     {/if}
   </div>
 
-  <div class="actions">
-    <button
-      type="button"
-      class="add"
-      onclick={onAddProbe}
-      title="Pick a concept to monitor — TUI-style /probe"
-    >
-      + probe
-    </button>
-  </div>
+  {#if sortedProbes.length > 0}
+    <div class="actions">
+      <button
+        type="button"
+        class="add"
+        onclick={onAddProbe}
+        title="Pick a concept to monitor (TUI /probe)"
+      >
+        + add probe
+      </button>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -133,15 +134,6 @@
     font-size: var(--text-sm);
     letter-spacing: 0;
     text-transform: uppercase;
-  }
-  /* One-line statement of what this rack does — the steering rack carries
-   * the mirror copy.  Two subtitles buy the whole mental model. */
-  .subtitle {
-    color: var(--fg-muted);
-    font-size: var(--text-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .sort {
     display: inline-flex;

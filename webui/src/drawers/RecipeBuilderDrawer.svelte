@@ -96,7 +96,7 @@
 
     <section class="terms">
       {#if entries.length === 0}
-        <div class="empty">no active steering terms — add a vector to start building a recipe</div>
+        <div class="empty">no active steering terms, add a vector to start building a recipe</div>
       {:else}
         {#each entries as [name, entry] (name)}
           <article class="term" class:disabled={!entry.enabled}>

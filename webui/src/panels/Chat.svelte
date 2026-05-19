@@ -98,8 +98,8 @@
   const onUserNode = $derived(activeNode?.role === "user");
   const inputPlaceholder = $derived(
     onUserNode
-      ? "prefill the assistant's reply…  (empty + enter = generate fresh · shift-enter newline)"
-      : "message…  (enter to send · shift-enter newline · cmd/ctrl-enter also sends)",
+      ? "prefill the assistant's reply…  (enter on empty = generate fresh · shift-enter newline)"
+      : "message…  (enter to send · shift-enter newline)",
   );
   /** Send-button caption tracks the role-aware action. */
   const sendLabel = $derived(
@@ -789,7 +789,7 @@
         disabled={!input.trim() && !onUserNode}
         title={onUserNode
           ? "On a user node: empty = generate a fresh reply, text = prefill the reply"
-          : "Enter or Cmd/Ctrl-Enter"}
+          : "Enter to send · Shift-Enter newline"}
       >{sendLabel}</button>
       <button
         type="button"
