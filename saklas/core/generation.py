@@ -788,6 +788,22 @@ def generate_steered(
             for _ in range(config.max_new_tokens):
                 if state.stop_requested.is_set():
                     state.finish_reason = "stop"
+                    # Stop fired while still inside a thinking phase:
+                    # anchor ``thinking_end_idx`` at the current position
+                    # so :meth:`SaklasSession._finalize_generation` doesn't
+                    # decode the unfinished thoughts as the response text.
+                    # Without this, ``response_ids = generated_ids[0:]``
+                    # would land the entire thinking dump on the loom
+                    # node's ``text`` field — the TUI's live view hides
+                    # the bug (it builds the response from ``on_token``
+                    # directly), but the webui re-renders ``node.text``
+                    # after ``tree_mutated finalize_assistant`` arrives.
+                    if tstate in (
+                        _ThinkState.PREAMBLE,
+                        _ThinkState.THINKING,
+                        _ThinkState.RESPONSE_PREAMBLE,
+                    ):
+                        state.thinking_end_idx = len(generated_ids)
                     break
 
                 # Update the shared TriggerContext read by steering hooks.
