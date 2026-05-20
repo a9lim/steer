@@ -1249,6 +1249,103 @@ def register_saklas_routes(app: FastAPI) -> None:
             ],
         }
 
+    @app.get("/saklas/v1/sessions/{session_id}/vectors/pairwise")
+    def pairwise_compare(session_id: str, a: str, b: str):
+        """Cross-layer cosine matrix between two named vectors / probes.
+
+        Query: ``?a=<name>&b=<name>``.  Each cell ``matrix[i][j]`` is the
+        raw cosine similarity between vector ``a``'s layer ``layers_a[i]``
+        and vector ``b``'s layer ``layers_b[j]``.  Output:
+
+            {
+              "a": "honest",
+              "b": "warm",
+              "layers_a": [0, 5, ...],
+              "layers_b": [0, 5, ...],
+              "matrix": [[1.0, 0.41, ...], [0.13, 0.92, ...], ...],
+              "model": "google/gemma-3-4b-it",
+            }
+
+        Pool unions ``session.vectors`` and ``monitor.probe_names`` (same
+        as :func:`correlation_matrix`) so probes that were never
+        registered as steering vectors still resolve.  Cosines are
+        layer-pairwise (no magnitude weighting, no Mahalanobis whitening)
+        — the matrix is the structural signal the webui pairwise-compare
+        heatmap reads, distinct from the aggregate scalar that
+        :meth:`Profile.cosine_similarity` returns.  Near-zero layer norms
+        land as ``None`` so the client can render them as empty cells.
+
+        Registered *before* ``GET /vectors/{name}`` so the literal path
+        wins the routing match — Starlette matches in registration order
+        and ``pairwise`` would otherwise be swallowed by ``{name}``.
+        """
+        from saklas import Profile
+
+        _resolve_session_id(session, session_id)
+
+        pool: dict[str, "Profile"] = dict(session.vectors)
+        try:
+            probe_profiles = session._monitor.profiles
+            for probe_name in session._monitor.probe_names:
+                if probe_name in pool:
+                    continue
+                tensors = probe_profiles.get(probe_name)
+                if tensors is None:
+                    continue
+                pool[probe_name] = Profile(tensors)
+        except Exception:
+            pass
+
+        missing = [n for n in (a, b) if n not in pool]
+        if missing:
+            raise HTTPException(404, f"names not loaded: {missing}")
+
+        prof_a, prof_b = pool[a], pool[b]
+        layers_a = sorted(prof_a.keys())
+        layers_b = sorted(prof_b.keys())
+
+        # Precompute fp32 vectors + norms so the inner loop is a single
+        # dot per cell.  ``None`` for near-zero norms — propagates to the
+        # cell so the client can render an empty / dimmed square instead
+        # of NaN or a meaningless cosine.
+        import torch as _torch
+        vecs_a: list[tuple["_torch.Tensor", float]] = []
+        for L in layers_a:
+            v = prof_a[L].float()
+            n = float(v.norm().item())
+            vecs_a.append((v, n))
+        vecs_b: list[tuple["_torch.Tensor", float]] = []
+        for L in layers_b:
+            v = prof_b[L].float()
+            n = float(v.norm().item())
+            vecs_b.append((v, n))
+
+        matrix: list[list[float | None]] = []
+        for va, na in vecs_a:
+            row: list[float | None] = []
+            for vb, nb in vecs_b:
+                if na < 1e-12 or nb < 1e-12:
+                    row.append(None)
+                    continue
+                # Different hidden dims would be a model-mismatch bug —
+                # surface as None rather than raising so a misconfigured
+                # pool still renders the cells that *do* line up.
+                if va.shape != vb.shape:
+                    row.append(None)
+                    continue
+                cos = float(_torch.dot(va, vb).item()) / (na * nb)
+                row.append(round(cos, 6))
+            matrix.append(row)
+
+        return {
+            "a": a,
+            "b": b,
+            "layers_a": layers_a,
+            "layers_b": layers_b,
+            "matrix": matrix,
+            "model": getattr(session, "model_id", None),
+        }
+
     @app.get("/saklas/v1/sessions/{session_id}/vectors/{name}")
     def get_vector(session_id: str, name: str):
         _resolve_session_id(session, session_id)

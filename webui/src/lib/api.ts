@@ -27,6 +27,7 @@ import type {
   NodeDiffJSON,
   PackListResponse,
   PackSearchResponse,
+  PairwiseCompareResponse,
   ProbeDefaultsResponse,
   ProbeListResponse,
   ScoreProbeRequest,
@@ -65,6 +66,7 @@ export type {
   NodeDiffJSON,
   PackListResponse,
   PackSearchResponse,
+  PairwiseCompareResponse,
   ProbeDefaultsResponse,
   ProbeListResponse,
   ScoreProbeRequest,
@@ -305,6 +307,17 @@ export const apiVectors = {
   ): Promise<CorrelationData> {
     const q = names && names.length ? `?names=${encodeURIComponent(names.join(","))}` : "";
     return request(`${SESSION_BASE(id)}/correlation${q}`);
+  },
+  /** Cross-layer cosine matrix between two named vectors / probes —
+   *  backs the pairwise-compare drawer.  Distinct from ``correlation``:
+   *  one pair, two-axis matrix indexed by layer rather than by name. */
+  pairwise(
+    a: string,
+    b: string,
+    id: string = SESSION,
+  ): Promise<PairwiseCompareResponse> {
+    const q = new URLSearchParams({ a, b }).toString();
+    return request(`${SESSION_BASE(id)}/vectors/pairwise?${q}`);
   },
 };
 

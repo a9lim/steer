@@ -182,6 +182,22 @@ export interface CorrelationData {
   layers_shared: Record<string, number>;
 }
 
+// --------------------------------------------------- pairwise compare --
+
+/** Cross-layer cosine matrix between two named vectors / probes.  Each
+ *  ``matrix[i][j]`` is the raw cosine between ``a``'s layer
+ *  ``layers_a[i]`` and ``b``'s layer ``layers_b[j]``.  Near-zero norms
+ *  and shape mismatches land as ``null`` so the client can render
+ *  empty / dimmed cells. */
+export interface PairwiseCompareResponse {
+  a: string;
+  b: string;
+  layers_a: number[];
+  layers_b: number[];
+  matrix: (number | null)[][];
+  model: string | null;
+}
+
 // ----------------------------------------------------- packs --
 
 export interface LocalPackInfo {

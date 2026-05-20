@@ -33,7 +33,6 @@
         { label: "load vector…", drawer: "load" },
         { label: "merge vector…", drawer: "merge" },
         { label: "clone vector…", drawer: "clone" },
-        { label: "compare vectors…", drawer: "compare" },
         { label: "packs…", drawer: "pack" },
       ],
     },
@@ -43,6 +42,7 @@
       icon: "M4 18l5-12 4 8 3-5 4 9",
       tools: [
         { label: "correlation matrix…", drawer: "correlation" },
+        { label: "pairwise compare…", drawer: "compare" },
         { label: "layer norms…", drawer: "layer_norms" },
         { label: "activation atlas…", drawer: "activation_atlas" },
         { label: "experiment lab…", drawer: "experiment_lab" },

@@ -46,6 +46,7 @@ Vectors under `/sessions/{id}/vectors`:
 - `POST /vectors/merge` body `{name, expression}` — wraps `merge_into_pack` (model-scoped, `force=True`), loads and registers the merged profile, held under `session.lock`. Returns the same JSON as `GET /vectors/{name}`. `MergeError` → 400.
 - `POST /vectors/clone` body `{name, corpus_path, n_pairs?, seed?, baseline?}` — wraps `session.clone_from_corpus` in `asyncio.to_thread` under `session.lock`; auto-registers on success. SSE branch emits only `done`/`error` (no progress hook in the clone path). Missing corpus → 404.
 - `GET /vectors/{name}/diagnostics` — 16-bucket `||baked||` histogram plus per-layer magnitudes and the `diagnostics_by_layer` / `diagnostics_summary` blocks when the profile carries them. 404 when the vector isn't registered.
+- `GET /vectors/pairwise?a=&b=` — cross-layer cosine matrix between two named vectors / probes. Same pool as `/correlation` (steering vectors ∪ active probes). Returns `{a, b, layers_a, layers_b, matrix, model}` where `matrix[i][j]` is the raw cosine between `a`'s `layers_a[i]` and `b`'s `layers_b[j]`; near-zero norms and shape mismatches land as `null` so the heatmap renders empty cells instead of meaningless cosines. Registered *before* `GET /vectors/{name}` so the literal path wins the routing match.
 
 Probes under `/sessions/{id}/probes`: list / defaults / activate / deactivate. `POST /sessions/{id}/probe` body `{text, probes?}` — one-shot scoring via `monitor.measure` under the session lock, no generation.
 
