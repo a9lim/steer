@@ -69,7 +69,7 @@ _KEYHINT_NAV = (
     "[reverse] g [/]/[reverse] G [/] top/active   "
     "[reverse] ⏎ [/] activate+go   "
     "[reverse] ␣ [/] set active   "
-    "[reverse] esc [/] back"
+    "[reverse] ⎋ [/] back"
 )
 _KEYHINT_ACT = (
     "[b ansi_yellow]act[/]  "
@@ -93,12 +93,12 @@ _HELP_TEXT = (
     "[b ansi_yellow]navigation[/]\n"
     "  ↑ ↓ / k j     move cursor through every visible node\n"
     "  ← → / h l     fold (then jump to parent) / unfold (then first child)\n"
-    "  Tab / ⇧Tab    jump to next / previous sibling\n"
+    "  ⇥ / ⇧⇥        jump to next / previous sibling\n"
     "  g             jump to the first node\n"
     "  G             jump to the active node\n"
-    "  Enter         make the cursor node active, return to chat\n"
-    "  Space         make the cursor node active, stay in the loom\n"
-    "  Esc           leave compare/help/filter; otherwise back to chat\n"
+    "  ⏎             make the cursor node active, return to chat\n"
+    "  ␣             make the cursor node active, stay in the loom\n"
+    "  ⎋             leave compare/help/filter; otherwise back to chat\n"
     "\n"
     "[b ansi_yellow]mutation[/]  (all route through session.tree)\n"
     "  e             edit node text in place — no new node\n"
@@ -119,7 +119,7 @@ _HELP_TEXT = (
     "The left-gutter bar on each node tracks the selected highlight\n"
     "probe's reading for that node — green positive, red negative.\n"
     "\n"
-    "[dim]press ? or Esc to dismiss[/]"
+    "[dim]press ? or ⎋ to dismiss[/]"
 )
 
 

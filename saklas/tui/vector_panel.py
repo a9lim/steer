@@ -57,7 +57,7 @@ class LeftPanel(Widget):
                       id="vectors-header", classes="section-header")
         yield VerticalScroll(Static("", id="vector-content"), id="vector-scroll")
         yield Static(
-            "[dim]⌫ remove · ↩ toggle · ←/→ alpha · ⇧←/→ coarse[/]",
+            "[dim]⌫ remove · ⏎ toggle · ←/→ alpha · ⇧←/→ coarse[/]",
             id="vector-hints",
         )
         # Generation section

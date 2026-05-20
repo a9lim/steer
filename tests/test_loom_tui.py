@@ -989,7 +989,7 @@ def test_help_mentions_loom_commands():
     assert "/del" in msg
     assert "/star" in msg
     assert "/note" in msg
-    assert "Ctrl+L" in msg
+    assert "⌃L" in msg
     # Phase 5 additions surface in /help.
     assert "/prune" in msg
     assert "/auto-regen" in msg

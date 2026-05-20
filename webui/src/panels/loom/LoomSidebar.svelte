@@ -1184,7 +1184,7 @@
             }
           }}
         ></textarea>
-        <p class="hint">⌘/Ctrl+Enter to commit</p>
+        <p class="hint">⌃⏎ / ⌘⏎ to commit</p>
       {/if}
       {#if modal.error}
         <p class="modal-error" role="alert">{modal.error}</p>

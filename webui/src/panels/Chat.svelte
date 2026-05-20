@@ -129,8 +129,8 @@
           ? "commit as the assistant turn (no generation)…"
           : "commit as a user turn (no generation)…")
       : (onUserNode
-          ? "prefill the assistant's reply…  (enter on empty = generate fresh · ctrl/⌘/⌥-enter = commit as full turn · shift-enter newline)"
-          : "message…  (enter to send · ctrl/⌘/⌥-enter = commit, no generation · shift-enter newline)"),
+          ? "prefill the assistant's reply…  (⏎ on empty = generate fresh · ⌃⏎ / ⌘⏎ / ⌥⏎ = commit as full turn · ⇧⏎ newline)"
+          : "message…  (⏎ to send · ⌃⏎ / ⌘⏎ / ⌥⏎ = commit, no generation · ⇧⏎ newline)"),
   );
   /** Send-button caption tracks the role-aware action; any held commit
    *  modifier overrides both prefill and send with a "commit" register. */
@@ -877,8 +877,8 @@
         class="send"
         disabled={!input.trim() && (commitMode || !onUserNode)}
         title={onUserNode
-          ? "On a user node: empty = generate a fresh reply, text = prefill the reply · Ctrl/⌘/⌥-click = commit as the full assistant turn (no generation)"
-          : "Enter to send · Ctrl/⌘/⌥-click = commit as a user turn (no generation) · Shift-Enter newline"}
+          ? "On a user node: empty = generate a fresh reply, text = prefill the reply · ⌃ / ⌘ / ⌥-click = commit as the full assistant turn (no generation)"
+          : "⏎ to send · ⌃ / ⌘ / ⌥-click = commit as a user turn (no generation) · ⇧⏎ newline"}
       >{sendLabel}</button>
       <button
         type="button"

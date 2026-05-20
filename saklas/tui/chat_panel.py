@@ -543,7 +543,7 @@ class ChatPanel(Widget):
         # than a subtle highlight.  Height grows with content up to a
         # CSS-side cap.
         yield ChatInput(
-            placeholder="Type a message...  (ctrl+j or shift+enter for newline)",
+            placeholder="Type a message…  (⌃J or ⇧⏎ for newline)",
             id="chat-input",
             show_line_numbers=False,
             highlight_cursor_line=False,
@@ -593,9 +593,9 @@ class ChatPanel(Widget):
         except Exception:
             return
         inp.placeholder = (
-            "Prefill the assistant's reply…  (ctrl+j or shift+enter for newline)"
+            "Prefill the assistant's reply…  (⌃J or ⇧⏎ for newline)"
             if on
-            else "Type a message...  (ctrl+j or shift+enter for newline)"
+            else "Type a message…  (⌃J or ⇧⏎ for newline)"
         )
 
     # -- AB mode --

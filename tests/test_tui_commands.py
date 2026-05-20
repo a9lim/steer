@@ -253,8 +253,8 @@ def test_help_mentions_new_bindings():
     app = _make_app()
     app._handle_command("/help")
     msg = _msgs(app)
-    assert "Ctrl+A" in msg
-    assert "Ctrl+S" in msg
+    assert "⌃A" in msg
+    assert "⌃S" in msg
     assert "/alpha" in msg
     assert "/unsteer" in msg
     assert "/save" in msg
@@ -928,7 +928,7 @@ def test_handle_probe_namespace_bulk_loads_and_seeds_highlight(monkeypatch):
     msgs = _msgs(app)
     assert "Bulk probe 'alice/'" in msgs
     assert "added 2 probe(s)" in msgs
-    assert "Ctrl+Y" in msgs
+    assert "⌃Y" in msgs
 
 
 def test_handle_unsteer_namespace_removes_only_matching_prefix():

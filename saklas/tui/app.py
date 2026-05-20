@@ -589,9 +589,9 @@ class SaklasApp(App[None]):
             "  /extract <concept>          — cache-warm only\n"
             "  /compare <a> [b]            — cosine similarity\n"
             "Highlight:\n"
-            "  Ctrl+Y / Ctrl+Shift+Y       — cycle {off → probe → surprise}\n"
+            "  ⌃Y / ⌃⇧Y                    — cycle {off → probe → surprise}\n"
             "Commit (no-gen send):\n"
-            "  Ctrl+Enter / Alt+Enter      — modern terminals only\n"
+            "  ⌃⏎ / ⌥⏎                     — modern terminals only\n"
             "  /commit <text>              — cross-terminal fallback\n"
             "Session:\n"
             "  /clear, /rewind, /regen     — history ops\n"
@@ -603,7 +603,7 @@ class SaklasApp(App[None]):
             "  /model                      — model + session info\n"
             "  /exit, /help\n"
             "Loom:\n"
-            "  /tree                       — open loom screen (Ctrl+L)\n"
+            "  /tree                       — open loom screen (⌃L)\n"
             "  /regen [N] [mode]           — N siblings; mode ∈ unsteered/\n"
             "                                inverted/reseed/cool/hot or\n"
             "                                'custom: <steering expr>'\n"
@@ -615,17 +615,17 @@ class SaklasApp(App[None]):
             "  /path                       — active path summary\n"
             "  /fan <vec> <alphas>         — canonical sweep (siblings)\n"
             "  /prune <filter-expr>        — dim non-matching nodes\n"
-            "  /auto-regen [on|off|mode]   — sibling regen modifier (Ctrl+A toggles)\n"
+            "  /auto-regen [on|off|mode]   — sibling regen modifier (⌃A toggles)\n"
             "  /diff <id1> <id2> [--full]  — cross-branch text + readings diff\n"
             "  /diff --siblings            — diff active user-parent's kids\n"
-            "  Ctrl+E/B/N/D open the loom screen; use /edit /branch /nav /del\n"
+            "  ⌃E/B/N/D open the loom screen; use /edit /branch /nav /del\n"
             "  for inline equivalents.\n"
-            "Keys: Tab focus · ←/→ alpha (±0.01) · Shift+←/→ ±0.1\n"
+            "Keys: ⇥ focus · ←/→ alpha (±0.01) · ⇧←/→ ±0.1\n"
             "↑/↓ nav (panels) · ↑/↓ in chat input recalls history\n"
-            "Enter toggle · Backspace remove · Ctrl+T think · Ctrl+R regen\n"
-            "Ctrl+A A/B · Ctrl+S sort · Ctrl+Y highlight · Ctrl+L loom\n"
-            "Ctrl+E edit · Ctrl+B branch · Ctrl+N nav · Ctrl+D del\n"
-            "[ ] temp · { } top-p · Esc stop · Ctrl+Q quit"
+            "⏎ toggle · ⌫ remove · ⌃T think · ⌃R regen\n"
+            "⌃A A/B · ⌃S sort · ⌃Y highlight · ⌃L loom\n"
+            "⌃E edit · ⌃B branch · ⌃N nav · ⌃D del\n"
+            "[ ] temp · { } top-p · ⎋ stop · ⌃Q quit"
         )
 
     # -- Vector Management --
@@ -976,7 +976,7 @@ class SaklasApp(App[None]):
         self._highlighting = True
         self._apply_highlight_to_all()
         self._refresh_trait_why()
-        self._steer_status(f"Probe '{name}' active. Highlight on (Ctrl+Y to cycle).")
+        self._steer_status(f"Probe '{name}' active. Highlight on (⌃Y to cycle).")
 
     def _refresh_left_panel(self) -> None:
         self._left_panel.update_vectors(self._vector_list_for_panel())
@@ -2082,7 +2082,7 @@ class SaklasApp(App[None]):
                     self._refresh_trait_why()
                 lines = [f"Bulk probe '{ns}/': added {len(loaded)} probe(s)."]
                 if loaded:
-                    lines.append("  Highlight on (Ctrl+Y to cycle).")
+                    lines.append("  Highlight on (⌃Y to cycle).")
                 if skipped:
                     lines.append(self._bulk_skip_message(ns, skipped))
                 chat.add_system_message("\n".join(lines))
@@ -2314,7 +2314,7 @@ class SaklasApp(App[None]):
         self._refresh_left_panel()
         chat.add_system_message(
             f"loaded tree from {path} ({len(loaded.nodes)} nodes) — "
-            f"Ctrl+L to view the tree"
+            f"⌃L to view the tree"
         )
 
     def _handle_export(self, arg: str) -> None:
