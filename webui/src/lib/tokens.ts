@@ -22,12 +22,10 @@ export const HIGHLIGHT_SAT = 0.5;
 export const SURPRISE_TARGET = "__surprise__";
 
 /** Map a chosen-token logprob to a positive-scale score suitable for
- *  ``scoreToRgb`` per Decisions 4 + 5 of docs/plans/logit-pass.md.
+ *  ``scoreToRgb``.
  *
  *  Logic:
- *    surprise_value = 1 / (-logprob + 1)       # [0, ∞) → (0, 1]
- *    tint           = 1 - surprise_value       # high surprise = high tint
- *                  = -logprob / (1 - logprob)
+ *    tint = 1 - exp(logprob) = 1 - probability   # [0, 1)
  *
  *  Then scaled by ``HIGHLIGHT_SAT`` so the full surprise range
  *  ``[0, 1]`` lands in ``scoreToRgb``'s positive-saturation band and
@@ -37,9 +35,9 @@ export function surpriseScore(
   logprob: number | null | undefined,
 ): number | undefined {
   if (logprob == null || !Number.isFinite(logprob)) return undefined;
-  // ``logprob`` is the log of a probability so it's always ≤ 0 — the
-  // denominator ``1 - logprob`` is always ≥ 1, never division-by-zero.
-  const tint = -logprob / (1 - logprob);
+  // ``logprob`` is the log of a probability so it's always ≤ 0 —
+  // ``exp(logprob)`` is in (0, 1] and ``tint`` lands in [0, 1).
+  const tint = 1 - Math.exp(logprob);
   return tint * HIGHLIGHT_SAT;
 }
 

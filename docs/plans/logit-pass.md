@@ -106,6 +106,15 @@ source-of-truth discipline.
   fan).  The CPU test surface for sweeps requires a real model
   load — out of scope for this CPU-only test suite.  The KL math is
   covered indirectly by `tests/test_joint_logprobs.py::test_approx_kl_*`.
+- **Surprise scale swapped to `1 - probability`.** Decision 4's
+  `-logprob / (1 - logprob)` was a smooth rational mapping but obscured
+  what the number meant; the replacement `surprise = 1 - exp(logprob)`
+  is the same `[0, 1)` range with a direct reading ("how unlikely was
+  this token"), so researchers don't have to mentally invert a ratio.
+  Applied uniformly: `surpriseScore` (inline tint), `_surprise_score`
+  (TUI mirror), `LoomEdge` intensity, and `ActivationAtlasDrawer`
+  picker spark (which had been on a separate `-logprob / 12` linear
+  ramp — now folded into the same formula).
 
 **Phase 7 — deferred to its own plan** as the spec calls for.
 

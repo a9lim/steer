@@ -37,15 +37,14 @@
   /** Logit-pass: map ``mean_logprob`` (≤ 0) to a [0, 1] surprise
    *  intensity for edge stroke-width / opacity scaling.
    *
-   *  confidence = 1 / (1 - logprob)   # logprob → 0 ⇒ 1; logprob → -∞ ⇒ 0
-   *  surprise   = 1 - confidence
+   *  surprise = 1 - exp(logprob) = 1 - probability
+   *           # logprob → 0 ⇒ 0; logprob → -∞ ⇒ 1
    *
    *  Returns ``null`` when the input is missing — caller then renders
    *  flat (the unweighted shape). */
   const intensity = $derived.by<number | null>(() => {
     if (weight == null || !Number.isFinite(weight) || weight > 0) return null;
-    const conf = 1 / (1 - weight);
-    return 1 - conf;
+    return 1 - Math.exp(weight);
   });
 
   /** Scale the line's CSS variables.  Width grows from 1px → 3px,

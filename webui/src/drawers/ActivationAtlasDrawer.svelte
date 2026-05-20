@@ -103,12 +103,12 @@
     };
   });
 
-  /** Surprise glyph width for the token-picker spark — same logic as
-   * the old atlas; logprob → [0, 1] surprise, scaled into a thin bar
-   * along the bottom of each picker chip. */
+  /** Surprise glyph width for the token-picker spark — logprob → [0, 1]
+   * surprise via ``1 - probability``, scaled into a thin bar along the
+   * bottom of each picker chip. */
   function surpriseWidth(tok: TokenScore): string {
     if (typeof tok.logprob !== "number") return "width: 4%;";
-    const surprise = Math.min(1, Math.max(0, -tok.logprob / 12));
+    const surprise = Math.min(1, Math.max(0, 1 - Math.exp(tok.logprob)));
     return `width: ${Math.max(4, surprise * 100)}%;`;
   }
 

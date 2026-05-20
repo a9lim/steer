@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
@@ -207,13 +208,12 @@ def _surprise_score(logprob: float | None) -> float:
     """Map a chosen-token logprob to a positive ``[0, ~0.5]`` tint score
     suitable for ``_build_highlight_markup``'s saturation mapping.
 
-    Decision 4 of docs/plans/logit-pass.md:
-        tint = -logprob / (1 - logprob)        # [0, 1)
-        score = tint * _HIGHLIGHT_SAT          # so 1.0 saturates green
+        tint = 1 - exp(logprob) = 1 - probability   # [0, 1)
+        score = tint * _HIGHLIGHT_SAT               # so 1.0 saturates green
 
-    ``logprob`` is the log of a probability so it's always ≤ 0 — the
-    denominator ``1 - logprob`` is ≥ 1, never division-by-zero.  None /
-    non-finite logprobs return 0 (no tint).
+    ``logprob`` is the log of a probability so it's always ≤ 0 —
+    ``exp(logprob)`` lands in (0, 1] and ``tint`` lands in [0, 1).
+    None / non-finite logprobs return 0 (no tint).
     """
     if logprob is None:
         return 0.0
@@ -222,7 +222,7 @@ def _surprise_score(logprob: float | None) -> float:
     # falls through to "no tint" rather than poisoning the markup.
     if not (-float("inf") < logprob <= 0.0):
         return 0.0
-    tint = -logprob / (1.0 - logprob)
+    tint = 1.0 - math.exp(logprob)
     return tint * _HIGHLIGHT_SAT
 
 
