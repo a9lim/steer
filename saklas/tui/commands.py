@@ -320,6 +320,17 @@ def _build_registry() -> dict[str, SlashCommand]:
             min_args=0,
             max_args=0,
         ),
+        SlashCommand(
+            name="/commit",
+            handler=SaklasApp._handle_commit,
+            # ``min_args=1, max_args=None`` so the rest of the line is
+            # one logical text argument — same shape as ``/sys`` and
+            # ``/note``.  Slash-dispatch passes the full remainder to
+            # the handler, preserving internal whitespace.
+            usage="Usage: /commit <text>",
+            min_args=1,
+            max_args=None,
+        ),
         # --- Loom (phase 4) ---
         SlashCommand(
             name="/tree",

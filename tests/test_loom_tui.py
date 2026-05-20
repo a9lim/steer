@@ -1265,3 +1265,43 @@ def test_dispatch_pending_commit_assistant_routes_correctly():
     app._start_commit_assistant = MagicMock()
     app._dispatch_pending_action(("commit_assistant", "the reply", uid))
     app._start_commit_assistant.assert_called_once_with(uid, "the reply")
+
+
+def test_slash_commit_on_assistant_node_routes_to_commit_user():
+    """`/commit text` on a non-user active node lands a user turn — the
+    cross-terminal fallback for Ctrl+Enter."""
+    app = _make_app()
+    tree = app._session.tree
+    _uid, aid = _seed_tree(tree)
+    tree.navigate(aid)
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app._handle_commit("manual user input")
+    app._start_commit_user.assert_called_once_with("manual user input")
+    app._start_commit_assistant.assert_not_called()
+
+
+def test_slash_commit_on_user_node_routes_to_commit_assistant():
+    """`/commit text` on a user active node lands an authored assistant
+    turn (full reply), same as Ctrl+Enter on a user node."""
+    app = _make_app()
+    tree = app._session.tree
+    uid, _aid = _seed_tree(tree)
+    tree.navigate(uid)
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app._handle_commit("the canned reply")
+    app._start_commit_assistant.assert_called_once_with(uid, "the canned reply")
+    app._start_commit_user.assert_not_called()
+
+
+def test_slash_commit_empty_text_prints_usage():
+    """`/commit` with no argument prints the usage hint and dispatches
+    nothing."""
+    app = _make_app()
+    app._start_commit_user = MagicMock()
+    app._start_commit_assistant = MagicMock()
+    app._handle_commit("   ")
+    app._start_commit_user.assert_not_called()
+    app._start_commit_assistant.assert_not_called()
+    assert "Usage: /commit" in _msgs(app)

@@ -485,9 +485,17 @@ class ChatInput(TextArea):
             self.value = value
 
     async def _on_key(self, event: _textual_events.Key) -> None:
-        # Bare Enter submits; Shift+Enter falls through to a literal
-        # newline insert.  Anything else hands off to TextArea's default
-        # ``_on_key`` (printable chars, etc.).
+        # Bare Enter submits; ``shift+enter`` and ``ctrl+j`` both insert
+        # a literal newline.  Two newline keys because ``shift+enter`` is
+        # the natural chat-UI convention but it only reaches the app on
+        # terminals that speak the CSI-u / kitty keyboard protocol
+        # (Ghostty, Kitty, WezTerm) — stock macOS Terminal.app and
+        # iTerm2 silently collapse it to bare ``enter``.  ``ctrl+j``
+        # sends a literal LF (0x0A) which Textual's ``KEY_ALIASES``
+        # routes as a separate key from ``enter`` (CR, 0x0D) on every
+        # terminal, so it's the reliable cross-terminal fallback.
+        # Anything else hands off to ``TextArea._on_key`` (printable
+        # chars, etc.).
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -496,7 +504,7 @@ class ChatInput(TextArea):
                 self.load_text("")
                 self.post_message(self.Submitted(text))
             return
-        if event.key == "shift+enter":
+        if event.key in ("shift+enter", "ctrl+j"):
             event.stop()
             event.prevent_default()
             self.insert("\n")
@@ -529,11 +537,16 @@ class ChatPanel(Widget):
         # Multi-line chat input.  ``show_line_numbers=False`` keeps the
         # editor chrome out; ``soft_wrap=True`` is the TextArea default
         # (long lines wrap visually without changing the underlying
-        # newlines).  Height grows with content up to a CSS-side cap.
+        # newlines).  ``highlight_cursor_line=False`` disables the
+        # always-on "boost"-coloured background under the cursor line —
+        # under the ansi theme that read as an opaque black band rather
+        # than a subtle highlight.  Height grows with content up to a
+        # CSS-side cap.
         yield ChatInput(
-            placeholder="Type a message...  (shift+enter newline)",
+            placeholder="Type a message...  (ctrl+j or shift+enter for newline)",
             id="chat-input",
             show_line_numbers=False,
+            highlight_cursor_line=False,
         )
 
     def on_mount(self) -> None:
@@ -580,9 +593,9 @@ class ChatPanel(Widget):
         except Exception:
             return
         inp.placeholder = (
-            "Prefill the assistant's reply…  (shift+enter newline · ctrl/alt+enter = commit as full turn)"
+            "Prefill the assistant's reply…  (ctrl+j or shift+enter for newline)"
             if on
-            else "Type a message...  (shift+enter newline · ctrl/alt+enter = commit, no generation)"
+            else "Type a message...  (ctrl+j or shift+enter for newline)"
         )
 
     # -- AB mode --

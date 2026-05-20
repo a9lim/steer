@@ -128,6 +128,16 @@ Widget {
  * status bar.  Background/border match the surrounding ansi theme so
  * the multi-line variant blends in the same way the old single-line
  * Input did.
+ *
+ * TextArea ships with a non-trivial default theme — most importantly a
+ * ``$surface`` background on the widget and a ``$boost`` background on
+ * the cursor's current line.  Under the saklas ansi theme those resolve
+ * to opaque dark fills that read as a black band inside the rounded
+ * border.  Force them both to ``ansi_default`` so the input blends with
+ * the terminal background.  ``highlight_cursor_line=False`` on the
+ * widget itself suppresses the per-line highlight, but the CSS override
+ * is kept as a defence in depth (theme switches may otherwise leak
+ * through).
  */
 #chat-input {
     height: auto;
@@ -139,9 +149,13 @@ Widget {
     color: ansi_default;
 }
 
-/* Override Textual's default focus border */
 #chat-input:focus {
     border: solid ansi_default;
+    background: ansi_default;
+}
+
+#chat-input > .text-area--cursor-line {
+    background: ansi_default;
 }
 
 /* TextArea exposes its selection style through ``.text-area--selection``

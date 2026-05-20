@@ -590,6 +590,9 @@ class SaklasApp(App[None]):
             "  /compare <a> [b]            — cosine similarity\n"
             "Highlight:\n"
             "  Ctrl+Y / Ctrl+Shift+Y       — cycle {off → probe → surprise}\n"
+            "Commit (no-gen send):\n"
+            "  Ctrl+Enter / Alt+Enter      — modern terminals only\n"
+            "  /commit <text>              — cross-terminal fallback\n"
             "Session:\n"
             "  /clear, /rewind, /regen     — history ops\n"
             "  /save <name>, /load <name>  — save / restore the loom tree\n"
@@ -1347,13 +1350,26 @@ class SaklasApp(App[None]):
             return
         inp.load_text("")
         self._push_input_history(text)
+        self._commit_with_text(text)
 
-        # Role-aware target: ``_prefill_target_node_id`` returns the
-        # active user-node id when on a user turn; the commit there
-        # authors the whole assistant reply.  Otherwise we commit a new
-        # user turn under the active node.
+    def _commit_with_text(self, text: str) -> None:
+        """Role-aware commit dispatch — text becomes the next turn.
+
+        Shared between ``action_commit_text`` (Ctrl/Alt+Enter binding,
+        when the terminal passes the modifier through) and
+        ``_handle_commit`` (``/commit <text>`` slash command, the
+        stock-terminal fallback).  ``_prefill_target_node_id`` returns
+        the active user-node id when the active node is a user turn —
+        in which case ``text`` becomes the full authored assistant
+        reply.  Otherwise we commit a new user turn under the active
+        node.
+
+        Honors the in-flight-generation queue the same way ``_handle_*``
+        slash handlers do: stash on ``_pending_action`` + call
+        ``session.stop()`` so the commit lands once the streaming
+        sibling finishes.
+        """
         user_node_id = self._prefill_target_node_id()
-
         if self._session.is_generating:
             kind = (
                 "commit_assistant" if user_node_id is not None else "commit_user"
@@ -1366,6 +1382,24 @@ class SaklasApp(App[None]):
             self._start_commit_assistant(user_node_id, text)
         else:
             self._start_commit_user(text)
+
+    def _handle_commit(self, raw: str) -> None:
+        """`/commit <text>` — same semantics as Ctrl+Enter, by typing.
+
+        The slash form is the cross-terminal fallback: stock macOS
+        Terminal.app and iTerm2 collapse ``ctrl+enter`` and ``alt+enter``
+        to bare ``enter``, so users without the CSI-u / kitty keyboard
+        protocol can't reach the modifier binding.  Typing
+        ``/commit hello`` lands the same turn the binding would have.
+        """
+        text = (raw or "").strip()
+        if not text:
+            self._chat_panel.add_system_message("Usage: /commit <text>")
+            return
+        # The slash dispatcher already pushed the full ``/commit …``
+        # line to input history before invoking this handler — don't
+        # double-push.
+        self._commit_with_text(text)
 
     def _start_commit_user(self, text: str) -> None:
         """Land a user turn under the active node without generating.
