@@ -66,7 +66,12 @@ def _make_app():
     app._ab_shadow_active = False
     app._ab_shadow_row = None
     app._row_for_widget = {}
-    app._pending_action = None
+    # Pending-queue replaces the legacy single-slot ``_pending_action``.
+    # ``_pulled_slot`` tracks an in-progress ↑-pull-and-edit; default
+    # None means "no slot pulled."  Tests that need a populated queue
+    # mutate ``_pending_queue`` directly.
+    app._pending_queue = []
+    app._pulled_slot = None
     app._ui_gen_active = False
     app._focused_panel_idx = 1
     app._highlighting = False
@@ -1184,6 +1189,237 @@ def test_user_submit_appends_to_history():
     # either downstream path.
     app._start_generation.assert_called_once_with("hello world")
     assert app._handle_command.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Pending queue + ↑/↓ pull-and-edit
+# ---------------------------------------------------------------------------
+
+
+def test_history_navigate_walks_pending_then_history():
+    """``↑`` walks the queue (most-recent first) before falling into
+    committed input history.  Pending positions land on
+    ``_pulled_slot``; history positions land on ``_history_index``."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._input_history = ["older"]
+    app._pending_queue = [
+        PendingItem("submit", "first queued"),
+        PendingItem("submit", "second queued"),
+    ]
+    inp = _wire_fake_input(app, value="composing")
+
+    # First ↑ — most-recent pending.
+    app._history_navigate(-1)
+    assert inp.text == "second queued"
+    assert app._pulled_slot == 1
+    assert app._history_index is None
+    assert app._history_stash == "composing"
+    assert inp.allow_empty_submit is True
+
+    # Second ↑ — earlier pending.
+    app._history_navigate(-1)
+    assert inp.text == "first queued"
+    assert app._pulled_slot == 0
+    assert inp.allow_empty_submit is True
+
+    # Third ↑ — falls into history.
+    app._history_navigate(-1)
+    assert inp.text == "older"
+    assert app._pulled_slot is None
+    assert app._history_index == 0
+    assert inp.allow_empty_submit is False
+
+    # Fourth ↑ — clamps at the oldest history entry.
+    app._history_navigate(-1)
+    assert inp.text == "older"
+
+
+def test_history_navigate_down_returns_through_pending_to_live():
+    """``↓`` walks back through pending and restores the stash at live."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._pending_queue = [
+        PendingItem("submit", "alpha"),
+        PendingItem("submit", "beta"),
+    ]
+    inp = _wire_fake_input(app, value="composing")
+
+    app._history_navigate(-1)  # → "beta" (slot 1)
+    app._history_navigate(-1)  # → "alpha" (slot 0)
+    assert app._pulled_slot == 0
+
+    app._history_navigate(+1)  # → "beta" (slot 1)
+    assert inp.text == "beta"
+    assert app._pulled_slot == 1
+
+    app._history_navigate(+1)  # → restore stash
+    assert inp.text == "composing"
+    assert app._pulled_slot is None
+    assert app._history_index is None
+    assert inp.allow_empty_submit is False
+
+
+def test_pulled_pending_resubmit_replaces_slot_in_place():
+    """``Enter`` after editing a pulled slot replaces *that* slot rather
+    than appending to the queue tail — slot-preserving edit."""
+    from saklas.tui.chat_panel import ChatPanel, PendingItem
+
+    app = _make_app()
+    app._session.is_generating = True  # busy so submit enqueues
+    app._pending_queue = [
+        PendingItem("submit", "a"),
+        PendingItem("submit", "b"),
+        PendingItem("submit", "c"),
+    ]
+    _wire_fake_input(app, value="")
+    # Simulate the user having pulled slot 1 ("b") via ↑↑.
+    app._pulled_slot = 1
+
+    app.on_chat_panel_user_submitted(ChatPanel.UserSubmitted("B prime"))
+
+    # Slot 1 replaced; order preserved.
+    assert [p.text for p in app._pending_queue] == ["a", "B prime", "c"]
+    # Pull state cleared.
+    assert app._pulled_slot is None
+
+
+def test_pulled_pending_empty_enter_removes_slot():
+    """Empty ``Enter`` while a slot is pulled removes that slot —
+    keyboard equivalent of the GUI's per-bubble ``×``."""
+    from saklas.tui.chat_panel import ChatPanel, PendingItem
+
+    app = _make_app()
+    app._pending_queue = [
+        PendingItem("submit", "keep me"),
+        PendingItem("submit", "cancel me"),
+    ]
+    _wire_fake_input(app, value="")
+    app._pulled_slot = 1
+
+    app.on_chat_panel_user_submitted(ChatPanel.UserSubmitted(""))
+
+    assert [p.text for p in app._pending_queue] == ["keep me"]
+    assert app._pulled_slot is None
+
+
+def test_pulled_pending_esc_cancels_pull_without_removing():
+    """``Esc`` while pulled cancels the *edit* — the slot stays in the
+    queue, the input restores its pre-pull stash."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._pending_queue = [PendingItem("submit", "queued")]
+    inp = _wire_fake_input(app, value="composing")
+
+    app._history_navigate(-1)  # pull slot 0
+    assert app._pulled_slot == 0
+    assert inp.text == "queued"
+
+    app.action_stop_generation()  # no gen running → cancel pull
+    assert app._pulled_slot is None
+    assert inp.text == "composing"
+    assert app._pending_queue == [PendingItem("submit", "queued")]
+    assert inp.allow_empty_submit is False
+
+
+def test_drain_next_pending_decrements_pulled_slot():
+    """When the queue head drains during a pull, the pulled-slot index
+    shifts so the user keeps tracking the same item."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._pending_queue = [
+        PendingItem("submit", "head"),
+        PendingItem("submit", "middle"),
+        PendingItem("submit", "tail"),
+    ]
+    _wire_fake_input(app, value="")
+    app._pulled_slot = 2  # user is editing "tail"
+    # Block the dispatch so we only see the slot accounting.
+    app._dispatch_pending_action = MagicMock()
+
+    app._drain_next_pending()
+    assert [p.text for p in app._pending_queue] == ["middle", "tail"]
+    assert app._pulled_slot == 1  # still on "tail" — index slid down
+
+
+def test_drain_next_pending_cancels_pull_when_head_was_pulled():
+    """When the user pulled slot 0, the drain pops that very item —
+    cancel the pull so the stale ``_pulled_slot`` doesn't outlive the
+    queue mutation."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._pending_queue = [
+        PendingItem("submit", "about to fire"),
+        PendingItem("submit", "next up"),
+    ]
+    inp = _wire_fake_input(app, value="draft")
+    app._history_stash = "draft"
+    app._pulled_slot = 0
+    app._dispatch_pending_action = MagicMock()
+
+    app._drain_next_pending()
+    assert [p.text for p in app._pending_queue] == ["next up"]
+    assert app._pulled_slot is None
+    # Pull cancelled — input restored from stash.
+    assert inp.text == "draft"
+
+
+def test_pending_strip_markup_round_trips_through_rich():
+    """Direct check that ``PendingStrip`` builds well-formed Rich
+    markup for every pending kind, including the pulled-slot
+    highlight and item text containing brackets / newlines.  Catches
+    a v2.x regression where ``[[`` was used as a literal-bracket
+    escape and tripped ``MarkupError: auto closing tag ('[/]') has
+    nothing to close`` when the strip first re-rendered."""
+    from rich.console import Console
+    from rich.text import Text
+    from saklas.tui.chat_panel import PendingItem, PendingStrip
+    import io
+
+    # Side-step Textual's mount lifecycle by calling the markup
+    # builder via Static.update with a captured update target.
+    strip = object.__new__(PendingStrip)
+    captured: list[str] = []
+    strip.update = lambda s: captured.append(s)  # type: ignore[method-assign]
+    strip.add_class = lambda _c: None  # type: ignore[method-assign]
+    strip.remove_class = lambda _c: None  # type: ignore[method-assign]
+    strip._queue = []
+
+    items = [
+        PendingItem("submit", "what do you think?"),
+        PendingItem("clear", "/clear"),
+        PendingItem("steer", "/steer 0.5 angry"),
+        PendingItem("submit", "with [brackets] and \\backslashes"),
+        PendingItem("submit", "multi\nline\nmessage"),
+    ]
+    for slot in [None, 0, 2, len(items) - 1]:
+        PendingStrip.update_queue(strip, items, pulled_slot=slot)
+        # Parsing through Text.from_markup raises MarkupError on bad
+        # markup — the assertion is "no raise."
+        Console(file=io.StringIO(), force_terminal=True).print(
+            Text.from_markup(captured[-1])
+        )
+
+
+def test_slash_command_during_gen_enqueues_canonical_text():
+    """Mid-gen ``/clear`` enqueues a :class:`PendingItem` carrying the
+    full slash text so the user can pull and edit it via ↑.  The
+    in-flight gen is not stopped — queue model preserves tokens."""
+    from saklas.tui.chat_panel import PendingItem
+
+    app = _make_app()
+    app._session.is_generating = True
+    app._session.stop = MagicMock()
+
+    app._handle_command("/clear")
+
+    assert app._pending_queue == [PendingItem("clear", "/clear")]
+    app._session.stop.assert_not_called()
 
 
 def test_shift_arrow_uses_coarse_alpha_step():

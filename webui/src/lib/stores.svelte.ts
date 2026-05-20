@@ -51,6 +51,10 @@ import { pushToast } from "./stores/toasts.svelte";
 
 export * from "./stores/drawers.svelte";
 export * from "./stores/inputHistory.svelte";
+import {
+  onPendingQueueShift,
+  requestInputRestore,
+} from "./stores/inputHistory.svelte";
 export { dismissToast, pushToast, toasts } from "./stores/toasts.svelte";
 
 // =========================================================== session ====
@@ -1164,10 +1168,10 @@ export async function refreshPacks(): Promise<void> {
 // ===================================================== pending actions ===
 
 export interface PendingActionsState {
-  /** Queue of mutations deferred while a generation is running.  Drained
-   * by ``applyPendingActions`` once the WS ``done`` event arrives, or
-   * immediately when the user hits "apply now" (which also issues a stop
-   * frame to interrupt the in-flight gen). */
+  /** Queue of mutations and submissions deferred while a generation is
+   * running.  Drained one item per WS ``done`` event by
+   * :func:`drainNextPendingAction`.  Per-item cancel goes through
+   * :func:`cancelPendingAction` (the GUI's per-bubble ``×``). */
   queue: PendingAction[];
 }
 
@@ -1175,45 +1179,98 @@ export const pendingActions: PendingActionsState = $state({ queue: [] });
 
 let _pendingCounter = 0;
 
-export function enqueuePending(action: Omit<PendingAction, "id" | "createdAt">): void {
-  pendingActions.queue.push({
+/** Append a pending action.  ``replaceSlot`` slots a re-edited
+ *  pulled item back into its original position rather than the queue
+ *  tail; out-of-range values fall back to append. */
+export function enqueuePending(
+  action: Omit<PendingAction, "id" | "createdAt">,
+  opts: { replaceSlot?: number | null } = {},
+): void {
+  const item: PendingAction = {
     ...action,
     id: `pa-${_pendingCounter++}`,
     createdAt: Date.now(),
-  });
+  };
+  const slot = opts.replaceSlot ?? null;
+  if (slot !== null && slot >= 0 && slot < pendingActions.queue.length) {
+    pendingActions.queue[slot] = item;
+  } else {
+    pendingActions.queue.push(item);
+  }
 }
 
-export function applyPendingActions(): void {
-  const q = pendingActions.queue;
-  pendingActions.queue = [];
-  for (const a of q) {
-    try {
-      void a.apply();
-    } catch (e) {
-      // Surface as a system message so the user sees the failure.
-      chatLog.turns = [
-        ...chatLog.turns,
-        {
-          role: "system",
-          text: `pending action ${a.label} failed: ${String(e)}`,
-        },
-      ];
-    }
+/** Drain a single pending item.  Called from the WS ``done`` /
+ *  ``error`` handlers; an ``awaitsGen=false`` item chains into the
+ *  next drain immediately so a sequence of instant mutations
+ *  (clear, rewind) doesn't stall waiting for a gen that's never
+ *  going to fire.
+ *
+ *  Replaces the v1.x ``applyPendingActions`` which drained *all*
+ *  items on every ``done`` — the v2.x queue semantics serialize
+ *  one item per ``done`` so a send-then-send pair runs in order
+ *  rather than racing the WS. */
+export async function drainNextPendingAction(): Promise<void> {
+  if (pendingActions.queue.length === 0) return;
+  // Reconcile the input-history pull state before mutating the queue:
+  // a drained head whose slot the user is editing would otherwise
+  // leave a dangling ``pulledSlot`` pointing past the array.  The
+  // shift helper returns the stash text when slot 0 was pulled; we
+  // park it on ``inputRestore`` so Chat.svelte's $effect copies it
+  // back into the textarea on the next tick.
+  const restore = onPendingQueueShift();
+  if (restore !== null) requestInputRestore(restore);
+  const item = pendingActions.queue.shift();
+  if (!item) return;
+  try {
+    await item.apply();
+  } catch (e) {
+    chatLog.turns = [
+      ...chatLog.turns,
+      {
+        role: "system",
+        text: `pending ${item.label} failed: ${String(e)}`,
+      },
+    ];
   }
+  if (!item.awaitsGen) {
+    // Instant mutation finished — chain into the next item so the
+    // queue doesn't stall waiting for a ``done`` that won't fire.
+    await drainNextPendingAction();
+  }
+}
+
+/** Remove one pending item by id (GUI per-bubble ``×``). */
+export function cancelPendingAction(id: string): void {
+  pendingActions.queue = pendingActions.queue.filter((p) => p.id !== id);
 }
 
 export function discardPendingActions(): void {
   pendingActions.queue = [];
 }
 
-/** Apply immediately if no gen is in flight; queue otherwise.  Every
- * rack/sampling mutation routes through this so behavior is uniform. */
+/** Apply immediately if no gen is in flight AND the queue is empty;
+ *  queue otherwise.  The queue check matters: with one or more items
+ *  already pending, applying a fresh rack mutation immediately would
+ *  break FIFO ordering of state mutations.
+ *
+ *  Used by the rack/sampling mutations — they don't kick off a gen, so
+ *  ``awaitsGen=false`` lets the drain chain through them without
+ *  waiting on the next ``done``. */
 function enqueueOrApply(label: string, apply: () => void): void {
-  if (genStatus.active) {
-    enqueuePending({ label, apply });
+  if (genStatus.active || pendingActions.queue.length > 0) {
+    enqueuePending({
+      label, text: null, apply, awaitsGen: false, rebuild: null,
+    });
   } else {
     apply();
   }
+}
+
+/** Are we busy enough that fresh submissions should queue instead of
+ *  fire?  Mirrors the TUI's ``_is_busy`` — gen running OR earlier
+ *  items waiting their turn.  Used by every submission helper below. */
+export function isPendingBusy(): boolean {
+  return genStatus.active || pendingActions.queue.length > 0;
 }
 
 // ============================================================ WS ========
@@ -1588,15 +1645,17 @@ function handleWsMessage(msg: WSServerMessage): void {
         abState.pendingTurnIdx = null;
         // Drain pending actions queued during the shadow gen — same
         // gen-active gate the steered branch uses.
-        applyPendingActions();
+        void drainNextPendingAction();
         return;
       }
 
-      // Snapshot probe baselines + drain any deferred mutations on the
-      // steered done event only.
+      // Snapshot probe baselines + drain the next deferred mutation on
+      // the steered done event only.  Single-pop semantics: each
+      // queued item kicks its own work whose ``done`` will re-enter
+      // here and drain the next, preserving FIFO.
       snapshotProbeBaseline();
       void refreshCorrelation();
-      applyPendingActions();
+      void drainNextPendingAction();
 
       // v2.3: the legacy standalone A/B toggle is gone — auto-regen with
       // ``mode === "unsteered"`` *is* the A/B shadow.  Branch on the
@@ -1671,35 +1730,89 @@ function handleWsMessage(msg: WSServerMessage): void {
       }
       abState.processingAb = false;
       abState.pendingTurnIdx = null;
-      // Apply any pending actions even on error so the UI doesn't get
-      // stuck in "changes pending" forever.
-      applyPendingActions();
+      // Drain the next pending action even on error so the UI doesn't
+      // get stuck in "changes pending" forever.  The failed send
+      // already surfaced as the system message above.
+      void drainNextPendingAction();
       return;
     }
   }
 }
 
+export interface SendGenerateOpts {
+  stateless?: boolean;
+  raw?: boolean;
+  /** Override the rack-derived steering with an explicit string.  Pass
+   * ``""`` for unsteered (A/B mode); ``null``/``undefined`` to use the
+   * rack. */
+  steering?: string | null;
+  /** Loom: attach the result as a child of this node.  ``null`` /
+   *  absent = active node. */
+  parent_node_id?: string | null;
+  /** Loom: n-way regen.  Default 1. */
+  n?: number;
+  /** Loom phase 5: recipe-override modifier — mode string or partial
+   *  recipe expression. */
+  recipe_override?: string | null;
+}
+
+/** Build a :class:`PendingAction` for a queued chat send.  The
+ *  ``rebuild`` factory preserves ``opts`` across an ↑-pull-and-edit so
+ *  the slot's parent_node_id / steering override / n stay attached. */
+function buildSendPending(
+  text: string, opts: SendGenerateOpts,
+): PendingAction {
+  return {
+    id: `pa-${_pendingCounter++}`,
+    label: "send",
+    text,
+    apply: () => sendGenerateNow(text, opts),
+    awaitsGen: true,
+    rebuild: (newText: string) => buildSendPending(newText, opts),
+    createdAt: Date.now(),
+  };
+}
+
 /** Send a generate request over the WS.  Builds the steering expression
  * from the rack live, layers the SamplingConfig overrides when one-shot
- * mode is on, and routes everything through the singleton connection. */
+ * mode is on, and routes everything through the singleton connection.
+ *
+ * When a gen is in flight (or earlier items are queued) the request
+ * lands on the pending queue and waits for FIFO drain — the in-flight
+ * gen is *not* interrupted.  ``replaceSlot`` keeps a pulled-and-edited
+ * item at its original slot. */
 export async function sendGenerate(
   input: string | unknown,
-  opts: {
-    stateless?: boolean;
-    raw?: boolean;
-    /** Override the rack-derived steering with an explicit string.  Pass
-     * ``""`` for unsteered (A/B mode); ``null``/``undefined`` to use the
-     * rack. */
-    steering?: string | null;
-    /** Loom: attach the result as a child of this node.  ``null`` /
-     *  absent = active node. */
-    parent_node_id?: string | null;
-    /** Loom: n-way regen.  Default 1. */
-    n?: number;
-    /** Loom phase 5: recipe-override modifier — mode string or partial
-     *  recipe expression. */
-    recipe_override?: string | null;
-  } = {},
+  opts: SendGenerateOpts & { replaceSlot?: number | null } = {},
+): Promise<void> {
+  // Strings route through the pending queue when busy.  Non-string
+  // ``input`` (the A/B shadow path's messages array) always fires
+  // immediately — it's an internal store-to-store call that doesn't
+  // come from a user gesture and can't be pulled or re-edited.
+  if (typeof input === "string" && isPendingBusy()) {
+    const { replaceSlot, ...sendOpts } = opts;
+    const item = buildSendPending(input, sendOpts);
+    enqueuePending(
+      {
+        label: item.label,
+        text: item.text,
+        apply: item.apply,
+        awaitsGen: item.awaitsGen,
+        rebuild: item.rebuild,
+      },
+      { replaceSlot: replaceSlot ?? null },
+    );
+    return;
+  }
+  return sendGenerateNow(input, opts);
+}
+
+/** Immediate-fire core for ``sendGenerate``.  Bypasses the queue
+ *  check — called by ``sendGenerate`` itself when not busy and by
+ *  ``drainNextPendingAction`` via the queued item's ``apply``. */
+async function sendGenerateNow(
+  input: string | unknown,
+  opts: SendGenerateOpts = {},
 ): Promise<void> {
   const sock = await ensureWebSocket();
   const steering =
@@ -1777,6 +1890,20 @@ export async function sendFork(
   else sock.addEventListener("open", send, { once: true });
 }
 
+function buildPrefillPending(
+  nodeId: string, text: string, opts: { n?: number },
+): PendingAction {
+  return {
+    id: `pa-${_pendingCounter++}`,
+    label: "prefill",
+    text,
+    apply: () => sendPrefillNow(nodeId, text, opts),
+    awaitsGen: true,
+    rebuild: (newText: string) => buildPrefillPending(nodeId, newText, opts),
+    createdAt: Date.now(),
+  };
+}
+
 /** Answer-prefill — seed an assistant reply under a user node.  The
  *  server tokenizes ``text`` into a forced decode prefix, emits it as
  *  the opening of the assistant turn, then samples the continuation.
@@ -1784,8 +1911,34 @@ export async function sendFork(
  *  ``token`` / ``done`` events and becomes the active branch.  Steering
  *  and sampling ride from the current rack exactly like a normal
  *  ``sendGenerate``; ``thinking`` is forced off server-side (the text is
- *  the start of the answer, not a thought). */
+ *  the start of the answer, not a thought).
+ *
+ *  Queues behind in-flight gens / earlier pending items; the in-flight
+ *  gen is not interrupted. */
 export async function sendPrefill(
+  nodeId: string,
+  text: string,
+  opts: { n?: number; replaceSlot?: number | null } = {},
+): Promise<void> {
+  if (isPendingBusy()) {
+    const { replaceSlot, ...prefillOpts } = opts;
+    const item = buildPrefillPending(nodeId, text, prefillOpts);
+    enqueuePending(
+      {
+        label: item.label,
+        text: item.text,
+        apply: item.apply,
+        awaitsGen: item.awaitsGen,
+        rebuild: item.rebuild,
+      },
+      { replaceSlot: replaceSlot ?? null },
+    );
+    return;
+  }
+  return sendPrefillNow(nodeId, text, opts);
+}
+
+async function sendPrefillNow(
   nodeId: string,
   text: string,
   opts: { n?: number } = {},
@@ -1807,6 +1960,22 @@ export async function sendPrefill(
   else sock.addEventListener("open", send, { once: true });
 }
 
+function buildCommitPending(
+  role: "user" | "assistant",
+  parentNodeId: string | null,
+  text: string,
+): PendingAction {
+  return {
+    id: `pa-${_pendingCounter++}`,
+    label: role === "assistant" ? "commit assistant" : "commit user",
+    text,
+    apply: () => sendCommitNow(role, parentNodeId, text),
+    awaitsGen: true,
+    rebuild: (newText: string) => buildCommitPending(role, parentNodeId, newText),
+    createdAt: Date.now(),
+  };
+}
+
 /** Commit — land a turn without generating.  ``role`` decides which
  *  session method routes: ``"user"`` for ``append_user_turn`` (called
  *  on an assistant/root active node — ``parentNodeId`` is that node, or
@@ -1815,8 +1984,33 @@ export async function sendPrefill(
  *  authored turn hangs off — required).  The server emits a single
  *  ``done`` event with the new node id; the loom's ``node_created`` /
  *  ``tree_mutated`` subscriptions land the node in the UI.  No token
- *  streaming, no steering, no sampling — just a tree mutation. */
+ *  streaming, no steering, no sampling — just a tree mutation.
+ *
+ *  Queues behind in-flight gens / earlier pending items. */
 export async function sendCommit(
+  role: "user" | "assistant",
+  parentNodeId: string | null,
+  text: string,
+  opts: { replaceSlot?: number | null } = {},
+): Promise<void> {
+  if (isPendingBusy()) {
+    const item = buildCommitPending(role, parentNodeId, text);
+    enqueuePending(
+      {
+        label: item.label,
+        text: item.text,
+        apply: item.apply,
+        awaitsGen: item.awaitsGen,
+        rebuild: item.rebuild,
+      },
+      { replaceSlot: opts.replaceSlot ?? null },
+    );
+    return;
+  }
+  return sendCommitNow(role, parentNodeId, text);
+}
+
+async function sendCommitNow(
   role: "user" | "assistant",
   parentNodeId: string | null,
   text: string,

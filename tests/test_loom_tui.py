@@ -79,7 +79,12 @@ def _make_app():
     app._ab_shadow_active = False
     app._ab_shadow_row = None
     app._row_for_widget = {}
-    app._pending_action = None
+    # Pending-queue replaces the legacy single-slot ``_pending_action``.
+    # ``_pulled_slot`` tracks an in-progress ↑-pull-and-edit; default
+    # None means "no slot pulled."  Tests inspect ``_pending_queue``
+    # directly or build :class:`PendingItem` instances for dispatch.
+    app._pending_queue = []
+    app._pulled_slot = None
     app._ui_gen_active = False
     app._focused_panel_idx = 1
     app._highlighting = False
@@ -1023,7 +1028,7 @@ def test_regen_with_mode_calls_regen_with_modifier():
         captured["n"] = n
         captured["mode"] = mode
     app._run_regen_modifier_worker = _intercept
-    # Make sure we aren't deferred via _pending_action.
+    # Make sure we aren't deferred onto the pending queue.
     app._session.is_generating = False
 
     app._handle_command("/regen 4 inverted")
@@ -1128,8 +1133,12 @@ def test_user_submitted_on_assistant_node_routes_to_generation():
 
 
 def test_user_submitted_on_user_node_defers_prefill_target_in_pending():
-    """Mid-gen submit stashes the prefill target so the deferred dispatch
-    can't re-resolve against a shifted active node."""
+    """Mid-gen submit enqueues the prefill target so the deferred dispatch
+    can't re-resolve against a shifted active node.  Per the v2.x queue
+    semantics the in-flight gen is *not* interrupted — the new item
+    waits for the current ``done`` and drains FIFO."""
+    from saklas.tui.chat_panel import PendingItem
+
     app = _make_app()
     tree = app._session.tree
     uid, _aid = _seed_tree(tree)
@@ -1138,9 +1147,12 @@ def test_user_submitted_on_user_node_defers_prefill_target_in_pending():
     app._session.stop = MagicMock()
     app._start_prefill = MagicMock()
     app.on_chat_panel_user_submitted(SimpleNamespace(text="seed it"))
-    assert app._pending_action == ("submit", "seed it", uid)
+    assert app._pending_queue == [
+        PendingItem("submit", "seed it", (uid,)),
+    ]
     app._start_prefill.assert_not_called()
-    app._session.stop.assert_called_once()
+    # Stop is NOT called — queue model preserves in-flight tokens.
+    app._session.stop.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1214,8 +1226,11 @@ def test_commit_action_empty_input_is_noop():
 
 
 def test_commit_action_during_gen_queues_commit_user():
-    """Mid-gen Ctrl+Enter on a non-user node stashes the commit so the
-    deferred dispatch lands it once the streaming sibling finishes."""
+    """Mid-gen Ctrl+Enter on a non-user node enqueues a commit so the
+    deferred dispatch lands it once the streaming sibling finishes.
+    The queue model leaves the in-flight gen alone — no ``stop()``."""
+    from saklas.tui.chat_panel import PendingItem
+
     app = _make_app()
     tree = app._session.tree
     _uid, aid = _seed_tree(tree)
@@ -1225,14 +1240,16 @@ def test_commit_action_during_gen_queues_commit_user():
     app._session.stop = MagicMock()
     app._start_commit_user = MagicMock()
     app.action_commit_text()
-    assert app._pending_action == ("commit_user", "next bit")
+    assert app._pending_queue == [PendingItem("commit_user", "next bit")]
     app._start_commit_user.assert_not_called()
-    app._session.stop.assert_called_once()
+    app._session.stop.assert_not_called()
 
 
 def test_commit_action_during_gen_queues_commit_assistant_with_target():
-    """Mid-gen Ctrl+Enter on a user node stashes the user-node target so
+    """Mid-gen Ctrl+Enter on a user node enqueues the user-node target so
     the deferred dispatch can't re-resolve against a shifted active node."""
+    from saklas.tui.chat_panel import PendingItem
+
     app = _make_app()
     tree = app._session.tree
     uid, _aid = _seed_tree(tree)
@@ -1242,28 +1259,36 @@ def test_commit_action_during_gen_queues_commit_assistant_with_target():
     app._session.stop = MagicMock()
     app._start_commit_assistant = MagicMock()
     app.action_commit_text()
-    assert app._pending_action == ("commit_assistant", "the canned reply", uid)
+    assert app._pending_queue == [
+        PendingItem("commit_assistant", "the canned reply", (uid,)),
+    ]
     app._start_commit_assistant.assert_not_called()
-    app._session.stop.assert_called_once()
+    app._session.stop.assert_not_called()
 
 
 def test_dispatch_pending_commit_user_routes_correctly():
-    """``_dispatch_pending_action(("commit_user", text))`` calls
+    """``_dispatch_pending_action(PendingItem("commit_user", text))`` calls
     ``_start_commit_user`` — the post-gen wakeup path."""
+    from saklas.tui.chat_panel import PendingItem
+
     app = _make_app()
     app._start_commit_user = MagicMock()
-    app._dispatch_pending_action(("commit_user", "queued text"))
+    app._dispatch_pending_action(PendingItem("commit_user", "queued text"))
     app._start_commit_user.assert_called_once_with("queued text")
 
 
 def test_dispatch_pending_commit_assistant_routes_correctly():
-    """``_dispatch_pending_action(("commit_assistant", text, uid))`` calls
-    ``_start_commit_assistant`` with the stashed user-node target."""
+    """``_dispatch_pending_action(PendingItem("commit_assistant", text, (uid,)))``
+    calls ``_start_commit_assistant`` with the stashed user-node target."""
+    from saklas.tui.chat_panel import PendingItem
+
     app = _make_app()
     tree = app._session.tree
     uid, _aid = _seed_tree(tree)
     app._start_commit_assistant = MagicMock()
-    app._dispatch_pending_action(("commit_assistant", "the reply", uid))
+    app._dispatch_pending_action(
+        PendingItem("commit_assistant", "the reply", (uid,))
+    )
     app._start_commit_assistant.assert_called_once_with(uid, "the reply")
 
 

@@ -58,8 +58,9 @@ webui/src/
     WorkspaceRail.svelte      # left rail: category fly-outs
     InspectorPanel.svelte     # right rack: steering + probe racks (full column height)
     WorkbenchCard.svelte      # active-workbench card (model + device); bottom of threads column
-    StatusFooter.svelte       # gen progress · t/s · elapsed · ppl + pending-actions badge; mounted inside Chat above the input row
-    Chat.svelte               # thinking-collapsible, probe-tinted tokens, inline actions (clear/save/load/transcript), status footer
+    StatusFooter.svelte       # gen progress · t/s · elapsed · ppl + pending-queue count badge; mounted inside Chat above the input row
+    PendingBubbles.svelte     # ghosted bubbles for queued sends/commits/mutations + per-item × cancel; mounted between StatusFooter and the input row
+    Chat.svelte               # thinking-collapsible, probe-tinted tokens, inline actions (clear/save/load/transcript), status footer, pending bubbles
     SamplingStrip.svelte      # T / P / K / max / pres / freq / seed / thinking / alts + advanced/system-prompt buttons; foot of the threads column, below WorkbenchCard
     SteeringRack.svelte       # vector strips + "+ add steering" + canonical expression
     VectorStrip.svelte        # enable + α slider + trigger + variant + projection modal
@@ -78,6 +79,14 @@ webui/src/
 (`lib/stores.ts` is a dead legacy file — not imported anywhere; ignore it.)
 
 Adding a panel: write the `.svelte`, wire state into the smallest matching `lib/stores/` slice (or `stores.svelte.ts` for cross-cutting WS/tree/chat state), mount from `App.svelte`, `npm run build`, commit the regenerated `dist/`. Adding a drawer: write it under `drawers/`, add the name to the `DrawerName` union in `lib/types.ts` (and to `NARROW_DRAWERS` in `App.svelte` for forms/pickers), add an `App.svelte` switch branch, re-export from `drawers/index.ts`, and add it to a `WorkspaceRail.svelte` category fly-out.
+
+## Pending queue
+
+Submissions during an in-flight gen (or behind earlier queued items) defer rather than racing the WS — same semantics as the TUI. `sendGenerate` / `sendCommit` / `sendPrefill` check `isPendingBusy()` (gen active OR `pendingActions.queue.length > 0`) and, when busy, append a `PendingAction` (defined in `lib/types.ts`) carrying a `rebuild` factory the `↑`-pull-and-edit path uses to re-encode the same kind/role/target with new text. Instant mutations from the chat header (`/clear`, regen) and the rack/sampling sites also queue via `enqueuePending` with `awaitsGen: false` so the drain chains through them without waiting on a `done` that never fires.
+
+The WS `done` / `error` handlers call `drainNextPendingAction()` — one item per event — instead of the old v1 `applyPendingActions` (which drained everything at once). `PendingBubbles.svelte` renders the live queue above the input as dim chips; the per-bubble `×` calls `cancelPendingAction(id)` to remove a single slot. The bubble whose slot the user is currently editing via ↑ gets the `.editing` class — brighter amber background, thicker border, full-strength text, and a leading `✎` marker — driven off `inputHistory.pulledSlot`. The StatusFooter shows a `N queued` readout but no "apply now" button — under the FIFO model there's no skip-ahead semantics.
+
+Up-arrow walks the combined ring `[editable pending (most-recent first), input history (newest first)]`. Pulling a queued item sets `inputHistory.pulledSlot`; Chat.svelte forwards that to `sendGenerate` / `sendCommit` / `sendPrefill` as `replaceSlot` so a re-edited send lands at its original slot. `Esc` while pulled cancels the edit (slot stays, input restores the stash); empty `Enter` while pulled removes the slot — keyboard equivalent of the `×` button. Non-editable items (`rebuild === null`, e.g. queued `/clear` and regen) sit in the queue but the up-arrow walks past them.
 
 ## Reactivity gotcha
 

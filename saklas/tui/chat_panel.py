@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.markup import escape as _rich_escape
@@ -14,6 +15,139 @@ from textual.widget import Widget
 from textual.message import Message
 
 from saklas.tui.utils import BAR_WIDTH, build_bar
+
+
+# --- Pending queue (mid-gen submissions) ----------------------------------
+#
+# Both the TUI and the GUI defer chat sends, commits, and interrupting
+# slash commands while a generation is in flight rather than tearing the
+# current stream down to make room.  The TUI side lives here so the
+# ``PendingStrip`` widget can render directly off the dataclass without an
+# adapter layer; ``SaklasApp`` owns the list and dispatches each item once
+# the next ``done`` lands.
+
+# Short tag rendered at the head of each pending row.  Keys must match the
+# ``kind`` strings used by ``SaklasApp._dispatch_pending_action``.
+_KIND_LABELS: dict[str, str] = {
+    "submit": "msg",
+    "commit_user": "commit",
+    "commit_assistant": "commit",
+    "regenerate": "regen",
+    "rewind": "/rewind",
+    "clear": "/clear",
+    "quit": "/quit",
+    "steer": "/steer",
+    "probe": "/probe",
+    "extract": "/extract",
+    "regen_n": "/regen",
+    "fan": "/fan",
+}
+
+
+@dataclass(frozen=True)
+class PendingItem:
+    """One mid-generation submission deferred until the next ``done``.
+
+    Attributes
+    ----------
+    kind:
+        Dispatch tag consumed by
+        :meth:`SaklasApp._dispatch_pending_action`.  Values mirror the
+        legacy single-tuple ``_pending_action`` shapes one-for-one.
+    text:
+        Verbatim text the user typed (or the canonical re-typeable form
+        for slash-triggered items, e.g. ``"/steer 0.5 angry"``).  Drives
+        the strip display and the up-arrow pull-and-edit path — when the
+        user pulls an item back into the chat input the text shown here
+        is what they see.
+    payload:
+        Kind-specific extras: ``("submit", text, prefill_target)`` becomes
+        ``payload=(prefill_target,)``, ``("commit_assistant", text,
+        user_node_id)`` becomes ``payload=(user_node_id,)``, etc.  Empty
+        tuple when the kind has no extra args.
+    """
+
+    kind: str
+    text: str = ""
+    payload: tuple[Any, ...] = field(default_factory=tuple)
+
+    @property
+    def label(self) -> str:
+        """Short bracketed tag — ``msg``, ``commit``, ``/steer``, …"""
+        return _KIND_LABELS.get(self.kind, self.kind)
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    """Single-line ellipsised display form for the pending strip.
+
+    Newlines fold to ``⏎`` so a multi-line message reads as one strip
+    row; the ellipsis honors a hard char cap so a long pasted block
+    can't push the row to the full window width.
+    """
+    flat = text.replace("\n", " ⏎ ")
+    if len(flat) <= max_chars:
+        return flat
+    return flat[: max_chars - 1] + "…"
+
+
+class PendingStrip(Static):
+    """Ghosted single-line summary above the chat input.
+
+    Renders the current ``PendingItem`` queue as a compact dim listing —
+    ``pending 3 · [msg] what do you think? · [/steer] /steer 0.5 angry · …``.
+    Hidden via the ``.hidden`` CSS class when the queue is empty so the
+    strip takes zero rows in the common no-pending case.
+
+    The slot currently pulled into the input (``pulled_slot`` arg) is
+    highlighted with a leading ``✎`` marker and undimmed text so the
+    user can see at a glance which queued item is being edited.
+
+    Per-item cancel is keyboard-only and lives on the chat input side:
+    pull the item with ``↑``, clear with ``Ctrl+U``, ``Enter`` (the
+    empty-input replace path removes the slot).  The strip itself is
+    display-only — keeping it non-focusable means the existing
+    ``Tab`` panel cycle is unchanged.
+    """
+
+    DEFAULT_CSS = ""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(id="pending-strip", **kwargs)
+        self.add_class("hidden")
+        self._queue: list[PendingItem] = []
+
+    def update_queue(
+        self, queue: list[PendingItem], *, pulled_slot: int | None = None,
+    ) -> None:
+        """Replace the rendered queue.  Hides the strip when empty.
+
+        ``pulled_slot`` (when in range) marks the item the user is
+        currently editing via the ↑-pull-and-edit path: that entry
+        renders with a leading ``✎`` and undimmed text so the editing
+        state is visible without an extra row.
+        """
+        self._queue = list(queue)
+        if not self._queue:
+            self.add_class("hidden")
+            self.update("")
+            return
+        self.remove_class("hidden")
+        n = len(self._queue)
+        parts: list[str] = [f"[ansi_yellow]pending {n}[/ansi_yellow]"]
+        for i, item in enumerate(self._queue):
+            label_esc = _rich_escape(item.label)
+            text_esc = _rich_escape(_truncate(item.text, 48))
+            if i == pulled_slot:
+                # Undimmed + ✎ marker so the user can see at a glance
+                # which queued item is being edited.
+                parts.append(
+                    f"[ansi_yellow]✎ {label_esc}[/ansi_yellow] {text_esc}"
+                )
+            else:
+                parts.append(
+                    f"[dim][ansi_blue]{label_esc}[/ansi_blue] {text_esc}[/dim]"
+                )
+        self.update(" · ".join(parts))
 
 _HIGHLIGHT_SAT = 0.5
 _HIGHLIGHT_CACHE_MAX = 4
@@ -484,6 +618,17 @@ class ChatInput(TextArea):
             super().__init__()
             self.value = value
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # When ``True``, bare ``Enter`` on an empty buffer still emits
+        # ``Submitted("")`` rather than swallowing the keypress.  The
+        # app flips this on while a pending slot is pulled so the
+        # empty-Enter cancel gesture reaches
+        # :meth:`SaklasApp.on_chat_panel_user_submitted`, which uses
+        # the empty-text + pulled-slot pair to remove the queued
+        # item.
+        self.allow_empty_submit: bool = False
+
     async def _on_key(self, event: _textual_events.Key) -> None:
         # Bare Enter submits; ``shift+enter`` and ``ctrl+j`` both insert
         # a literal newline.  Two newline keys because ``shift+enter`` is
@@ -500,7 +645,7 @@ class ChatInput(TextArea):
             event.stop()
             event.prevent_default()
             text = self.text.strip()
-            if text:
+            if text or self.allow_empty_submit:
                 self.load_text("")
                 self.post_message(self.Submitted(text))
             return
@@ -534,6 +679,12 @@ class ChatPanel(Widget):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="chat-log")
         yield Static("", id="status-bar")
+        # Pending-queue strip — single-line summary of mid-gen
+        # submissions waiting for the next ``done``.  Hidden when the
+        # queue is empty.  Mounted between the status bar and the input
+        # so it lives in the same "below the log" footer region the
+        # user already reads for state.
+        yield PendingStrip()
         # Multi-line chat input.  ``show_line_numbers=False`` keeps the
         # editor chrome out; ``soft_wrap=True`` is the TextArea default
         # (long lines wrap visually without changing the underlying
@@ -553,6 +704,26 @@ class ChatPanel(Widget):
         self._log = self.query_one("#chat-log", VerticalScroll)
         self._status_bar = self.query_one("#status-bar", Static)
 
+    @property
+    def pending_strip(self) -> PendingStrip:
+        return self.query_one(PendingStrip)
+
+    def update_pending(
+        self, queue: list[PendingItem], *, pulled_slot: int | None = None,
+    ) -> None:
+        """Forward queue updates to the strip.  Safe before mount.
+
+        ``pulled_slot`` marks the queue position the user is currently
+        editing via the ↑-pull-and-edit path so the strip renders
+        that entry with the editing marker.
+        """
+        try:
+            self.pending_strip.update_queue(queue, pulled_slot=pulled_slot)
+        except Exception:
+            # Pre-mount: ``query_one`` raises ``NoMatches``.  The strip
+            # is freshly empty on mount, so a missed update is a no-op.
+            pass
+
     # All ``log`` / ``status_bar`` access happens after Textual's mount
     # lifecycle has run ``on_mount``, so the assertions below are
     # invariants — they exist to narrow the Optional for type checkers,
@@ -569,14 +740,22 @@ class ChatPanel(Widget):
 
     def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.value.strip()
-        if not text:
-            return
         # ChatInput already cleared its buffer; just re-post under the
         # canonical ChatPanel message.  The user-row mount is the app's
         # call, not ours: on a user-role active loom node a typed message
         # is an assistant prefill, not a new user turn, and only the app
         # knows the active node's role.  ``on_chat_panel_user_submitted``
-        # mounts the row for normal sends.
+        # mounts the row for normal sends.  An empty text reaches us
+        # only when ``ChatInput.allow_empty_submit`` is true — the
+        # cancel-pulled-slot gesture; the app routes it to slot
+        # removal.
+        try:
+            inp = self.query_one("#chat-input", ChatInput)
+            allow_empty = inp.allow_empty_submit
+        except Exception:
+            allow_empty = False
+        if not text and not allow_empty:
+            return
         self.post_message(self.UserSubmitted(text))
 
     def set_prefill_mode(self, on: bool) -> None:

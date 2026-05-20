@@ -28,6 +28,7 @@ from saklas.core.session import MIN_ELAPSED_FOR_RATE
 from saklas.tui.chat_panel import (
     ChatInput,
     ChatPanel,
+    PendingItem,
     _AssistantMessage,
     _TurnRow,
 )
@@ -222,6 +223,14 @@ class SaklasApp(App[None]):
         self._input_history: list[str] = []
         self._history_index: int | None = None
         self._history_stash: str = ""
+        # Pending-queue cursor (separate from ``_history_index`` so the
+        # two rings can interleave at the natural ↑-walks-newest-first
+        # boundary).  ``None`` = no pending slot is pulled; ``int`` =
+        # index into ``_pending_queue`` of the slot currently mirrored
+        # into the input box.  When the user re-submits while pulled
+        # the new item *replaces* slot ``_pulled_slot`` (preserves
+        # order); an empty re-submit *removes* the slot (cancel).
+        self._pulled_slot: int | None = None
         # ``_ab_mode`` is the persistent two-column-layout toggle (Ctrl+A);
         # ``_ab_shadow_active`` is the transient flag set while a shadow
         # gen worker is streaming — gates panels/highlight/probe-rack
@@ -240,7 +249,17 @@ class SaklasApp(App[None]):
         # we can locate the row to fire its shadow into without a tree
         # walk per gen.
         self._row_for_widget: dict[int, _TurnRow] = {}
-        self._pending_action: tuple[Any, ...] | None = None  # ("regenerate",) or ("submit", text)
+        # Mid-generation submissions queue here rather than tearing the
+        # in-flight stream down.  Drained one item per ``done`` event in
+        # :meth:`_poll_generation` via :meth:`_drain_next_pending`; the
+        # ``PendingStrip`` widget in the chat panel renders the live
+        # list so the user can see what's queued and pull items back
+        # for edit with ``↑``.  Replaces the v2.3 single-slot
+        # ``_pending_action: tuple | None`` — the old behavior was to
+        # call ``session.stop()`` and stash a tuple, which lost
+        # un-emitted tokens; the queue model keeps the current gen
+        # running and serializes the new work behind it.
+        self._pending_queue: list[PendingItem] = []
         # Phase-4 loom: stashed prune expression + auto-regen mode.  Phase 5
         # consumes them; phase 4 only carries the strings so users can set
         # them up before phase 5 evaluator lands.
@@ -487,37 +506,60 @@ class SaklasApp(App[None]):
 
     def on_chat_panel_user_submitted(self, event: ChatPanel.UserSubmitted) -> None:
         text = event.text
+        # Slot-preserving edit: when the user pulled a queued item via
+        # ↑/↓ the new submission lands at its original slot rather
+        # than appending at the tail.  Empty Enter while pulled is
+        # the cancel gesture — pull the slot via ↑, clear with
+        # ``Ctrl+U``, hit ``Enter`` and the slot is removed.  The
+        # symmetric "back out without removing" gesture is ``Esc``
+        # (handled in ``action_stop_generation``).
+        replace_slot = self._pulled_slot
+        self._pulled_slot = None
+        self._sync_pull_state()
+        if not text:
+            # Reached us only via the pulled-slot cancel path
+            # (``ChatInput.allow_empty_submit=True``).  Remove the
+            # slot and bail.
+            if replace_slot is not None:
+                self._remove_pending_slot(replace_slot)
+            return
         # Push to ↑/↓ history before dispatch so a slash command that
         # errors mid-handler is still recallable.
         self._push_input_history(text)
         if text.startswith("/"):
-            self._handle_command(text)
+            self._handle_command(text, replace_slot=replace_slot)
             return
         self._last_prompt = text
         # Role-aware send: when the active loom node is a user turn the
         # input seeds the *assistant* reply (answer-prefill) rather than
         # appending a new user message.  Decide once, here — the pending
-        # tuple carries the target so a deferred dispatch can't re-resolve
+        # item carries the target so a deferred dispatch can't re-resolve
         # against a shifted active node.
         prefill_target = self._prefill_target_node_id()
-        if prefill_target is None:
-            # Normal send — mount the user row now (chat_panel no longer
-            # mounts it; it can't know the active-node role).
-            self._chat_panel.add_user_message(text)
-        if self._session.is_generating:
+        if self._is_busy:
             # Queue the message — it will be submitted once the current
-            # generation finishes (see _poll_generation).
-            self._pending_action = ("submit", text, prefill_target)
-            self._session.stop()
+            # generation finishes (see _poll_generation).  Don't mount
+            # the user row up front; the deferred dispatch path takes
+            # care of it via ``_start_generation`` → row-mount on first
+            # token.  Mounting now would visually anchor the user turn
+            # to the wrong assistant reply.
+            self._enqueue_pending(
+                PendingItem("submit", text, (prefill_target,)),
+                replace_slot=replace_slot,
+            )
             return
+        if prefill_target is None:
+            # Immediate send — mount the user row now (chat_panel no
+            # longer mounts it; it can't know the active-node role).
+            self._chat_panel.add_user_message(text)
         if prefill_target is not None:
             self._start_prefill(prefill_target, text)
             return
         self._start_generation(text)
 
-    def _handle_command(self, text: str) -> None:
+    def _handle_command(self, text: str, *, replace_slot: int | None = None) -> None:
         from saklas.tui.commands import dispatch
-        dispatch(self, text)
+        dispatch(self, text, replace_slot=replace_slot)
 
     # -- /sys, /temp, /top-p, /max, /help (registry-callable shims) --
 
@@ -702,9 +744,15 @@ class SaklasApp(App[None]):
             return
         if pending_type is None:
             pending_type = "steer" if include_alpha else "probe"
-        if self._session.is_generating:
-            self._pending_action = (pending_type, text)
-            self._session.stop()
+        if self._is_busy:
+            # Reconstruct the canonical slash-command form so pulling
+            # the item back via ↑ surfaces something the user can
+            # re-Enter as a slash command.  ``payload[0]`` carries the
+            # raw args the dispatcher hands to the handler.
+            display_text = f"/{pending_type} {text}".rstrip()
+            self._enqueue_pending(
+                PendingItem(pending_type, display_text, (text,))
+            )
             return
         try:
             if include_alpha:
@@ -1087,13 +1135,31 @@ class SaklasApp(App[None]):
     # -- Generation --
 
     def action_stop_generation(self) -> None:
+        """``Esc`` — context-sensitive.
+
+        Priority order:
+        1. A generation is in flight → ``session.stop()``.  Mirrors
+           the GUI's Stop button: kills the current sibling, leaves
+           the queue untouched, drain proceeds on the resulting
+           ``done``.
+        2. No gen, a pending slot is pulled → cancel the pull
+           (restore the live stash, leave the slot in the queue).
+           Gives the user an out from a pulled-and-half-edited row
+           without committing or removing.
+        3. Otherwise → no-op.
+        """
         if self._session.is_generating:
             self._session.stop()
+            return
+        if self._pulled_slot is not None:
+            self._cancel_pull()
 
     async def action_quit(self) -> None:
-        if self._session.is_generating:
-            self._session.stop()
-            self._pending_action = ("quit",)
+        if self._is_busy:
+            # Queue quit behind any in-flight work — preserves "Stop
+            # only stops; queue drains on done" semantics.  Hit ``Esc``
+            # first if you want to short-circuit.
+            self._enqueue_pending(PendingItem("quit", "/quit"))
         else:
             self.exit()
 
@@ -1337,7 +1403,7 @@ class SaklasApp(App[None]):
         node it becomes a new user turn
         (``session.append_user_turn``).  No decode, no streaming.
 
-        Queues behind an in-flight generation via ``_pending_action`` so
+        Queues behind an in-flight generation via the pending queue so
         the commit lands once the current gen finishes — mounting a row
         mid-stream would interleave UI in confusing ways.
         """
@@ -1350,9 +1416,13 @@ class SaklasApp(App[None]):
             return
         inp.load_text("")
         self._push_input_history(text)
-        self._commit_with_text(text)
+        # Forward the pulled slot so a re-edited queued item stays at
+        # its original position rather than sliding to the queue tail.
+        replace_slot = self._pulled_slot
+        self._pulled_slot = None
+        self._commit_with_text(text, replace_slot=replace_slot)
 
-    def _commit_with_text(self, text: str) -> None:
+    def _commit_with_text(self, text: str, *, replace_slot: int | None = None) -> None:
         """Role-aware commit dispatch — text becomes the next turn.
 
         Shared between ``action_commit_text`` (Ctrl/Alt+Enter binding,
@@ -1364,19 +1434,22 @@ class SaklasApp(App[None]):
         reply.  Otherwise we commit a new user turn under the active
         node.
 
-        Honors the in-flight-generation queue the same way ``_handle_*``
-        slash handlers do: stash on ``_pending_action`` + call
-        ``session.stop()`` so the commit lands once the streaming
-        sibling finishes.
+        Honors the in-flight-generation queue: when busy, enqueues a
+        :class:`PendingItem` so the commit lands once the streaming
+        sibling finishes.  Per the queue contract, the in-flight gen
+        is *not* interrupted — use ``Esc`` if you want to short-
+        circuit.  ``replace_slot`` lets a pulled-and-re-edited slot
+        keep its original position in the queue.
         """
         user_node_id = self._prefill_target_node_id()
-        if self._session.is_generating:
-            kind = (
-                "commit_assistant" if user_node_id is not None else "commit_user"
-            )
-            payload = (kind, text, user_node_id) if user_node_id is not None else (kind, text)
-            self._pending_action = payload
-            self._session.stop()
+        if self._is_busy:
+            if user_node_id is not None:
+                item = PendingItem(
+                    "commit_assistant", text, (user_node_id,),
+                )
+            else:
+                item = PendingItem("commit_user", text)
+            self._enqueue_pending(item, replace_slot=replace_slot)
             return
         if user_node_id is not None:
             self._start_commit_assistant(user_node_id, text)
@@ -1553,7 +1626,7 @@ class SaklasApp(App[None]):
                 elif (
                     self._ab_mode
                     and widget is not None
-                    and self._pending_action is None
+                    and not self._pending_queue
                     and self._loom_auto_regen_mode == "unsteered"
                 ):
                     row = self._row_for_widget.get(id(widget))
@@ -1563,7 +1636,7 @@ class SaklasApp(App[None]):
                 elif (
                     self._loom_auto_regen_on
                     and self._loom_auto_regen_mode != "unsteered"
-                    and self._pending_action is None
+                    and not self._pending_queue
                     and widget is not None
                 ):
                     # Stream the modifier-regen output into the shadow
@@ -1579,10 +1652,10 @@ class SaklasApp(App[None]):
                         break
                     self._fire_auto_regen(None)
 
-                pending = self._pending_action
-                if pending is not None:
-                    self._pending_action = None
-                    self._dispatch_pending_action(pending)
+                # Drain one queued item per ``done`` — each item kicks
+                # off its own work whose ``done`` will re-enter here
+                # and drain the next, preserving FIFO.
+                self._drain_next_pending()
                 break
 
         if tokens_consumed > 0:
@@ -2003,9 +2076,9 @@ class SaklasApp(App[None]):
         if self._ab_shadow_active:
             chat.add_system_message("Cannot modify vectors during A/B shadow gen.")
             return
-        if self._session.is_generating:
-            self._pending_action = ("steer", f"{ns}/")
-            self._session.stop()
+        if self._is_busy:
+            arg = f"{ns}/"
+            self._enqueue_pending(PendingItem("steer", f"/steer {arg}", (arg,)))
             return
 
         from saklas.io.selectors import _all_concepts
@@ -2048,9 +2121,9 @@ class SaklasApp(App[None]):
         if self._ab_shadow_active:
             chat.add_system_message("Cannot modify vectors during A/B shadow gen.")
             return
-        if self._session.is_generating:
-            self._pending_action = ("probe", f"{ns}/")
-            self._session.stop()
+        if self._is_busy:
+            arg = f"{ns}/"
+            self._enqueue_pending(PendingItem("probe", f"/probe {arg}", (arg,)))
             return
 
         from saklas.io.selectors import _all_concepts
@@ -2164,47 +2237,137 @@ class SaklasApp(App[None]):
         self._history_stash = ""
 
     def _history_navigate(self, delta: int) -> None:
-        """Walk the recall ring by ``delta`` (-1 for ↑, +1 for ↓).
+        """Walk the combined ring of pending items + input history.
 
-        First ↑ from the live slot stashes whatever the user was typing
-        so a ↓ past the newest entry restores it. Bounds clamp at the
-        top (no error past the oldest); the bottom returns to the live
-        stash and clears the recall cursor.
+        Pending items come first (most-recently-queued is one ``↑`` from
+        live, oldest pending is one further ``↑``), then committed
+        input history (newest first).  ``↓`` walks the same ring in
+        reverse and clears the cursor when it returns to the live
+        slot, restoring the stash captured on the first ``↑``.
 
-        The chat input is a multi-line :class:`ChatInput` (TextArea), so
-        the recalled text replaces the entire buffer via ``load_text``
-        and the cursor lands at the end of the last line.
+        Pulling a pending slot via this walk sets ``_pulled_slot`` —
+        which makes the next ``Enter`` *replace* that slot rather than
+        append (slot-preserving edit) and the next ``Esc`` cancel
+        the pull (slot stays as-is).  An empty ``Enter`` while a
+        slot is pulled *removes* that slot (the keyboard equivalent
+        of the GUI's per-bubble ``×``).
+
+        The chat input is a multi-line :class:`ChatInput` (TextArea),
+        so the recalled text replaces the entire buffer via
+        ``load_text`` and the cursor lands at the end of the last line.
         """
-        if not self._input_history:
-            return
         try:
             inp = self.query_one("#chat-input", ChatInput)
         except Exception:
             return
 
-        if self._history_index is None:
+        n_pending = len(self._pending_queue)
+        n_history = len(self._input_history)
+        if n_pending == 0 and n_history == 0:
+            return
+
+        # Compose a position in the combined ring:
+        #   pos in [0, n_pending) — pending slot (n_pending-1-pos counts
+        #     back from the queue tail, so pos=0 is the most-recent
+        #     pending item — i.e. the first ``↑`` destination).
+        #   pos in [n_pending, n_pending + n_history) — history offset
+        #     (newest at n_pending, oldest at the end).
+        #   pos == -1 — sentinel for "live slot, no cursor."
+        cur_pos = self._current_input_cursor_pos()
+        if cur_pos < 0:
             if delta > 0:
-                # Already at the live slot — ↓ is a no-op.
-                return
+                return  # Already at live slot — ``↓`` is a no-op.
+            # First ``↑`` from live — stash whatever the user typed so
+            # ``↓`` past the newest entry restores it.
             self._history_stash = inp.text
-            self._history_index = len(self._input_history) - 1
+            new_pos = 0
         else:
-            new_idx = self._history_index + delta
-            if new_idx < 0:
-                # Past the oldest — pin to entry 0 rather than wrapping
-                # or erroring; matches readline.
-                self._history_index = 0
-            elif new_idx >= len(self._input_history):
-                # Walked past the newest entry — restore the stash and
-                # reset the cursor so the next ↑ re-stashes fresh input.
+            # ``↑`` (delta<0) walks toward older items — increment the
+            # ring position.  ``↓`` (delta>0) walks toward newer items
+            # and eventually back to the live slot — decrement.
+            new_pos = cur_pos + (1 if delta < 0 else -1)
+            if new_pos >= n_pending + n_history:
+                # Past the oldest history entry — pin to it; matches
+                # readline (no wrap, no error).
+                new_pos = n_pending + n_history - 1
+            elif new_pos < 0:
+                # Past the newest pending item / newest history entry —
+                # back to live.  Restore the stash and reset the cursor.
+                self._pulled_slot = None
                 self._history_index = None
                 self._set_input_text(inp, self._history_stash)
                 self._history_stash = ""
+                self._sync_pull_state()
                 return
-            else:
-                self._history_index = new_idx
 
-        self._set_input_text(inp, self._input_history[self._history_index])
+        # Apply the new position.
+        if new_pos < n_pending:
+            slot = n_pending - 1 - new_pos
+            self._pulled_slot = slot
+            self._history_index = None
+            self._set_input_text(inp, self._pending_queue[slot].text)
+        else:
+            self._pulled_slot = None
+            self._history_index = (n_pending + n_history - 1) - new_pos
+            self._set_input_text(inp, self._input_history[self._history_index])
+        self._sync_pull_state()
+
+    def _current_input_cursor_pos(self) -> int:
+        """Return the combined-ring position of the current cursor.
+
+        ``-1`` = live slot.  See :meth:`_history_navigate` for the
+        encoding of pending and history positions.
+        """
+        n_pending = len(self._pending_queue)
+        if self._pulled_slot is not None and 0 <= self._pulled_slot < n_pending:
+            return n_pending - 1 - self._pulled_slot
+        if self._history_index is not None:
+            n_history = len(self._input_history)
+            if 0 <= self._history_index < n_history:
+                return n_pending + (n_history - 1 - self._history_index)
+        return -1
+
+    def _cancel_pull(self) -> None:
+        """``Esc`` while a pending slot is pulled — restore the live stash.
+
+        Leaves the slot in the queue untouched; the user backed out
+        of the edit but didn't cancel the queued action.
+        """
+        if self._pulled_slot is None:
+            return
+        try:
+            inp = self.query_one("#chat-input", ChatInput)
+        except Exception:
+            self._pulled_slot = None
+            self._sync_pull_state()
+            return
+        self._pulled_slot = None
+        self._history_index = None
+        self._set_input_text(inp, self._history_stash)
+        self._history_stash = ""
+        self._sync_pull_state()
+
+    def _sync_pull_state(self) -> None:
+        """Reflect ``_pulled_slot`` into the chat input + pending strip.
+
+        Two things follow from a pull change:
+
+        * :attr:`ChatInput.allow_empty_submit` flips on while pulled
+          so an empty ``Enter`` reaches the dispatcher as the slot-
+          cancel gesture (mirrors the GUI's per-bubble ``×``).
+        * The :class:`PendingStrip` re-renders so the ``✎`` editing
+          marker tracks the currently-pulled slot.
+
+        Single helper called from every site that mutates
+        ``_pulled_slot`` so the two derived surfaces stay in lockstep.
+        """
+        try:
+            inp = self.query_one("#chat-input", ChatInput)
+        except Exception:
+            pass
+        else:
+            inp.allow_empty_submit = self._pulled_slot is not None
+        self._refresh_pending_strip()
 
     @staticmethod
     def _set_input_text(inp: ChatInput, text: str) -> None:
@@ -2449,9 +2612,100 @@ class SaklasApp(App[None]):
         else:
             chat.add_system_message("Usage: /compare <name> [other_name]")
 
-    def _dispatch_pending_action(self, pending: tuple) -> None:
+    # -- Pending queue --------------------------------------------------
+
+    def _enqueue_pending(
+        self,
+        item: PendingItem,
+        *,
+        replace_slot: int | None = None,
+    ) -> None:
+        """Append ``item`` to the pending queue (or replace a slot in place).
+
+        ``replace_slot`` is the slot the user pulled into the input box
+        via the up-arrow walk; passing it keeps a re-submitted edit at
+        its original position rather than dropping it to the tail of
+        the queue.  Out-of-range values fall back to append.
+
+        After mutation the chat panel's :class:`PendingStrip` is
+        refreshed so the visible list stays in sync.
+        """
+        q = self._pending_queue
+        if (
+            replace_slot is not None
+            and 0 <= replace_slot < len(q)
+        ):
+            q[replace_slot] = item
+        else:
+            q.append(item)
+        self._refresh_pending_strip()
+
+    def _remove_pending_slot(self, slot: int) -> None:
+        """Drop a pulled slot from the queue (empty-input re-submit / cancel)."""
+        q = self._pending_queue
+        if 0 <= slot < len(q):
+            del q[slot]
+            self._refresh_pending_strip()
+
+    def _refresh_pending_strip(self) -> None:
+        """Push the queue + pulled-slot into the chat panel's strip.
+
+        Single funnel so callers don't have to remember to forward
+        ``_pulled_slot``; any mutation that touches either the queue
+        or the pulled state should call this.
+        """
+        self._chat_panel.update_pending(
+            self._pending_queue, pulled_slot=self._pulled_slot,
+        )
+
+    def _drain_next_pending(self) -> bool:
+        """Pop and dispatch the head of the pending queue.
+
+        Returns ``True`` when an item ran, ``False`` when the queue
+        was empty.  Called from :meth:`_poll_generation`'s ``done``
+        branch — one item per ``done`` keeps the FIFO contract clean
+        across worker-spawning items (each kicks its own gen, the new
+        ``done`` re-enters here for the next item).
+
+        Keeps :attr:`_pulled_slot` accounting honest across the pop:
+        if the user pulled slot 0 we cancel the pull (the slot they
+        were editing is now being dispatched); if they pulled a
+        later slot we decrement the index so they keep tracking the
+        same item.
+        """
+        if not self._pending_queue:
+            return False
+        if self._pulled_slot is not None:
+            if self._pulled_slot == 0:
+                self._cancel_pull()
+            else:
+                self._pulled_slot -= 1
+        item = self._pending_queue.pop(0)
+        self._refresh_pending_strip()
+        self._dispatch_pending_action(item)
+        return True
+
+    @property
+    def _is_busy(self) -> bool:
+        """Engine running, UI still draining ``done``, or queue non-empty.
+
+        Used as the gate at every submission site to decide enqueue vs
+        immediate dispatch.  Including the queue catches the case where
+        a chain of pending items keeps the engine idle between drains
+        — without this gate a fast user could race the next drain and
+        scramble the queue order.
+        """
+        return bool(
+            self._session.is_generating
+            or self._ui_gen_active
+            or self._pending_queue
+        )
+
+    def _dispatch_pending_action(self, item: PendingItem) -> None:
         """Handle a queued action dispatched once the current gen finishes."""
-        kind = pending[0]
+        kind = item.kind
+        text = item.text
+        payload = item.payload
         chat = self._chat_panel
         try:
             if kind == "regenerate":
@@ -2459,25 +2713,29 @@ class SaklasApp(App[None]):
                 chat.rewind_last_assistant()
                 self._start_generation()
             elif kind == "submit":
-                # ``("submit", text, prefill_target)`` — phase 5 carries
-                # the role decision made at submit time so the deferred
-                # dispatch matches whatever the user-row mount did.  A
-                # legacy 2-tuple stash falls through to a normal send.
-                target = pending[2] if len(pending) > 2 else None
+                # Phase 5 carries the role decision made at submit time
+                # so the deferred dispatch matches whatever the user-row
+                # mount did.  ``payload[0]`` is the optional
+                # ``prefill_target`` node id.  Mount the user row here
+                # (deferred from queueing) so the row appears alongside
+                # the new assistant reply rather than floating above the
+                # previous in-flight one.
+                target = payload[0] if payload else None
                 if target is not None:
-                    self._start_prefill(target, pending[1])
+                    self._start_prefill(target, text)
                 else:
-                    self._start_generation(pending[1])
+                    self._chat_panel.add_user_message(text)
+                    self._start_generation(text)
             elif kind == "commit_user":
-                # ``("commit_user", text)`` — Ctrl+Enter from a non-user
-                # active node, queued behind in-flight gen.  The role
-                # decision was made at submit time so we don't re-resolve
-                # it here (the active node may have shifted during gen).
-                self._start_commit_user(pending[1])
+                # Ctrl+Enter from a non-user active node, queued behind
+                # in-flight gen.  The role decision was made at submit
+                # time so we don't re-resolve it here (the active node
+                # may have shifted during gen).
+                self._start_commit_user(text)
             elif kind == "commit_assistant":
-                # ``("commit_assistant", text, user_node_id)`` — Ctrl+Enter
-                # from a user node, queued behind in-flight gen.
-                self._start_commit_assistant(pending[2], pending[1])
+                # Ctrl+Enter from a user node, queued behind in-flight
+                # gen.  ``payload[0]`` is the user node id.
+                self._start_commit_assistant(payload[0], text)
             elif kind == "clear":
                 self._do_clear()
             elif kind == "rewind":
@@ -2485,27 +2743,27 @@ class SaklasApp(App[None]):
                 chat.rewind_last_assistant()
                 self._do_rewind()
             elif kind == "steer":
-                self._handle_steer(pending[1])
+                # ``text`` is the canonical slash form (``/steer …``);
+                # ``payload[0]`` is the raw arg string the handler
+                # actually consumes.
+                self._handle_steer(payload[0] if payload else text)
             elif kind == "probe":
-                self._handle_probe(pending[1])
+                self._handle_probe(payload[0] if payload else text)
             elif kind == "extract":
-                self._handle_extract_only(pending[1])
+                self._handle_extract_only(payload[0] if payload else text)
             elif kind == "regen_n":
                 # N-way regen after an interrupting gen completes; phase
-                # 1's engine serializes via ``generate(n=N)``.  Phase 5
-                # tuple is ``("regen_n", n, mode_or_None)``; the legacy
-                # 2-tuple stays accepted for any in-flight stash from
-                # before the bump.
-                n = pending[1]
-                mode = pending[2] if len(pending) > 2 else None
+                # 1's engine serializes via ``session.generate(n=N)``.
+                # ``payload = (n, mode_or_None)``.
+                n = payload[0]
+                mode = payload[1] if len(payload) > 1 else None
                 if mode is not None:
                     self._run_regen_modifier_worker(n, mode)
                 else:
                     self._run_regen_n_worker(n)
             elif kind == "fan":
-                # ``("fan", vector, alphas, prompt)`` — same shape we
-                # stashed in ``_dispatch_loom_fan_alphas``.
-                _, vector, alphas, prompt = pending
+                # ``payload = (vector, alphas, prompt)``.
+                vector, alphas, prompt = payload
                 self._run_fan_worker(vector, alphas, prompt)
             elif kind == "quit":
                 self.exit()
@@ -2516,7 +2774,9 @@ class SaklasApp(App[None]):
             import traceback
             traceback.print_exc(file=sys.stderr)
             self._ui_gen_active = False
-            self._pending_action = None
+            self._pending_queue.clear()
+            self._pulled_slot = None
+            self._sync_pull_state()
             self._current_assistant_widget = None
             chat.add_system_message(f"error dispatching {kind}: {e}")
 
@@ -2550,11 +2810,10 @@ class SaklasApp(App[None]):
     def action_regenerate(self) -> None:
         if not self._messages:
             return
-        if self._session.is_generating:
-            # Stop the current generation; _poll_generation will pick up
-            # the pending action once the worker thread finishes.
-            self._pending_action = ("regenerate",)
-            self._session.stop()
+        if self._is_busy:
+            # Queue the regen — runs after current gen + any earlier
+            # pending items finish.  Hit ``Esc`` first to short-circuit.
+            self._enqueue_pending(PendingItem("regenerate", "regen"))
             return
         # Loom: move active up so the next gen creates a sibling under
         # the user-parent rather than a child of the old assistant.
@@ -2980,11 +3239,14 @@ class SaklasApp(App[None]):
             chat.add_system_message("/fan: no prior prompt to fan out from.")
             return
 
-        # Stash structural info on _pending_action so the worker can pick
-        # it up if a gen is in flight.
-        if self._session.is_generating or self._ui_gen_active:
-            self._pending_action = ("fan", vector, alphas, prompt)
-            self._session.stop()
+        # Queue the fan-out behind any in-flight work; ``_run_fan_worker``
+        # is invoked by ``_dispatch_pending_action`` once the queue head
+        # is drained.
+        if self._is_busy:
+            display_text = f"/fan {vector} ({len(alphas)} α)"
+            self._enqueue_pending(
+                PendingItem("fan", display_text, (vector, alphas, prompt))
+            )
             return
         self._run_fan_worker(vector, alphas, prompt)
 
@@ -3067,11 +3329,13 @@ class SaklasApp(App[None]):
         ``session.regen_with_modifier``.  ``mode`` accepts the built-in
         strings or a :class:`Recipe` partial for the custom-mode path.
         When a gen is already running we defer through
-        ``_pending_action`` like every other interrupting slash command.
+        the pending queue like every other interrupting slash command.
         """
-        if self._session.is_generating or self._ui_gen_active:
-            self._pending_action = ("regen_n", n, mode)
-            self._session.stop()
+        if self._is_busy:
+            mode_tag = f" {mode}" if isinstance(mode, str) else ""
+            self._enqueue_pending(
+                PendingItem("regen_n", f"/regen {n}{mode_tag}", (n, mode))
+            )
             return
         if mode is not None:
             self._run_regen_modifier_worker(n, mode)

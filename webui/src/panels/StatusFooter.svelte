@@ -11,31 +11,19 @@
     genStatus,
     geometricMeanPpl,
     pendingActions,
-    applyPendingActions,
-    sendStop,
-    onWsMessage,
   } from "../lib/stores.svelte";
 
-  // Pending-actions badge — relocated here from the retired Topbar.  It
-  // interrupts an in-flight gen to flush queued rack/sampling changes.
+  // Pending-queue badge — counts the items waiting in the FIFO queue.
+  // Under the v2.x queue semantics, drain is automatic on every WS
+  // ``done`` event; the per-bubble ``×`` in the chat-side
+  // PendingBubbles strip handles cancellation, so there's no "apply
+  // now" button here anymore.  The badge stays as a status readout.
   const pendingCount = $derived(pendingActions.queue.length);
-
-  // Stop-then-flush.  Subscribes once to the WS done event, sends stop,
-  // then drains the queue when done lands.  If no gen is active, flush
-  // immediately.
-  function applyNow(): void {
-    if (!genStatus.active) {
-      applyPendingActions();
-      return;
-    }
-    const off = onWsMessage((msg) => {
-      if (msg.type === "done" || msg.type === "error") {
-        // Store's own handler already drains the queue on done/error.
-        off();
-      }
-    });
-    sendStop();
-  }
+  const pendingTitle = $derived(
+    pendingCount === 1
+      ? "1 item queued; drains automatically on the next done event"
+      : `${pendingCount} items queued; drain automatically on each done event`,
+  );
 
   // Live elapsed counter — ticks while gen is active, freezes on done so
   // the user can still read the final timing after the generation lands.
@@ -101,14 +89,9 @@
   {/if}
 
   {#if pendingCount > 0}
-    <button
-      class="pending-badge"
-      type="button"
-      onclick={applyNow}
-      title="Apply queued rack and sampling changes; interrupts in-flight gen if needed"
-    >
-      {pendingCount} change{pendingCount === 1 ? "" : "s"} pending · apply now
-    </button>
+    <span class="pending-badge" title={pendingTitle}>
+      {pendingCount} queued
+    </span>
   {/if}
 </footer>
 
@@ -150,7 +133,9 @@
     align-items: center;
   }
 
-  /* Pending-actions badge — pushed to the right edge of the footer. */
+  /* Pending-queue badge — status readout pushed to the right edge.
+   * Display-only; per-item cancel lives on the PendingBubbles strip
+   * above the composer. */
   .pending-badge {
     margin-left: auto;
     background: rgba(242, 184, 75, 0.12);
@@ -160,10 +145,5 @@
     border-radius: var(--radius);
     font-size: var(--text-sm);
     font-family: var(--font-ui);
-    cursor: pointer;
-    transition: background var(--dur) var(--ease-out);
-  }
-  .pending-badge:hover {
-    background: rgba(242, 184, 75, 0.2);
   }
 </style>

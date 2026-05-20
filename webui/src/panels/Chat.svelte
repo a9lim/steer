@@ -17,6 +17,7 @@
   import { onMount, untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
   import StatusFooter from "./StatusFooter.svelte";
+  import PendingBubbles from "./PendingBubbles.svelte";
   import {
     autoRegenState,
     chatLog,
@@ -33,14 +34,19 @@
     genStatus,
     openDrawer,
     inputHistory,
+    inputRestore,
     pushInputHistory,
     navigateInputHistory,
+    cancelInputPull,
+    consumePulledSlot,
     clearSessionHistory,
     rewindSession,
     sendPrefill,
     sendCommit,
     loomRegenerateFromUser,
     enqueuePending,
+    pendingActions,
+    cancelPendingAction,
     toggleAutoRegen,
     setAutoRegenMode,
     setAutoRegenCustom,
@@ -148,12 +154,23 @@
    *  consumes rather than degrading to a regenerate. */
   function tryCommit(): boolean {
     const text = input.trim();
-    if (!text) return true;  // no-op, but consume
+    // Forward the pulled slot (if any) so a re-edited queued commit
+    // lands at its original position rather than appending to the
+    // tail.  ``consumePulledSlot`` clears the pull state in one call.
+    const replaceSlot = consumePulledSlot();
+    if (!text) {
+      // Empty commit on a pulled slot is the cancel gesture — drop
+      // the slot from the queue.
+      if (replaceSlot !== null) {
+        cancelPendingAction(pendingActions.queue[replaceSlot]?.id ?? "");
+      }
+      return true;  // consumed
+    }
     if (onUserNode) {
       if (!activeNodeId) return true;
       pushInputHistory(text);
       input = "";
-      void sendCommit("assistant", activeNodeId, text);
+      void sendCommit("assistant", activeNodeId, text, { replaceSlot });
     } else {
       // Active node is root/assistant.  Pass it as the parent so the
       // server anchors the new user node under it (active-node fall-
@@ -161,7 +178,7 @@
       // mid-flight active-node swap).
       pushInputHistory(text);
       input = "";
-      void sendCommit("user", activeNodeId, text);
+      void sendCommit("user", activeNodeId, text, { replaceSlot });
     }
     scrolledUp = false;
     queueScrollToBottom();
@@ -181,10 +198,14 @@
       // (it decides whether the continuation starts a fresh word).
       const raw = input;
       const trimmed = raw.trim();
+      const replaceSlot = consumePulledSlot();
       input = "";
       if (trimmed) {
         pushInputHistory(trimmed);
-        void sendPrefill(activeNodeId, raw);
+        void sendPrefill(activeNodeId, raw, { replaceSlot });
+      } else if (replaceSlot !== null) {
+        // Empty prefill on a pulled slot cancels the queued item.
+        cancelPendingAction(pendingActions.queue[replaceSlot]?.id ?? "");
       } else {
         void loomRegenerateFromUser(activeNodeId);
       }
@@ -194,14 +215,22 @@
       return;
     }
     const text = input.trim();
-    if (!text) return;
+    const replaceSlot = consumePulledSlot();
+    if (!text) {
+      // Empty send on a pulled slot cancels the queued item; otherwise
+      // a no-op.
+      if (replaceSlot !== null) {
+        cancelPendingAction(pendingActions.queue[replaceSlot]?.id ?? "");
+      }
+      return;
+    }
     // Push to ↑/↓ recall before clearing — covers both chat messages
     // and slash commands (every line typed in here is recallable).
     pushInputHistory(text);
     input = "";
     // Defer the actual send so the textarea clears before the WS round-
     // trip — feels less like the UI froze.
-    void sendGenerate(text);
+    void sendGenerate(text, { replaceSlot });
     // Force-scroll to bottom on send regardless of where the user was.
     scrolledUp = false;
     queueScrollToBottom();
@@ -252,10 +281,26 @@
       doSend(ev.ctrlKey || ev.metaKey || ev.altKey);
       return;
     }
-    if (ev.key === "Escape" && genStatus.active) {
-      ev.preventDefault();
-      sendStop();
-      return;
+    if (ev.key === "Escape") {
+      // Esc is context-sensitive (mirrors the TUI):
+      //   1. Gen in flight → stop the gen.  Queue keeps its items.
+      //   2. No gen, pull in flight → cancel the pull (restore the
+      //      stash, leave the queued slot untouched).
+      //   3. Otherwise → fall through to default Escape behavior.
+      if (genStatus.active) {
+        ev.preventDefault();
+        sendStop();
+        return;
+      }
+      if (inputHistory.pulledSlot !== null) {
+        ev.preventDefault();
+        const stash = cancelInputPull();
+        if (stash !== null) {
+          input = stash;
+          queueMicrotask(autosize);
+        }
+        return;
+      }
     }
     if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
       const ta = textareaRef;
@@ -326,8 +371,14 @@
   }
 
   function clearChat(): void {
-    if (genStatus.active) {
-      enqueuePending({ label: "clear", apply: () => void clearSessionHistory() });
+    if (genStatus.active || pendingActions.queue.length > 0) {
+      enqueuePending({
+        label: "/clear",
+        text: null,
+        apply: () => void clearSessionHistory(),
+        awaitsGen: false,
+        rebuild: null,
+      });
     } else {
       void clearSessionHistory();
     }
@@ -338,8 +389,14 @@
     // the local log may have shifted.
     const input = lastUserInput();
     if (input === null) return;
-    if (genStatus.active) {
-      enqueuePending({ label: "regen", apply: () => void regen(input) });
+    if (genStatus.active || pendingActions.queue.length > 0) {
+      enqueuePending({
+        label: "regen",
+        text: null,
+        apply: () => void regen(input),
+        awaitsGen: true,
+        rebuild: null,
+      });
     } else {
       void regen(input);
     }
@@ -439,6 +496,19 @@
     const cur = collapsedThinking.get(turnIdx) ?? true;
     collapsedThinking.set(turnIdx, !cur);
   }
+
+  // Cross-component input restore: when a queue drain pops the slot
+  // the user was currently editing, ``drainNextPendingAction`` parks
+  // the stash on ``inputRestore`` and bumps ``rev``.  This $effect
+  // copies it back into the textarea on the next tick.
+  let _restoreRev = $state(0);
+  $effect(() => {
+    if (inputRestore.rev !== _restoreRev) {
+      _restoreRev = inputRestore.rev;
+      input = inputRestore.text;
+      queueMicrotask(autosize);
+    }
+  });
 
   // ------------------------------------------------------ scroll bookkeeping --
 
@@ -859,6 +929,8 @@
   </div>
 
   <StatusFooter />
+
+  <PendingBubbles />
 
   <form class="input-row" onsubmit={(ev) => { ev.preventDefault(); doSend(modHeld); }}>
     <textarea

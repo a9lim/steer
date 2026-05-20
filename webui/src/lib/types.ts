@@ -760,14 +760,28 @@ export interface GenStatus {
 
 // ----------------------------------------------------- pending actions --
 
-/** Actions queued during in-flight generation.  ``apply`` is the closure
- * the store invokes once the WS ``done`` event arrives (or immediately
- * if the user hits "apply now").  ``label`` shows in the status-footer
- * pending badge for traceability. */
+/** Actions queued during in-flight generation.
+ *
+ * The queue drains one item per WS ``done`` event in arrival order —
+ * each ``apply`` either kicks off another gen (``awaitsGen=true``,
+ * the next drain waits for that gen's own ``done``) or completes
+ * instantly (``awaitsGen=false``, the next drain fires immediately).
+ *
+ * ``text`` is the user-facing string for the chat-side pending
+ * bubble and the ↑-pull-and-edit re-issue path; ``rebuild`` is a
+ * factory the input recall path calls to re-encode a pulled-and-
+ * edited item with the same kind/role/target unchanged.  Both are
+ * ``null`` for non-editable items (instant mutations like
+ * ``clearChat`` / ``regen``) — those render as ghosted action chips
+ * and can't be pulled, only cancelled with the ``×``.
+ */
 export interface PendingAction {
   id: string;
   label: string;
+  text: string | null;
   apply: () => void | Promise<void>;
+  awaitsGen: boolean;
+  rebuild: ((newText: string) => PendingAction) | null;
   createdAt: number;
 }
 

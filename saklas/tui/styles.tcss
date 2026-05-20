@@ -121,6 +121,20 @@ Widget {
     padding: 0 1;
 }
 
+/* Pending-queue strip — ghosted summary above the chat input.  Hugs the
+ * status bar; the dim text + yellow ``pending N`` counter mirrors the
+ * GUI's pending bubbles.  ``.hidden`` collapses the strip to zero height
+ * when the queue is empty so the layout is unchanged in the common
+ * idle case. */
+#pending-strip {
+    height: 1;
+    background: ansi_default;
+    color: ansi_default;
+    padding: 0 1;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+
 /* ChatInput (TextArea subclass): single visible row by default, grows
  * with content up to a small cap so the chat log stays the focus of the
  * screen.  ``height: auto`` lets the widget hug its content; the
